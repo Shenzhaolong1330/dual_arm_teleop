@@ -1,78 +1,27 @@
-# Franka Teleoperation Data Collection with Isomorphic Joint Mapping and End-Effector Pose
+# Dual Dobot End-Effector Pose Teleoperation and Data Collection System
 
 ## Introduction 
-This project is a teleoperation data collection tool for Franka Research 3 robot (should compatible with Franka Panda), embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
-
-It supports the master-slave isomorphic joint mapping control of the robot, and collect the teleoperation data in LeRobot dataset format.
+This project is a teleoperation data collection tool for dual Dobot robot arm, embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
 
 <p align="center">
   <img src="assets/robot.png" alt="Record" width="600">
   <br>
 </p>
 
-### New Support
-
-Now we support the end-effector pose control using [SpaceMouse](https://3dconnexion.com/) devices.
-
-<p align="center">
-  <img src="assets/spacemouse.png" alt="Record" width="600">
-  <br>
-</p>
-
- The SpaceMouse is a 6-axis input device that can be used to control the end pose of the robot. The left button is used to open the gripper, and the right button is used to close the gripper.
-
-### New Support 2
-
-Now we support the end-effector pose control using Oculus Quest 3/3s devices.
+It supports the end-effector pose control of the robot using Oculus Quest 3/3s devices, and collect the teleoperation data in LeRobot dataset format.
 
 <p align="center">
   <img src="assets/quest3s.jpg" alt="Oculus Quest" width="600">
   <br>
 </p>
 
-The Oculus Quest controller provides 6-DoF tracking for intuitive end-effector control. The right controller is used for robot manipulation with the following controls:
-
-- **RG (Right Grip)**: Must be pressed to enable robot movement
-- **RTr (Right Trigger)**: Controls gripper (press to close, release to open)
-- **A Button**: Request robot reset
-- **Right controller pose**: Controls end-effector delta pose
-
-## 0. Franka Control Instructions
-
-In this version, we use [Polymetis](https://polymetis-docs.github.io/) to control Franka. Since Polymetis does not support Python 3.10 and is recommended to run on NUC separately, we use Zerorpc for remote communication implementation. The specific process is as follows:
-
-### 0.1 Install [Polymetis](https://polymetis-docs.github.io/) on NUC
-
-We have open-sourced the optimized source code for Franka at [Polymetis](https://github.com/Shenzhaolong1330/fairo-franka/tree/main). For detailed installation instructions, please refer to [FRANKA.md](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/FRANKA.md).
-
-### 0.2. Start Server on NUC
-
-Start [launch_robot](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/scripts/launch_robot.py), [launch_gripper](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/scripts/launch_gripper.py), and [franka_interface_server](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/polymetis/franka_interface_server.py) respectively.
-
-```
-# On the NUC
-python launch_robot.py robot_client=franka_hardware
-python launch_gripper.py gripper=franka_hand
-python franka_interface_server.py
-```
-
-<!-- ### 0.3 Start [interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py) locally
-
-Before attempting to connect to Franka, start the [interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py).
-
-```
-# On the local machine
-python franka_interface_client.py
-```
-
-The functions in the [interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py) are basically the same as those in Polymetis. For usage, please refer to [Polymetis](https://polymetis-docs.github.io/).
-         -->
+The Oculus Quest controller provides 6-DoF tracking for intuitive end-effector control. 
 
 ## 1. Environment Setup
 ### 1.1 Create and Activate Conda Environment
 ```bash
-conda create -n franka_data python=3.10
-conda activate franka_data
+conda create -n dobot_data python=3.10
+conda activate dobot_data
 ```
 
 ### 1.2 Install lerobot
