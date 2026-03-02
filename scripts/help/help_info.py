@@ -1,31 +1,31 @@
 def main():
     print("""
 ==================================================
- Franka Teleoperation Utilities - Command Reference
+ Dobot Nova5 Dual-Arm Teleoperation - Command Reference
 ==================================================
 
 Core Commands:
-  franka-record           Record teleoperation dataset
-  franka-replay           Replay a recorded dataset
-  franka-visualize        Visualize recorded dataset
-  franka-reset           Reset the robot to initial state
-  franka-train          Train a policy on the recorded dataset
+  dobot-record           Record teleoperation dataset
+  dobot-replay           Replay a recorded dataset
+  dobot-visualize        Visualize recorded dataset
+  dobot-reset            Reset the robot to initial state
+  dobot-train            Train a policy on the recorded dataset
 
 Utility Commands:
-  utils-joint-offsets   Compute joint offsets for teleoperation
+  utils-joint-offsets    Compute joint offsets for teleoperation
 
 Tool Commands:
-  tools-check-dataset   Check local dataset information
-  tools-check-rs        Retrieve connected RealSense camera serial numbers
+  tools-check-dataset    Check local dataset information
+  tools-check-rs         Retrieve connected RealSense camera serial numbers
+  tools-check-robotiq    Check Robotiq gripper serial ports
 
 Shell Tools:
-  map_gripper.sh        Map Gripper Serial Port
-  check_master_port.sh  Get the Master Arm's Persistent Serial Identifier
+  check_robotiq_ports.sh  Get Robotiq gripper serial ports
 
 Test Commands:
-  test-gripper-ctrl     Run gripper control command (operate the gripper)
+  test-gripper-ctrl      Run gripper control command (operate the gripper)
 
 --------------------------------------------------
- Tip: Use 'franka-help' anytime to see this summary.
+ Tip: Use 'dobot-help' anytime to see this summary.
 ==================================================
 """)

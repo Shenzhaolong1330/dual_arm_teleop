@@ -1,18 +1,18 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="lerobot_teleoperator_franka",
+    name="lerobot_robot",
     version="0.0.1",
-    description="LeRobot teleoperator integration",
+    description="LeRobot robot integration",
     author="Zhaolong Shen",
     author_email="shenzhaolong@buaa.edu.cn",
     packages=find_packages(),
-    python_requires=">=3.10",
     install_requires=[
-        "dynamixel_sdk",
-        "easyhid",
-        "placo"
+        "pyrealsense2",
+        "scipy",
+        "zerorpc",
     ],
+    python_requires=">=3.10",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: OS Independent",

@@ -4,7 +4,7 @@ import logging
 logging.basicConfig(level=logging.WARNING, format="%(message)s")
 from pathlib import Path
 from typing import Dict, Any
-from lerobot_robot_franka import FrankaConfig, Franka
+from lerobot_robot import DobotDualArmConfig, DobotDualArm
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import log_say
@@ -18,22 +18,21 @@ class ReplayConfig:
         self.episode_idx: str = cfg.get("episode_idx", 0)
 
         # robot config
-        self.robot_ip: str = robot["ip"]
-        # self.gripper_port: str = robot["gripper_port"]
-        self.control_mode: str = cfg["control_mode"]
+        self.left_arm_port: int = robot.get("left_arm_port", 4242)
+        self.right_arm_port: int = robot.get("right_arm_port", 4243)
+        self.control_mode: str = cfg.get("control_mode", "oculus")
 
 def run_replay(replay_cfg: ReplayConfig):
     episode_idx = replay_cfg.episode_idx
 
-    robot_config = FrankaConfig(
-        robot_ip=replay_cfg.robot_ip,
-        # gripper_port=replay_cfg.gripper_port,
-        debug = False,
-        gripper_reverse = False,
-        control_mode = replay_cfg.control_mode
+    robot_config = DobotDualArmConfig(
+        left_arm_port=replay_cfg.left_arm_port,
+        right_arm_port=replay_cfg.right_arm_port,
+        debug=False,
+        control_mode=replay_cfg.control_mode
     )
     
-    robot = robot = Franka(robot_config)
+    robot = DobotDualArm(robot_config)
     robot.connect()
     dataset = LeRobotDataset(replay_cfg.dataset_name, episodes=[episode_idx])
     actions = dataset.hf_dataset.select_columns("action")

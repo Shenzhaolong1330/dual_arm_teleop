@@ -1,12 +1,17 @@
-# Dual Dobot End-Effector Pose Teleoperation and Data Collection System
+# Dual Arm End-Effector Pose Teleoperation and Data Collection System
 
 ## Introduction 
-This project is a teleoperation data collection tool for dual Dobot robot arm, embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
+This project is a teleoperation data collection tool for dual robot arm (Dual Dobot Nova 5 and ARX LIFT), embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
 
 <p align="center">
-  <img src="assets/robot.png" alt="Record" width="600">
+  <img src="assets/dobot.jpeg" alt="Record" width="600">
   <br>
 </p>
+<p align="center">
+  <img src="assets/arx.jpeg" alt="Record" width="600">
+  <br>
+</p>
+
 
 It supports the end-effector pose control of the robot using Oculus Quest 3/3s devices, and collect the teleoperation data in LeRobot dataset format.
 
@@ -20,8 +25,8 @@ The Oculus Quest controller provides 6-DoF tracking for intuitive end-effector c
 ## 1. Environment Setup
 ### 1.1 Create and Activate Conda Environment
 ```bash
-conda create -n dobot_data python=3.10
-conda activate dobot_data
+conda create -n dual_arm_data python=3.10
+conda activate dual_arm_data
 ```
 
 ### 1.2 Install lerobot
@@ -34,28 +39,28 @@ git checkout da5d2f3e9187fa4690e6667fe8b294cae49016d6
 pip install -e .
 ```
 
-### 1.3 Clone and Install Franka Teleoperation Control Source
+### 1.3 Clone and Install Dual Arm Teleoperation Source
 ```bash
-mkdir franka_data_collection && cd franka_data_collection
-git clone https://github.com/Shenzhaolong1330/lerobot_franka_isoteleop.git
-cd lerobot_franka_isoteleop
+mkdir dual_arm_data_collection && cd dual_arm_data_collection
+git clone https://github.com/Shenzhaolong1330/lerobot_dual_arm_teleop.git
+cd lerobot_dual_arm_teleop
 pip install -e .
 ```
 
 ### 1.4 View Available Commands
 Run the following command to display all available scrtips:
 ```bash
-franka-help
+dual-arm-help
 # ==================================================
-#  Franka Teleoperation Utilities - Command Reference
+#  Dual Arm Teleoperation Utilities - Command Reference
 # ==================================================
 
 # Core Commands:
-#   franka-record           Record teleoperation dataset
-#   franka-replay           Replay a recorded dataset
-#   franka-visualize        Visualize recorded dataset
-#   franka-reset           Reset the robot to initial state
-#   franka-train          Train a policy on the recorded dataset
+#   dual-arm-record           Record teleoperation dataset
+#   dual-arm-replay           Replay a recorded dataset
+#   dual-arm-visualize        Visualize recorded dataset
+#   dual-arm-reset           Reset the robot to initial state
+#   dual-arm-train          Train a policy on the recorded dataset
 
 # Utility Commands:
 #   utils-joint-offsets   Compute joint offsets for teleoperation
@@ -72,7 +77,7 @@ franka-help
 #   test-gripper-ctrl     Run gripper control command (operate the gripper)
 
 # --------------------------------------------------
-#  Tip: Use 'franka-help' anytime to see this summary.
+#  Tip: Use 'dual-arm-help' anytime to see this summary.
 # ==================================================
 ```
 
@@ -88,12 +93,12 @@ Or you can check the serial number in the realsense-viewer.
 realsense-viewer
 ```
 
-<!-- ### 2.2 Map Gripper Serial Port
-For example, map the gripper to `/dev/franka_left_gripper` and make sure only one gripper USB device is connected:
+### 2.2 Map Gripper Serial Port
+For example, map the gripper to `/dev/dual_arm_left_gripper` and make sure only one gripper USB device is connected:
 ```bash
-map_gripper.sh franka_left_gripper
+map_gripper.sh dual_arm_left_gripper
 ```
-Next, enter the mapped device into the `gripper_port` field in `cfg.yaml`. -->
+Next, enter the mapped device into the `gripper_port` field in `cfg.yaml`. 
 
 ### 2.3 Get the Master Arm's Persistent Serial Identifier
 Before running this, make sure only one USB device for the master arm is connected:
@@ -175,7 +180,7 @@ The Oculus Reader APK comes pre-packaged with this project. To install it:
 
 ```bash
 # Navigate to the APK directory
-cd lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus/oculus_reader/APK
+cd lerobot_teleoperator/lerobot_teleoperator/oculus/oculus_reader/APK
 
 # Install the APK to Oculus Quest
 adb install -r teleop-debug.apk
@@ -222,7 +227,7 @@ The Oculus coordinate system is mapped to the robot coordinate system as follows
 Before recording, test the Oculus connection:
 
 ```python
-from lerobot_teleoperator-franka.lerobot_teleoperator_franka.oculus.oculus_robot import OculusRobot
+from lerobot_teleoperator.lerobot_teleoperator.oculus.oculus_robot import OculusRobot
 
 oculus = OculusRobot(ip='192.168.110.62')
 while True:
@@ -267,11 +272,11 @@ huggingface-cli whoami  # Verify successful login
 ```
 
 ### 3.2 Start Recording
-1. Activate **FCI** on the Franka desk interface.  
+1. Activate robot.  
 2. Verify that the parameters in `record_cfg.yaml` are correct.  
 3. To ensure standardized data collection, please read `9. Dataset Naming and Recording Details` before running the following command:
 ```bash
-franka-record
+dual-arm-record
 ```
 
 <p align="center">
@@ -282,12 +287,12 @@ franka-record
 
 ## 4. Dataset Replay
 ```bash
-franka-replay # Make sure record_cfg.yaml is properly configured
+dual-arm-replay # Make sure record_cfg.yaml is properly configured
 ```
 
 ## 5. Dataset Visualization
 ```bash
-franka-visualize # Make sure record_cfg.yaml is properly configured
+dual-arm-visualize # Make sure record_cfg.yaml is properly configured
 ```
 <p align="center">
   <img src="assets/visualize.png" alt="Visualization" width="600">
@@ -299,7 +304,7 @@ franka-visualize # Make sure record_cfg.yaml is properly configured
 If you have already recorded a dataset under the specified `repo_id`, set `resume: True` in `record_cfg.yaml` and enter the dataset name in `resume_dataset` to continue recording new data on the existing dataset. Then, run the following command:
 
 ```bash
-franka-record
+dual-arm-record
 ```
 
 ## 7. Merge Datasets
@@ -363,7 +368,7 @@ lerobot-edit-dataset
 1. Complete step `2. Get and configure required parameters`.
 2. Fill in the task instruction in `record_cfg.yaml` under `task.description` and set `repo_id` according to the dataset naming rules.
 3. Check and adjust other parameters in `record_cfg.yaml` to ensure correctness.
-4. Run `franka-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `franka-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
+4. Run `dual-arm-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `dual-arm-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
 5. After recording, a `dataset_info.txt` file will be automatically created in the same directory to store local dataset information. If you have manually deleted any datasets, update the `dataset_info.txt` using:
 ```bash
 tools-check-dataset
@@ -381,7 +386,7 @@ Config the `train_cfg.yaml` file, including the following fields:
 
 Then run the following command to start training:
 ```bash
-franka-train
+dual-arm-train
 ```
 
 ### 10.2 Evaluation
@@ -392,5 +397,5 @@ To evaluate the trained policy, config the `record_cfg.yaml` file, including the
 
 Then run the following command to start evaluation:
 ```bash
-franka-record
+dual-arm-record
 ```

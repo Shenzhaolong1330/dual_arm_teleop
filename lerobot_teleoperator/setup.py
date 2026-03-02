@@ -1,18 +1,18 @@
 from setuptools import setup, find_packages
 
 setup(
-    name="lerobot_robot_franka",
+    name="lerobot_teleoperator",
     version="0.0.1",
-    description="LeRobot Franka integration",
+    description="LeRobot teleoperator integration for Dobot dual-arm system",
     author="Zhaolong Shen",
     author_email="shenzhaolong@buaa.edu.cn",
     packages=find_packages(),
-    install_requires=[
-        "pyrealsense2",
-        "scipy",
-        "zerorpc",
-    ],
     python_requires=">=3.10",
+    install_requires=[
+        "scipy",
+        "numpy",
+        "easyhid",
+    ],
     classifiers=[
         "Programming Language :: Python :: 3",
         "Operating System :: OS Independent",

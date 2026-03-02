@@ -2,11 +2,10 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
-from lerobot_robot_franka import FrankaConfig, Franka
-from lerobot_teleoperator_franka import (
-    DynamixelTeleopConfig,
-    SpacemouseTeleopConfig,
+from lerobot_robot import DobotDualArmConfig, DobotDualArm
+from lerobot_teleoperator import (
     OculusTeleopConfig,
+    OculusDualArmTeleopConfig,
     create_teleop,
     create_teleop_config,
 )
@@ -19,7 +18,6 @@ from lerobot.utils.control_utils import init_keyboard_listener
 from send2trash import send2trash
 import termios, sys
 from lerobot.utils.constants import HF_LEROBOT_HOME
-from scripts.utils.teleop_joint_offsets import get_start_joints, compute_joint_offsets
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import hw_to_dataset_features
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
@@ -55,19 +53,22 @@ class RecordConfig:
         self.rename_map: dict[str, str] = field(default_factory=dict)
         
         # Teleop config - parse based on control mode
-        self.control_mode = teleop.get("control_mode", "isoteleop")
+        self.control_mode = teleop.get("control_mode", "oculus")
+        self.dual_arm = teleop.get("dual_arm", True)
         self._parse_teleop_config(teleop)
         
         # Policy config
         self._parse_policy_config(policy)
         
         # Robot config
-        self.robot_ip: str = robot["ip"]
+        self.left_arm_port: int = robot.get("left_arm_port", 4242)
+        self.right_arm_port: int = robot.get("right_arm_port", 4243)
         self.use_gripper: bool = robot["use_gripper"]
-        self.close_threshold = robot["close_threshold"]
-        self.gripper_reverse: bool = robot["gripper_reverse"]
-        self.gripper_bin_threshold: float = robot["gripper_bin_threshold"]
-        self.gripper_max_open: float = robot.get("gripper_max_open", 0.08)
+        self.close_threshold = robot.get("close_threshold", 0.5)
+        self.gripper_reverse: bool = robot.get("gripper_reverse", False)
+        self.gripper_max_open: float = robot.get("gripper_max_open", 0.085)
+        self.gripper_force: float = robot.get("gripper_force", 10.0)
+        self.gripper_speed: float = robot.get("gripper_speed", 0.1)
         
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
@@ -79,44 +80,36 @@ class RecordConfig:
         # Time config
         self.episode_time_sec: int = time.get("episode_time_sec", 60)
         self.reset_time_sec: int = time.get("reset_time_sec", 10)
-        self.save_mera_period: int = time.get("save_mera_period", 1)
+        # save metadata period (number of episodes between metadata writes)
+        # YAML uses `save_meta_period` — use the same name here.
+        self.save_meta_period: int = time.get("save_meta_period", 1)
         
-        # Cameras config
-        self.wrist_cam_serial: str = cam["wrist_cam_serial"]
-        self.exterior_cam_serial: str = cam["exterior_cam_serial"]
-        self.width: int = cam["width"]
-        self.height: int = cam["height"]
+        # Cameras config (3 RealSense cameras: left wrist, right wrist, head)
+        self.left_wrist_cam_serial: str = cam["left_wrist_cam_serial"]
+        self.right_wrist_cam_serial: str = cam["right_wrist_cam_serial"]
+        self.head_cam_serial: str = cam["head_cam_serial"]
+        self.cam_width: int = cam["width"]
+        self.cam_height: int = cam["height"]
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
-        if self.control_mode == "isoteleop":
-            dxl_cfg = teleop["dynamixel_config"]
-            self.port = dxl_cfg["port"]
-            self.use_gripper = dxl_cfg["use_gripper"]
-            self.joint_ids = dxl_cfg["joint_ids"]
-            self.joint_offsets = dxl_cfg["joint_offsets"]
-            self.joint_signs = dxl_cfg["joint_signs"]
-            self.gripper_config = dxl_cfg["gripper_config"]
-            self.hardware_offsets = dxl_cfg["hardware_offsets"]
-        
-        elif self.control_mode == "spacemouse":
-            sm_cfg = teleop["spacemouse_config"]
-            self.use_gripper = sm_cfg["use_gripper"]
-            self.pose_scaler = sm_cfg["pose_scaler"]
-            self.channel_signs = sm_cfg["channel_signs"]
-        
-        elif self.control_mode == "oculus":
+        if self.control_mode == "oculus":
             oculus_cfg = teleop.get("oculus_config", {})
             self.use_gripper = oculus_cfg.get("use_gripper", True)
             self.oculus_ip = oculus_cfg.get("ip", "192.168.110.62")
             self.pose_scaler = oculus_cfg.get("pose_scaler", [1.0, 1.0])
             self.channel_signs = oculus_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
+            if self.dual_arm:
+                self.left_pose_scaler = oculus_cfg.get("left_pose_scaler", self.pose_scaler)
+                self.right_pose_scaler = oculus_cfg.get("right_pose_scaler", self.pose_scaler)
+                self.left_channel_signs = oculus_cfg.get("left_channel_signs", self.channel_signs)
+                self.right_channel_signs = oculus_cfg.get("right_channel_signs", self.channel_signs)
         
         else:
-            raise ValueError(f"Unsupported control mode: {self.control_mode}")
+            raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
     
     def _parse_policy_config(self, policy: Dict[str, Any]) -> None:
         """Parse policy configuration."""
@@ -141,23 +134,16 @@ class RecordConfig:
     
     def create_teleop_config(self):
         """Create teleoperation configuration object."""
-        if self.control_mode == "isoteleop":
-            return DynamixelTeleopConfig(
-                port=self.port,
-                use_gripper=self.use_gripper,
-                hardware_offsets=self.hardware_offsets,
-                joint_ids=self.joint_ids,
-                joint_offsets=self.joint_offsets,
-                joint_signs=self.joint_signs,
-                gripper_config=self.gripper_config,
-            )
-        elif self.control_mode == "spacemouse":
-            return SpacemouseTeleopConfig(
-                use_gripper=self.use_gripper,
-                pose_scaler=self.pose_scaler,
-                channel_signs=self.channel_signs,
-            )
-        elif self.control_mode == "oculus":
+        if self.control_mode == "oculus":
+            if self.dual_arm:
+                return OculusDualArmTeleopConfig(
+                    use_gripper=self.use_gripper,
+                    ip=self.oculus_ip,
+                    left_pose_scaler=self.left_pose_scaler,
+                    right_pose_scaler=self.right_pose_scaler,
+                    left_channel_signs=self.left_channel_signs,
+                    right_channel_signs=self.right_channel_signs,
+                )
             return OculusTeleopConfig(
                 use_gripper=self.use_gripper,
                 ip=self.oculus_ip,
@@ -165,27 +151,8 @@ class RecordConfig:
                 channel_signs=self.channel_signs,
             )
         else:
-            raise ValueError(f"Unsupported control mode: {self.control_mode}")
+            raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
 
-
-def check_joint_offsets(record_cfg: RecordConfig):
-    """Check the joint_offsets is set and correct."""
-
-    if record_cfg.joint_offsets is None:
-        raise ValueError("joint_offsets is None. Please check teleop_joint_offsets.py output.")
-
-    start_joints = get_start_joints(record_cfg)
-    if start_joints is None:
-        raise RuntimeError("Failed to retrieve start joints from Franka robot.")
-
-    joint_offsets = compute_joint_offsets(record_cfg, start_joints)
-
-    if joint_offsets != record_cfg.joint_offsets:
-        raise ValueError(
-            f"Computed joint_offsets {joint_offsets} != provided joint_offsets {record_cfg.joint_offsets}. "
-            "Please check teleop_joint_offsets.py output."
-        )
-    logging.info("Joint offsets verified successfully.")
 
 def handle_incomplete_dataset(dataset_path):
     if dataset_path.exists():
@@ -209,42 +176,61 @@ def run_record(record_cfg: RecordConfig):
         # if not record_cfg.debug:
         #     check_joint_offsets(record_cfg)        
         
-        # Create RealSenseCamera configurations
-        wrist_image_cfg = RealSenseCameraConfig(serial_number_or_name=record_cfg.wrist_cam_serial,
+        # Create RealSenseCamera configurations (3 cameras: left wrist, right wrist, head)
+        left_wrist_image_cfg = RealSenseCameraConfig(
+                                        serial_number_or_name=record_cfg.left_wrist_cam_serial,
                                         fps=record_cfg.fps,
-                                        width=record_cfg.width,
-                                        height=record_cfg.height,
+                                        width=record_cfg.cam_width,
+                                        height=record_cfg.cam_height,
                                         color_mode=ColorMode.RGB,
                                         use_depth=False,
                                         rotation=Cv2Rotation.NO_ROTATION)
 
-        exterior_image_cfg = RealSenseCameraConfig(serial_number_or_name=record_cfg.exterior_cam_serial,
+        right_wrist_image_cfg = RealSenseCameraConfig(
+                                        serial_number_or_name=record_cfg.right_wrist_cam_serial,
                                         fps=record_cfg.fps,
-                                        width=record_cfg.width,
-                                        height=record_cfg.height,
+                                        width=record_cfg.cam_width,
+                                        height=record_cfg.cam_height,
+                                        color_mode=ColorMode.RGB,
+                                        use_depth=False,
+                                        rotation=Cv2Rotation.NO_ROTATION)
+
+        head_image_cfg = RealSenseCameraConfig(
+                                        serial_number_or_name=record_cfg.head_cam_serial,
+                                        fps=record_cfg.fps,
+                                        width=record_cfg.cam_width,
+                                        height=record_cfg.cam_height,
                                         color_mode=ColorMode.RGB,
                                         use_depth=False,
                                         rotation=Cv2Rotation.NO_ROTATION)
 
         # Create the robot and teleoperator configurations
-        camera_config = {"wrist_image": wrist_image_cfg, "exterior_image": exterior_image_cfg}
+        camera_config = {
+            "left_wrist_image": left_wrist_image_cfg,
+            "right_wrist_image": right_wrist_image_cfg,
+            "head_image": head_image_cfg,
+        }
         
         # Create teleop config using the new method
         teleop_config = record_cfg.create_teleop_config()
         
-        robot_config = FrankaConfig(
-            robot_ip=record_cfg.robot_ip,
-            cameras = camera_config,
-            debug = record_cfg.debug,
-            close_threshold = record_cfg.close_threshold,
-            use_gripper = record_cfg.use_gripper,
-            gripper_reverse = record_cfg.gripper_reverse,
-            gripper_bin_threshold = record_cfg.gripper_bin_threshold,
-            gripper_max_open = record_cfg.gripper_max_open,
-            control_mode = record_cfg.control_mode,
+        # Create Dobot dual-arm robot configuration
+        robot_config = DobotDualArmConfig(
+            left_arm_port=record_cfg.left_arm_port,
+            right_arm_port=record_cfg.right_arm_port,
+            cameras=camera_config,
+            debug=record_cfg.debug,
+            use_gripper=record_cfg.use_gripper,
+            gripper_max_open=record_cfg.gripper_max_open,
+            gripper_force=record_cfg.gripper_force,
+            gripper_speed=record_cfg.gripper_speed,
+            close_threshold=record_cfg.close_threshold,
+            gripper_reverse=record_cfg.gripper_reverse,
+            control_mode=record_cfg.control_mode,
         )
+        
         # Initialize the robot
-        robot = Franka(robot_config)
+        robot = DobotDualArm(robot_config)
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
@@ -270,7 +256,7 @@ def run_record(record_cfg: RecordConfig):
                 image_writer_threads=4,
             )
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
-        dataset.meta.metadata_buffer_size = record_cfg.save_mera_period
+        dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
 
         # Initialize the keyboard listener and rerun visualization
         _, events = init_keyboard_listener()

@@ -1,65 +1,42 @@
-# Franka 遥操作数据采集与回放指南
+# Dobot Nova5 双臂遥操作数据采集与回放指南
 
 ## 简介
-本项目是用于 Franka Research 3 机器人（兼容 Franka Panda）的遥操作数据采集工具，嵌入在 [LeRobot](https://github.com/huggingface/lerobot.git) 框架中。
+本项目已迁移用于 Dobot Nova5 双臂系统的遥操作数据采集与回放，嵌入在 LeRobot 框架中。
 
-它支持机器人的主从同构映射控制，并以 LeRobot 数据集格式收集遥操作数据。
+Dobot Nova5 双臂（每臂 6 自由度，共 12 自由度）支持基于 ROS 的本地控制节点（在机器人侧），以及通过 zerorpc 在记录端进行远程通信。本仓库提供：
+
+- Oculus Quest 控制器为人机界面，实现末端位姿增量控制（左右手对应左右臂）。
+- Robotiq 2F-85 夹爪驱动（通过串口或系统映射为 /dev 路径）。
+- 支持多相机采集（左手腕、右手腕、头部共 3 个 Intel RealSense 相机）。
+- 以 LeRobot 数据集格式记录并可选地推送到 Hugging Face。
 
 <p align="center">
-  <img src="assets/robot.png" alt="Record" width="600">
+  <img src="assets/dobot.jpeg" alt="Record" width="600">
   <br>
 </p>
 
-### 新功能支持
+### 遥操作支持
 
-现在我们支持使用 [SpaceMouse](https://3dconnexion.com/) 设备进行末端位姿控制。
+本项目使用 Oculus Quest 3/3s 设备进行双臂末端位姿控制。常用按键说明：
 
-<p align="center">
-  <img src="assets/quest3s.jpg" alt="Record" width="600">
-  <br>
-</p>
-
-SpaceMouse 是一个 6 轴输入设备，可用于控制机器人的末端位姿。左按钮用于打开夹爪，右按钮用于关闭夹爪。
-
-### 新功能支持 2
-
-现在我们支持使用 Oculus Quest 3/3s 设备进行末端位姿控制。
-
-<p align="center">
-  <img src="assets/spacemouse.png" alt="Oculus Quest" width="600">
-  <br>
-</p>
-
-Oculus Quest 控制器提供 6 自由度跟踪，实现直观的末端执行器控制。右手控制器用于机器人操作，控制方式如下：
-
-- **RG（右手握持键）**：必须按下才能启动机器人运动
-- **RTr（右手扳机）**：控制夹爪（按下关闭，松开打开）
+- **RG（右手握持键）**：按住启动对应手臂的运动
+- **LG（左手握持键）**：按住启动对应手臂的运动
+- **LTr / RTr（左右手扳机）**：控制对应臂的夹爪（按下关闭，松开打开）
 - **A 按钮**：请求机器人复位
-- **右手控制器位姿**：控制末端执行器的增量位姿
 
-## 0. Franka 控制说明
-在这个版本中，使用[Polymetis](https://polymetis-docs.github.io/)对Franka 进行控制，由于Polymetis不支持python3.10，并且推荐单独在NUC上运行，因此在这里用Zerorpc进行远程通信实现，具体流程如下：
-### 0.1 在NUC上安装[Polymetis](https://polymetis-docs.github.io/)
-我们开源了针对franka优化后的[Polymetis](https://github.com/Shenzhaolong1330/fairo-franka/tree/main)源码，详细参考[安装教程](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/FRANKA.md)进行安装。
-### 0.2 在NUC上启动Server
-分别启动[robot interface](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/scripts/launch_robot.py)，[gripper interface](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/scripts/launch_gripper.py)和[interface server](https://github.com/Shenzhaolong1330/fairo-franka/blob/main/polymetis/polymetis/python/polymetis/franka_interface_server.py)
+控制器的位姿会映射为末端执行器的增量位姿（位置 + 姿态），并通过 zerorpc 发送到机器人侧的控制服务。
 
-```
-<!-- ### 3. 在本地启动[interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py)
-在尝试链接Franka前，启动[interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py)
-```
-# On the local machine
-python franka_interface_client.py
-```
-[interface client](lerobot_robot_franka\lerobot_robot_franka\franka_interface_client.py)中的函数功能与Polymetis中的函数功能基本一致，使用方法可以参考[Polymetis文档](https://polymetis-docs.github.io/)。 -->
+## 0. 控制端与机器人端说明
+本方案假定机器人控制在 Robot Controller 或 NUC/边缘计算机上运行 ROS 节点（或其他本地服务），而本地工作站运行本仓库的记录/teleop 客户端，通过 zerorpc 与机器人端通信。机器人端应提供一个简单的动作接口（例如接收笛卡尔增量位姿与夹爪开闭命令）。
 
+如果您的 Dobot 控制软件位于远端机器，请确保远端启动对应的接口服务（例如通过 zerorpc 或自定义 ROS-to-zerorpc 适配层）。
 
 ## 1. 环境配置
 
 ### 1.1 创建并激活 conda 环境
 ```bash
-conda create -n franka_data python=3.10
-conda activate franka_data
+conda create -n dual_arm_data python=3.10
+conda activate dual_arm_data
 ```
 
 ### 1.2 安装 lerobot
@@ -72,11 +49,11 @@ git checkout da5d2f3e9187fa4690e6667fe8b294cae49016d6
 pip install -e .
 ```
 
-### 1.3 克隆并安装 Franka 遥操作控制源码
+### 1.3 克隆并安装遥操作控制源码
 ```bash
-mkdir franka_data_collection && cd franka_data_collection
-git clone https://github.com/Shenzhaolong1330/lerobot_franka_isoteleop.git
-cd lerobot_franka_isoteleop
+mkdir dual_arm_data_collection && cd dual_arm_data_collection
+git clone https://github.com/Shenzhaolong1330/lerobot_dual_arm_teleop.git
+cd lerobot_dual_arm_teleop
 pip install -e .
 ```
 
@@ -84,15 +61,15 @@ pip install -e .
 ### 1.4 查看可运行的命令
 运行以下命令以查看所有可用的脚本：
 ```bash
-franka-help
+dual-arm-help
 # ==================================================
-#  Franka Teleoperation Utilities - Command Reference
+#  Dobot Dual Arm Teleoperation Utilities - Command Reference
 # ==================================================
 
 # Core Commands:
-#   franka-record           Record teleoperation dataset
-#   franka-replay           Replay a recorded dataset
-#   franka-visualize        Visualize recorded dataset
+#   dual-arm-record           Record teleoperation dataset
+#   dual-arm-replay           Replay a recorded dataset
+#   dual-arm-visualize        Visualize recorded dataset
 
 # Utility Commands:
 #   utils-joint-offsets   Compute joint offsets for teleoperation
@@ -109,7 +86,7 @@ franka-help
 #   test-gripper-ctrl     Run gripper control command (operate the gripper)
 
 # --------------------------------------------------
-#  Tip: Use 'franka-help' anytime to see this summary.
+#  Tip: Use 'dual-arm-help' anytime to see this summary.
 # ==================================================
 ```
 ## 2. 获取和配置必要参数
@@ -121,9 +98,9 @@ tools-check-rs
 ```
 
 ### 2.2 固定夹爪串口映射
-例如，将夹爪映射到 `/dev/franka_left_gripper`, 执行此操作前，请确保仅连接一个夹爪的usb设备。
+例如，将夹爪映射到 `/dev/dual_arm_left_gripper`, 执行此操作前，请确保仅连接一个夹爪的usb设备。
 ```bash
-map_gripper.sh franka_left_gripper
+map_gripper.sh dual_arm_left_gripper
 ```
 随后，将设定的映射值填入`cfg.yaml`中的`gripper_port`字段
 ### 2.3 获取主臂的固定串口标识符
@@ -204,7 +181,7 @@ Oculus Reader APK 已随本项目预打包。安装方法：
 
 ```bash
 # 进入 APK 目录
-cd lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus/oculus_reader/APK
+cd lerobot_teleoperator/lerobot_teleoperator/oculus/oculus_reader/APK
 
 # 将 APK 安装到 Oculus Quest
 adb install -r teleop-debug.apk
@@ -251,7 +228,7 @@ Oculus 坐标系映射到机器人坐标系如下：
 在录制之前，测试 Oculus 连接：
 
 ```python
-from lerobot_teleoperator_franka.lerobot_teleoperator_franka.oculus.oculus_robot import OculusRobot
+from lerobot_teleoperator.lerobot_teleoperator.oculus.oculus_robot import OculusRobot
 
 oculus = OculusRobot(ip='192.168.110.62')
 while True:
@@ -296,11 +273,11 @@ huggingface-cli whoami  # 检查是否登录成功
 ```
 
 ### 3.2 开始记录
-1. 打开 Franka 示教器上的 **Remote Control**。
+1. 打开机器人的使能。
 2. 确认 `cfg.yaml` 中参数配置正确。
 3. 为了确保数据收集过程规范，请先阅读 `9. 数据集命名与记录详解` 以了解数据记录细节，然后再运行以下命令：
 ```bash
-franka-record
+dual-arm-record
 ```
 <p align="center">
   <img src="assets/record.png" alt="Record" width="600">
@@ -310,12 +287,12 @@ franka-record
 
 ## 4. 数据集回放
 ```bash
-franka-replay #注意cfg配置
+dual-arm-replay #注意cfg配置
 ```
 
 ## 5. 数据集可视化
 ```bash
-franka-visualize #注意cfg配置
+dual-arm-visualize #注意cfg配置
 ```
 <p align="center">
   <img src="assets/visualize.png" alt="Visualization" width="600">
@@ -326,7 +303,7 @@ franka-visualize #注意cfg配置
 ## 6. 数据集追加与恢复
 如果你已经在指定的 `repo_id` 下录制过数据集，可以在 `cfg.yaml` 中将 `resume` 设置为 `True`，并在 `resume_dataset` 中填写要追加的数据集名称，以便在现有数据集的基础上继续录制。然后运行以下命令：
 ```bash
-franka-record
+dual-arm-record
 ```
 
 ## 7. 数据集合并
@@ -388,7 +365,7 @@ lerobot-edit-dataset
 1. 完成步骤 `2. 获取和配置必要参数`。
 2. 根据任务内容，在 `cfg.yaml` 的 `task.description` 中填写指令，并根据数据集命名规则设置 `repo_id`。
 3. 检查并调整 `cfg.yaml` 中的其他参数，确保配置正确。
-4. 运行命令 `franka-record`，为确保安全， 请保证主臂与从臂关节角近似，`franka-record` 会自动执行 `2.4 获取主臂-从臂关节角误差周期` 检查，然后按照 `8. 录制控制按键说明` 完成录制操作。
+4. 运行命令 `dual-arm-record`，为确保安全， 请保证主臂与从臂关节角近似，`dual-arm-record` 会自动执行 `2.4 获取主臂-从臂关节角误差周期` 检查，然后按照 `8. 录制控制按键说明` 完成录制操作。
 5. 数据记录结束后，数据集同级目录会生成 `dataset_info.txt` 文件，用于保存本地数据集信息。如果手动删除过数据集，可通过以下命令更新记录信息：
 ```bash
 tools-check-dataset

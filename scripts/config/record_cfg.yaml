@@ -6,45 +6,33 @@ record:
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
   fps: 15 # dataset and camera frame rate
-  control_mode: &control_mode "oculus" # "isoteleop" or "spacemouse" or "oculus"
+  control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
+  use_gripper: &use_gripper true  # whether to use gripper
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   teleop:
-    control_mode: *control_mode 
-    dynamixel_config:
-      port: "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
-      # hardware_offsets: [0, 0, 0, 0, 0, 0, 0] # The Calibration offsets between the master and the slave robot
-      hardware_offsets: [-0.12183455210997171, -0.002845966063342931, -0.06250428305273764, -2.0498354593763044, 0.05259129256457092, 1.9984585428810417, -0.9046528345737315] 
-      use_gripper: &use_gripper True # whether the slave robot can use gripper
-      joint_ids: [0, 1, 2, 3, 4, 5, 6]
-      # joint_offsets: [6.283, 3.142, 0.0, 4.712, 4.712, 6.283, 2.496] # franka hand offsets
-      joint_offsets: [0.0, 3.142, 6.283, 4.712, 4.712, 6.283, 3.0] # robotiq hand offsets
-      joint_signs: [1, 1, 1, 1, 1, -1, 1]
-      gripper_config: [7, 0.9664079, 1.9404857] # id, min, max
-    spacemouse_config:
-      channel_ids: [0, 1, 2, 3, 4, 5]
-      channel_signs: [-1, -1, 1, -1, -1, 1]
-      use_gripper: *use_gripper # whether the spacemouse robot can use gripper
-      pose_scaler: [0.01, 0.05] # scaler for spacemouse actions [position, attitude]
+    control_mode: *control_mode
+    dual_arm: true  # dual-arm mode
     oculus_config:
       ip: "192.168.110.62"  # Oculus Quest IP address
       use_gripper: *use_gripper
       pose_scaler: [2.0, 1.5]  # scaler for oculus actions [position, attitude]
       channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
-    placo:
-      visualize_placo: False
-      placo_dt: 0.01
-      robot_urdf_path: assets/franka_urdf/fr3v2_franka_hand.urdf
+      # Dual-arm specific overrides (optional, defaults to base pose_scaler/channel_signs)
+      left_pose_scaler: [2.0, 1.5]   # left arm scaler
+      left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs
+      right_pose_scaler: [2.0, 1.5]  # right arm scaler
+      right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs
       
   robot:
-    # ip: &ip "172.16.0.2" # robot ip
-    ip: &ip "192.168.110.15" # NUC ip
+    ip: &ip "192.168.110.15" # dobot server ip
     use_gripper: *use_gripper
+    left_arm_port: 4242  # left arm zerorpc port
+    right_arm_port: 4243  # right arm zerorpc port
     close_threshold: 0.7 # threshold to determine gripper open/close
     gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
-    # gripper_port: &gripper_port "/dev/franka_left_gripper" # gripper_port
     gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.085 # gripper max open width in meters 0.0801 for franka hand, 0.12 for robotiq gripper
+    gripper_max_open: 0.085 # Robotiq 2F-85 max open width in meters
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
@@ -54,10 +42,7 @@ record:
     # 预训练模型路径下要包括config.json
 
   task:
-    # description: "Pick up the green cube and put it into the trash bin." # task description
-    # description: "pick up all blue cubes and put them into the brown basket" # task description
     description: "pick up all yellow cubes and put them into the brown basket" # task description
-    # description: "pick up the red chili and put it into the brown basket"
     num_episodes: 1 # number of episodes to record
     display: True # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
@@ -68,8 +53,9 @@ record:
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    wrist_cam_serial: "344322074412" # wrist camera serial number 243222071212 344322074412
-    exterior_cam_serial: "243322071821" # exterior camera serial number 243322071821 339322074423
+    left_wrist_cam_serial: "344322074412"   # left wrist camera serial number
+    right_wrist_cam_serial: "243222071212"  # right wrist camera serial number
+    head_cam_serial: "243322071821"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 
@@ -81,7 +67,8 @@ replay:
   episode_idx: 4 # episode index to replay
   robot:
     ip: *ip
-    # gripper_port: *gripper_port
+    left_arm_port: 4242
+    right_arm_port: 4243
   control_mode: *control_mode 
 
 visualize:

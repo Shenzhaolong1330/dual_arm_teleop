@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Usage: sudo ./map_franka_usb.sh franka_left_gripper
+# Usage: sudo ./map_gripper.sh dobot_left_gripper
 # Argument 1: mapping name
 MAP_NAME=$1
 
@@ -9,7 +9,7 @@ if [ -z "$MAP_NAME" ]; then
     exit 1
 fi
 
-RULE_FILE="/etc/udev/rules.d/99-franka.rules"
+RULE_FILE="/etc/udev/rules.d/99-dobot-gripper.rules"
 
 # 1. Check current number of /dev/ttyUSB devices
 USB_DEVICES=($(ls /dev/ttyUSB* 2>/dev/null))
