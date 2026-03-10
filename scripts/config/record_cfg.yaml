@@ -16,18 +16,17 @@ record:
     oculus_config:
       ip: "192.168.110.62"  # Oculus Quest IP address
       use_gripper: *use_gripper
-      pose_scaler: [2.0, 1.5]  # scaler for oculus actions [position, attitude]
-      channel_signs: [1, 1, 1, -1, -1, 1]  # signs for each axis [x, y, z, rx, ry, rz]
-      # Dual-arm specific overrides (optional, defaults to base pose_scaler/channel_signs)
       left_pose_scaler: [2.0, 1.5]   # left arm scaler
       left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs
       right_pose_scaler: [2.0, 1.5]  # right arm scaler
       right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs
       
   robot:
-    ip: &ip "192.168.110.15" # dobot server ip
-    use_gripper: *use_gripper
+    robot_ip: &ip "localhost" # dobot server ip
     robot_port: 4242  # dual-arm zerorpc port (single port for both arms)
+    use_gripper: *use_gripper
+    gripper_ip: "localhost" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
+    gripper_port: 4243  # gripper zerorpc port (single port for both arms)
     close_threshold: 0.7 # threshold to determine gripper open/close
     gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
     gripper_reverse: false  # If gripper moves opposite, flip this value
@@ -46,15 +45,16 @@ record:
     display: True # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
+  
   time:
     episode_time_sec: 6000 # max time per episode in seconds
     reset_time_sec: 6000 # max time to reset between episodes in seconds
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    left_wrist_cam_serial: "344322074412"   # left wrist camera serial number
+    left_wrist_cam_serial: "317422075656"   # left wrist camera serial number
     right_wrist_cam_serial: "243222071212"  # right wrist camera serial number
-    head_cam_serial: "243322071821"         # head (overhead) camera serial number
+    head_cam_serial: "337322072568"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 
