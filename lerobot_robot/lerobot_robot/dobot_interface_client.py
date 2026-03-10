@@ -353,6 +353,14 @@ class DobotDualArmClient:
 
     # ==================== Dual-Arm Convenience Methods ====================
     
+    def robot_go_home(self):
+        """Move dual arm to home position."""
+        if self.server is None:
+            return
+        try:
+            self.server.robot_go_home()
+        except Exception as e:
+            log.error(f"[DUAL ARM] robot_go_home failed: {e}")
     def gripper_initialize(self):
         """Initialize both grippers."""
         self.left_gripper_initialize()
