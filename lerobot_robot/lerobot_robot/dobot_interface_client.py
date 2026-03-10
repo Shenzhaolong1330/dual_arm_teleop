@@ -107,6 +107,7 @@ class DobotDualArmClient:
         Kx: np.ndarray = None,
         Kxd: np.ndarray = None,
         op_space_interp: bool = True,
+        wait: bool = False,
     ):
         """Move left arm to target end-effector pose."""
         if self.server is None:
@@ -119,6 +120,7 @@ class DobotDualArmClient:
                 Kx.tolist() if Kx is not None else None,
                 Kxd.tolist() if Kxd is not None else None,
                 op_space_interp,
+                wait,
             )
         except Exception as e:
             log.error(f"[LEFT ARM] robot_move_to_ee_pose failed: {e}")
@@ -258,6 +260,7 @@ class DobotDualArmClient:
         Kx: np.ndarray = None,
         Kxd: np.ndarray = None,
         op_space_interp: bool = True,
+        wait: bool = False,
     ):
         """Move right arm to target end-effector pose."""
         if self.server is None:
@@ -270,6 +273,7 @@ class DobotDualArmClient:
                 Kx.tolist() if Kx is not None else None,
                 Kxd.tolist() if Kxd is not None else None,
                 op_space_interp,
+                wait,
             )
         except Exception as e:
             log.error(f"[RIGHT ARM] robot_move_to_ee_pose failed: {e}")
@@ -354,10 +358,33 @@ class DobotDualArmClient:
         self.left_gripper_initialize()
         self.right_gripper_initialize()
 
-    def robot_go_home(self):
-        """Move both arms to home position."""
-        self.left_robot_go_home()
-        self.right_robot_go_home()
+    def dual_robot_move_to_ee_pose(self, left_pose, right_pose, time_to_go=None, delta=False, Kx=None, Kxd=None, op_space_interp=True, wait=False):
+        """Move both arms to target poses simultaneously."""
+        try:
+            return self.server.dual_robot_move_to_ee_pose(left_pose, right_pose, time_to_go, delta, Kx, Kxd, op_space_interp, wait)
+        except Exception as e:
+            log.error("Failed to move both arms to EE poses: %s", str(e))
+    
+    def wait_for_left_arm(self):
+        """Wait for left arm to complete current action."""
+        try:
+            return self.server.wait_for_left_arm()
+        except Exception as e:
+            log.error("Failed to wait for left arm: %s", str(e))
+    
+    def wait_for_right_arm(self):
+        """Wait for right arm to complete current action."""
+        try:
+            return self.server.wait_for_right_arm()
+        except Exception as e:
+            log.error("Failed to wait for right arm: %s", str(e))
+    
+    def wait_for_all_arms(self):
+        """Wait for both arms to complete current actions."""
+        try:
+            return self.server.wait_for_all_arms()
+        except Exception as e:
+            log.error("Failed to wait for all arms: %s", str(e))
 
     def close(self):
         """Close connection to server."""

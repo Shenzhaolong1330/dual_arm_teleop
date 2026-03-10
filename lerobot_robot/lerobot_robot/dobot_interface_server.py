@@ -101,6 +101,7 @@ class DobotDualArmServer:
         Kx: list = None,
         Kxd: list = None,
         op_space_interp: bool = True,
+        wait: bool = False,
     ):
         """Move left arm to target end-effector pose."""
         pose = np.array(pose)
@@ -110,8 +111,9 @@ class DobotDualArmServer:
             else:
                 self._mock_left_ee_pose = pose
             return
+        # 关键：传递wait参数，让wrapper决定是否异步执行
         self._robot_wrapper.left_move_to_ee_pose(
-            pose.tolist(), time_to_go, delta, Kx, Kxd, op_space_interp
+            pose.tolist(), time_to_go, delta, Kx, Kxd, op_space_interp, wait
         )
     
     def left_robot_go_home(self):
@@ -226,6 +228,7 @@ class DobotDualArmServer:
         Kx: list = None,
         Kxd: list = None,
         op_space_interp: bool = True,
+        wait: bool = False,
     ):
         """Move right arm to target end-effector pose."""
         pose = np.array(pose)
@@ -235,8 +238,9 @@ class DobotDualArmServer:
             else:
                 self._mock_right_ee_pose = pose
             return
+        # 关键：传递wait参数，让wrapper决定是否异步执行
         self._robot_wrapper.right_move_to_ee_pose(
-            pose.tolist(), time_to_go, delta, Kx, Kxd, op_space_interp
+            pose.tolist(), time_to_go, delta, Kx, Kxd, op_space_interp, wait
         )
     
     def right_robot_go_home(self):
@@ -308,13 +312,66 @@ class DobotDualArmServer:
     
     def robot_go_home(self):
         """Move both arms to home position."""
-        self.left_robot_go_home()
-        self.right_robot_go_home()
+        if self._robot_wrapper is None:
+            import numpy as np
+            self._mock_left_joints = np.zeros(self.num_joints_per_arm)
+            self._mock_right_joints = np.zeros(self.num_joints_per_arm)
+            return
+        self._robot_wrapper.dual_go_home(wait=True)
     
     def gripper_initialize(self):
         """Initialize both grippers."""
         self.left_gripper_initialize()
         self.right_gripper_initialize()
+    
+    def dual_robot_move_to_ee_pose(
+        self,
+        left_pose: list,
+        right_pose: list,
+        time_to_go: float = None,
+        delta: bool = False,
+        Kx: list = None,
+        Kxd: list = None,
+        op_space_interp: bool = True,
+        wait: bool = False,
+    ):
+        """Move both arms to target end-effector poses simultaneously."""
+        import numpy as np
+        left_pose = np.array(left_pose)
+        right_pose = np.array(right_pose)
+        
+        if self._robot_wrapper is None:
+            if delta:
+                self._mock_left_ee_pose = self._mock_left_ee_pose + left_pose
+                self._mock_right_ee_pose = self._mock_right_ee_pose + right_pose
+            else:
+                self._mock_left_ee_pose = left_pose
+                self._mock_right_ee_pose = right_pose
+            return
+            
+        self._robot_wrapper.dual_move_to_ee_pose(
+            left_pose.tolist(), 
+            right_pose.tolist(), 
+            time_to_go, delta, Kx, Kxd, op_space_interp, wait
+        )
+    
+    def wait_for_left_arm(self):
+        """Wait for left arm to complete current action."""
+        if self._robot_wrapper is None:
+            return True
+        return self._robot_wrapper.wait_for_arm('left')
+    
+    def wait_for_right_arm(self):
+        """Wait for right arm to complete current action."""
+        if self._robot_wrapper is None:
+            return True
+        return self._robot_wrapper.wait_for_arm('right')
+    
+    def wait_for_all_arms(self):
+        """Wait for both arms to complete current actions."""
+        if self._robot_wrapper is None:
+            return True
+        return self._robot_wrapper.wait_for_all_arms()
 
 def start_server(port: int = 4242, gripper_enabled: bool = True):
     server = zerorpc.Server(DobotDualArmServer())
