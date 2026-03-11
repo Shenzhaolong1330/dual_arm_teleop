@@ -314,33 +314,36 @@ class DobotDualArm(Robot):
         ])
         
         # Get current joint positions (in radians)
-        left_current_joints = self._robot.left_robot_get_joint_positions()
-        right_current_joints = self._robot.right_robot_get_joint_positions()
+        # left_current_joints = self._robot.left_robot_get_joint_positions()
+        # right_current_joints = self._robot.right_robot_get_joint_positions()
         
         # Compute delta joints (in radians)
-        left_delta_joints = left_target_joints - left_current_joints
-        right_delta_joints = right_target_joints - right_current_joints
+        # left_delta_joints = left_target_joints - left_current_joints
+        # right_delta_joints = right_target_joints - right_current_joints
         
-        # Safety check: limit max joint delta
-        left_max_delta = np.abs(left_delta_joints).max()
-        right_max_delta = np.abs(right_delta_joints).max()
+        # # Safety check: limit max joint delta
+        # left_max_delta = np.abs(left_delta_joints).max()
+        # right_max_delta = np.abs(right_delta_joints).max()
         
-        if left_max_delta > self.config.max_joint_delta or right_max_delta > self.config.max_joint_delta:
-            logger.warning(f"[ROBOT] Joint delta too large: left={left_max_delta:.3f}, right={right_max_delta:.3f}")
-            # Scale down if too large
-            scale = self.config.max_joint_delta / max(left_max_delta, right_max_delta)
-            left_delta_joints *= scale
-            right_delta_joints *= scale
+        # if left_max_delta > self.config.max_joint_delta or right_max_delta > self.config.max_joint_delta:
+        #     logger.warning(f"[ROBOT] Joint delta too large: left={left_max_delta:.3f}, right={right_max_delta:.3f}")
+        #     # Scale down if too large
+        #     scale = self.config.max_joint_delta / max(left_max_delta, right_max_delta)
+        #     left_delta_joints *= scale
+        #     right_delta_joints *= scale
         
         # Send servo commands (client expects radians)
         try:
             # Use servo_j_delta for smooth joint control
-            self._robot.servo_j_delta('left', left_delta_joints, t=0.1, lookahead_time=0.05, gain=300)
-            self._robot.servo_j_delta('right', right_delta_joints, t=0.1, lookahead_time=0.05, gain=300)
+            # self._robot.servo_j_delta('left', left_delta_joints, t=0.05, lookahead_time=0.05, gain=300)
+            # self._robot.servo_j_delta('right', right_delta_joints, t=0.05, lookahead_time=0.05, gain=300)
             
-            logger.debug(f"[SERVO_J] Left delta (rad): {left_delta_joints}")
-            logger.debug(f"[SERVO_J] Right delta (rad): {right_delta_joints}")
+            # logger.debug(f"[SERVO_J] Left delta (rad): {left_delta_joints}")
+            # logger.debug(f"[SERVO_J] Right delta (rad): {right_delta_joints}")
             
+            self._robot.servo_j('left', left_target_joints, t=0.05, lookahead_time=0.05, gain=300)
+            self._robot.servo_j('right', right_target_joints, t=0.05, lookahead_time=0.05, gain=300)
+
         except Exception as e:
             logger.warning(f"[SERVO_J] Failed: {e}")
     
