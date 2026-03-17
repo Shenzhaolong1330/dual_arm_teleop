@@ -61,15 +61,15 @@ pip install -e .
 ### 1.4 查看可运行的命令
 运行以下命令以查看所有可用的脚本：
 ```bash
-dual-arm-help
+dobot-help
 # ==================================================
 #  Dobot Dual Arm Teleoperation Utilities - Command Reference
 # ==================================================
 
 # Core Commands:
-#   dual-arm-record           Record teleoperation dataset
-#   dual-arm-replay           Replay a recorded dataset
-#   dual-arm-visualize        Visualize recorded dataset
+#   dobot-record           Record teleoperation dataset
+#   dobot-replay           Replay a recorded dataset
+#   dobot-visualize        Visualize recorded dataset
 
 # Utility Commands:
 #   utils-joint-offsets   Compute joint offsets for teleoperation
@@ -86,7 +86,7 @@ dual-arm-help
 #   test-gripper-ctrl     Run gripper control command (operate the gripper)
 
 # --------------------------------------------------
-#  Tip: Use 'dual-arm-help' anytime to see this summary.
+#  Tip: Use 'dobot-help' anytime to see this summary.
 # ==================================================
 ```
 ## 2. 获取和配置必要参数
@@ -277,7 +277,7 @@ huggingface-cli whoami  # 检查是否登录成功
 2. 确认 `cfg.yaml` 中参数配置正确。
 3. 为了确保数据收集过程规范，请先阅读 `9. 数据集命名与记录详解` 以了解数据记录细节，然后再运行以下命令：
 ```bash
-dual-arm-record
+dobot-record
 ```
 <p align="center">
   <img src="assets/record.png" alt="Record" width="600">
@@ -287,12 +287,12 @@ dual-arm-record
 
 ## 4. 数据集回放
 ```bash
-dual-arm-replay #注意cfg配置
+dobot-replay #注意cfg配置
 ```
 
 ## 5. 数据集可视化
 ```bash
-dual-arm-visualize #注意cfg配置
+dobot-visualize #注意cfg配置
 ```
 <p align="center">
   <img src="assets/visualize.png" alt="Visualization" width="600">
@@ -303,7 +303,7 @@ dual-arm-visualize #注意cfg配置
 ## 6. 数据集追加与恢复
 如果你已经在指定的 `repo_id` 下录制过数据集，可以在 `cfg.yaml` 中将 `resume` 设置为 `True`，并在 `resume_dataset` 中填写要追加的数据集名称，以便在现有数据集的基础上继续录制。然后运行以下命令：
 ```bash
-dual-arm-record
+dobot-record
 ```
 
 ## 7. 数据集合并
@@ -365,7 +365,7 @@ lerobot-edit-dataset
 1. 完成步骤 `2. 获取和配置必要参数`。
 2. 根据任务内容，在 `cfg.yaml` 的 `task.description` 中填写指令，并根据数据集命名规则设置 `repo_id`。
 3. 检查并调整 `cfg.yaml` 中的其他参数，确保配置正确。
-4. 运行命令 `dual-arm-record`，为确保安全， 请保证主臂与从臂关节角近似，`dual-arm-record` 会自动执行 `2.4 获取主臂-从臂关节角误差周期` 检查，然后按照 `8. 录制控制按键说明` 完成录制操作。
+4. 运行命令 `dobot-record`，为确保安全， 请保证主臂与从臂关节角近似，`dobot-record` 会自动执行 `2.4 获取主臂-从臂关节角误差周期` 检查，然后按照 `8. 录制控制按键说明` 完成录制操作。
 5. 数据记录结束后，数据集同级目录会生成 `dataset_info.txt` 文件，用于保存本地数据集信息。如果手动删除过数据集，可通过以下命令更新记录信息：
 ```bash
 tools-check-dataset

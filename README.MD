@@ -1,4 +1,4 @@
-# Dual Arm End-Effector Pose Teleoperation and Data Collection System
+# Dual Arm Teleoperation and Data Collection System
 
 ## Introduction 
 This project is a teleoperation data collection tool for dual robot arm (Dual Dobot Nova 5 and ARX LIFT), embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
@@ -50,17 +50,17 @@ pip install -e .
 ### 1.4 View Available Commands
 Run the following command to display all available scrtips:
 ```bash
-dual-arm-help
+dobot-help
 # ==================================================
 #  Dual Arm Teleoperation Utilities - Command Reference
 # ==================================================
 
 # Core Commands:
-#   dual-arm-record           Record teleoperation dataset
-#   dual-arm-replay           Replay a recorded dataset
-#   dual-arm-visualize        Visualize recorded dataset
-#   dual-arm-reset           Reset the robot to initial state
-#   dual-arm-train          Train a policy on the recorded dataset
+#   dobot-record           Record teleoperation dataset
+#   dobot-replay           Replay a recorded dataset
+#   dobot-visualize        Visualize recorded dataset
+#   dobot-reset           Reset the robot to initial state
+#   dobot-train          Train a policy on the recorded dataset
 
 # Utility Commands:
 #   utils-joint-offsets   Compute joint offsets for teleoperation
@@ -77,7 +77,7 @@ dual-arm-help
 #   test-gripper-ctrl     Run gripper control command (operate the gripper)
 
 # --------------------------------------------------
-#  Tip: Use 'dual-arm-help' anytime to see this summary.
+#  Tip: Use 'dobot-help' anytime to see this summary.
 # ==================================================
 ```
 
@@ -268,7 +268,7 @@ huggingface-cli whoami  # Verify successful login
 ```bash
 unset LD_LIBRARY_PATH 
 unset PYTHONPATH 
-dual-arm-record
+dobot-record
 ```
 
 <p align="center">
@@ -279,12 +279,12 @@ dual-arm-record
 
 ## 4. Dataset Replay
 ```bash
-dual-arm-replay # Make sure record_cfg.yaml is properly configured
+dobot-replay # Make sure record_cfg.yaml is properly configured
 ```
 
 ## 5. Dataset Visualization
 ```bash
-dual-arm-visualize # Make sure record_cfg.yaml is properly configured
+dobot-visualize # Make sure record_cfg.yaml is properly configured
 ```
 <p align="center">
   <img src="assets/visualize.png" alt="Visualization" width="600">
@@ -296,7 +296,7 @@ dual-arm-visualize # Make sure record_cfg.yaml is properly configured
 If you have already recorded a dataset under the specified `repo_id`, set `resume: True` in `record_cfg.yaml` and enter the dataset name in `resume_dataset` to continue recording new data on the existing dataset. Then, run the following command:
 
 ```bash
-dual-arm-record
+dobot-record
 ```
 
 ## 7. Merge Datasets
@@ -360,7 +360,7 @@ lerobot-edit-dataset
 1. Complete step `2. Get and configure required parameters`.
 2. Fill in the task instruction in `record_cfg.yaml` under `task.description` and set `repo_id` according to the dataset naming rules.
 3. Check and adjust other parameters in `record_cfg.yaml` to ensure correctness.
-4. Run `dual-arm-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `dual-arm-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
+4. Run `dobot-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `dobot-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
 5. After recording, a `dataset_info.txt` file will be automatically created in the same directory to store local dataset information. If you have manually deleted any datasets, update the `dataset_info.txt` using:
 ```bash
 tools-check-dataset
@@ -378,7 +378,7 @@ Config the `train_cfg.yaml` file, including the following fields:
 
 Then run the following command to start training:
 ```bash
-dual-arm-train
+dobot-train
 ```
 
 ### 10.2 Evaluation
@@ -389,5 +389,5 @@ To evaluate the trained policy, config the `record_cfg.yaml` file, including the
 
 Then run the following command to start evaluation:
 ```bash
-dual-arm-record
+dobot-record
 ```
