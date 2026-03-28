@@ -1,7 +1,7 @@
 # Dual Arm Teleoperation and Data Collection System
 
 ## Introduction 
-This project is a teleoperation data collection tool for dual robot arm (Dual Dobot Nova 5 and ARX LIFT), embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
+This project is a teleoperation data collection tool for dual arm robots, embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
 
 <p align="center">
   <img src="assets/dobot.jpeg" alt="Record" width="600">
@@ -50,35 +50,7 @@ pip install -e .
 ### 1.4 View Available Commands
 Run the following command to display all available scrtips:
 ```bash
-dobot-help
-# ==================================================
-#  Dual Arm Teleoperation Utilities - Command Reference
-# ==================================================
-
-# Core Commands:
-#   dobot-record           Record teleoperation dataset
-#   dobot-replay           Replay a recorded dataset
-#   dobot-visualize        Visualize recorded dataset
-#   dobot-reset           Reset the robot to initial state
-#   dobot-train          Train a policy on the recorded dataset
-
-# Utility Commands:
-#   utils-joint-offsets   Compute joint offsets for teleoperation
-
-# Tool Commands:
-#   tools-check-dataset   Check local dataset information
-#   tools-check-rs        Retrieve connected RealSense camera serial numbers
-
-# Shell Tools:
-#   map_gripper.sh        Map Gripper Serial Port
-#   check_master_port.sh  Get the Master Arm's Persistent Serial Identifier
-
-# Test Commands:
-#   test-gripper-ctrl     Run gripper control command (operate the gripper)
-
-# --------------------------------------------------
-#  Tip: Use 'dobot-help' anytime to see this summary.
-# ==================================================
+robot-help
 ```
 
 ## 2. Obtain and Configure Necessary Parameters
@@ -113,6 +85,18 @@ sudo chmod 666 <your_gripper_port>
 ### 2.5 Oculus Quest Setup (For Oculus Teleoperation Mode)
 
 If you plan to use Oculus Quest for teleoperation, follow these steps to set up the device:
+
+#### 2.5.0 Clone Oculus Reader
+```bash
+cd lerobot_franka_isoteleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus
+git clone https://github.com/rail-berkeley/oculus_reader.git
+pip install -e oculus_reader
+```
+after pip, you can run 
+```bash
+python lerobot_franka_isoteleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus/oculus_reader/oculus_reader/reader.py
+```
+to test the Oculus Reader.
 
 #### 2.5.1 Install ADB (Android Debug Bridge)
 
@@ -195,21 +179,21 @@ record:
 
 #### 2.5.6 Oculus Controller Controls
 
-| Control | Function |
-|---------|----------|
-| **RG (Right Grip)** | Press and hold to enable robot movement |
-| **RTr (Right Trigger)** | Press to close gripper, release to open |
-| **A Button** | Request robot reset |
-| **Right Controller Pose** | Controls end-effector delta pose |
+| Control                   | Function                                |
+| ------------------------- | --------------------------------------- |
+| **RG (Right Grip)**       | Press and hold to enable robot movement |
+| **RTr (Right Trigger)**   | Press to close gripper, release to open |
+| **A Button**              | Request robot reset                     |
+| **Right Controller Pose** | Controls end-effector delta pose        |
 
 #### 2.5.7 Coordinate System Mapping
 
 The Oculus coordinate system is mapped to the robot coordinate system as follows:
 
-| Oculus Axis | Robot Axis | Description |
-|-------------|------------|-------------|
-| X (right) | -Y (left) | Lateral movement |
-| Y (up) | Z (up) | Vertical movement |
+| Oculus Axis  | Robot Axis  | Description               |
+| ------------ | ----------- | ------------------------- |
+| X (right)    | -Y (left)   | Lateral movement          |
+| Y (up)       | Z (up)      | Vertical movement         |
 | Z (backward) | X (forward) | Forward/backward movement |
 
 #### 2.5.8 Test Oculus Connection
