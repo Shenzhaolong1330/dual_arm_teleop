@@ -10,7 +10,7 @@ from typing import Dict, Optional, Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
-from .oculus_reader import OculusReader
+from .oculus_reader.oculus_reader import OculusReader
 from .robot import Robot
 
 
