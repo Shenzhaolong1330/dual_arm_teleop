@@ -18,8 +18,8 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 from lerobot.robots.robot import Robot
 
 from .config_nero import NeroDualArmConfig
-from .nero_interface_client import NeroDualArmClient
-from .dual_gripper_client import DualGripperClient
+# from .nero_interface_client import NeroDualArmClient
+# from .dual_gripper_client import DualGripperClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

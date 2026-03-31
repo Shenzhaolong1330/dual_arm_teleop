@@ -18,8 +18,8 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 from lerobot.robots.robot import Robot
 
 from .config_arx import ArxDualArmConfig
-from .arx_interface_client import ArxDualArmClient
-from .dual_gripper_client import DualGripperClient
+# from .arx_interface_client import ArxDualArmClient
+# from .dual_gripper_client import DualGripperClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

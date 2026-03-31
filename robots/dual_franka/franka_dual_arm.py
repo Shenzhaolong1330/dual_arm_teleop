@@ -18,8 +18,8 @@ from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnected
 from lerobot.robots.robot import Robot
 
 from .config_franka import FrankaDualArmConfig
-from .franka_interface_client import FrankaDualArmClient
-from .dual_gripper_client import DualGripperClient
+# from .franka_interface_client import FrankaDualArmClient
+# from .dual_gripper_client import DualGripperClient
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
