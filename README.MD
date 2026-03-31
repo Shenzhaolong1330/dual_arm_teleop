@@ -42,8 +42,8 @@ pip install -e .
 ### 1.3 Clone and Install Dual Arm Teleoperation Source
 ```bash
 mkdir dual_arm_data_collection && cd dual_arm_data_collection
-git clone https://github.com/Shenzhaolong1330/lerobot_dual_arm_teleop.git
-cd lerobot_dual_arm_teleop
+git clone https://github.com/Shenzhaolong1330/dual_arm_teleop.git
+cd dual_arm_teleop
 pip install -e .
 ```
 
@@ -65,40 +65,23 @@ Or you can check the serial number in the realsense-viewer.
 realsense-viewer
 ```
 
-### 2.2 Map Gripper Serial Port
-For example, map the gripper to `/dev/dual_arm_left_gripper` and make sure only one gripper USB device is connected:
-```bash
-map_gripper.sh dual_arm_left_gripper
-```
-Next, enter the mapped device into the `gripper_port` field in `cfg.yaml`. 
-
-### 2.3 Get the Master Arm's Persistent Serial Identifier
-Before running this, make sure only one USB device for the master arm is connected:
-```bash
-check_master_port.sh
-```
-Next, enter the obtained serial identifier into the `port` field in `record_cfg.yaml` and set device access permissions:
-```bash
-sudo chmod 666 <your_gripper_port>
-```
-
-### 2.5 Oculus Quest Setup (For Oculus Teleoperation Mode)
+### 2.2 Oculus Quest Setup (For Oculus Teleoperation Mode)
 
 If you plan to use Oculus Quest for teleoperation, follow these steps to set up the device:
 
-#### 2.5.0 Clone Oculus Reader
+#### 2.2.0 Clone Oculus Reader
 ```bash
-cd lerobot_franka_isoteleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus
+cd teleoperators/oculus_teleoperator/oculus
 git clone https://github.com/rail-berkeley/oculus_reader.git
 pip install -e oculus_reader
 ```
 after pip, you can run 
 ```bash
-python lerobot_franka_isoteleop/lerobot_teleoperator_franka/lerobot_teleoperator_franka/oculus/oculus_reader/oculus_reader/reader.py
+python teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/reader.py
 ```
-to test the Oculus Reader.
+to test the Oculus Reader and check the data output.
 
-#### 2.5.1 Install ADB (Android Debug Bridge)
+#### 2.2.1 Install ADB (Android Debug Bridge)
 
 ADB is required for communication between Oculus Quest and the computer.
 
@@ -110,14 +93,14 @@ sudo apt install android-tools-adb
 adb version
 ```
 
-#### 2.5.2 Enable Developer Mode on Oculus Quest
+#### 2.2.2 Enable Developer Mode on Oculus Quest
 
 1. Create or join a developer organization at [Meta for Developers](https://developer.oculus.com/manage/organizations/create/)
 2. Open the Meta Quest app on your phone
 3. Go to **Settings** → Select your device → **More Settings** → **Developer Mode**
 4. Enable **Developer Mode** toggle
 
-#### 2.5.3 Connect Oculus Quest to Computer
+#### 2.2.3 Connect Oculus Quest to Computer
 
 **Option A: USB Connection (Recommended for initial setup)**
 
@@ -148,7 +131,7 @@ teleop:
     ip: "192.168.110.62"  # Your Oculus Quest IP address
 ```
 
-#### 2.5.4 Install Oculus Reader APK
+#### 2.2.4 Install Oculus Reader APK
 
 The Oculus Reader APK comes pre-packaged with this project. To install it:
 
@@ -162,13 +145,14 @@ adb install -r teleop-debug.apk
 
 After installation, the app will appear in your Oculus Quest library under **Unknown Sources**.
 
-#### 2.5.5 Configure Oculus Teleoperation in record_cfg.yaml
+#### 2.2.5 Configure Oculus Teleoperation in record_cfg.yaml
 
 ```yaml
 record:
   control_mode: "oculus"  # Set control mode to oculus
   
   teleop:
+
     control_mode: "oculus"
     oculus_config:
       ip: "192.168.110.62"  # Oculus Quest IP address
@@ -177,7 +161,7 @@ record:
       channel_signs: [1, 1, 1, -1, -1, 1]  # Axis direction signs [x, y, z, rx, ry, rz]
 ```
 
-#### 2.5.6 Oculus Controller Controls
+#### 2.2.6 Oculus Controller Controls
 
 | Control                   | Function                                |
 | ------------------------- | --------------------------------------- |
@@ -186,7 +170,7 @@ record:
 | **A Button**              | Request robot reset                     |
 | **Right Controller Pose** | Controls end-effector delta pose        |
 
-#### 2.5.7 Coordinate System Mapping
+#### 2.2.7 Coordinate System Mapping
 
 The Oculus coordinate system is mapped to the robot coordinate system as follows:
 
@@ -196,20 +180,7 @@ The Oculus coordinate system is mapped to the robot coordinate system as follows
 | Y (up)       | Z (up)      | Vertical movement         |
 | Z (backward) | X (forward) | Forward/backward movement |
 
-#### 2.5.8 Test Oculus Connection
-
-Before recording, test the Oculus connection:
-
-```python
-from lerobot_teleoperator.lerobot_teleoperator.oculus.oculus_robot import OculusRobot
-
-oculus = OculusRobot(ip='192.168.110.62')
-while True:
-    action = oculus.get_action()
-    print(f"Delta pose: {action[:6]}, Gripper: {action[6]}")
-```
-
-#### 2.5.9 Troubleshooting
+#### 2.2.8 Troubleshooting
 
 **Connection Issues:**
 ```bash
