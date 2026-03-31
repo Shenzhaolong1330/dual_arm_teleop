@@ -2,12 +2,14 @@ import yaml
 from pathlib import Path
 from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
-from robots import DobotDualArmConfig, DobotDualArm
+from robots import (
+    SUPPORTED_ROBOTS,
+    create_robot_config,
+    create_robot,
+)
 from teleoperators import (
     OculusTeleopConfig,
-    OculusDualArmTeleopConfig,
-    create_teleop,
-    create_teleop_config,
+    OculusTeleop,
 )
 from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
@@ -52,6 +54,14 @@ class RecordConfig:
         self.run_mode: str = cfg.get("run_mode", "run_record")
         self.rename_map: dict[str, str] = field(default_factory=dict)
         
+        # Robot type selection
+        self.robot_type: str = cfg.get("robot_type", "dobot_dual_arm")
+        if self.robot_type not in SUPPORTED_ROBOTS:
+            raise ValueError(
+                f"Unsupported robot type: {self.robot_type}. "
+                f"Supported types: {SUPPORTED_ROBOTS}"
+            )
+        
         # Teleop config - parse based on control mode
         self.control_mode = teleop.get("control_mode", "oculus")
         self.dual_arm = teleop.get("dual_arm", True)
@@ -61,6 +71,7 @@ class RecordConfig:
         self._parse_policy_config(policy)
         
         # Robot config
+        self.robot_ip: str = robot.get("robot_ip", "localhost")
         self.robot_port: int = robot.get("robot_port", 4242)
         self.use_gripper: bool = robot["use_gripper"]
         self.close_threshold = robot.get("close_threshold", 0.5)
@@ -136,7 +147,7 @@ class RecordConfig:
         """Create teleoperation configuration object."""
         if self.control_mode == "oculus":
             if self.dual_arm:
-                return OculusDualArmTeleopConfig(
+                return OculusTeleopConfig(
                     use_gripper=self.use_gripper,
                     ip=self.oculus_ip,
                     left_pose_scaler=self.left_pose_scaler,
@@ -215,8 +226,10 @@ def run_record(record_cfg: RecordConfig):
         # Create teleop config using the new method
         teleop_config = record_cfg.create_teleop_config()
         
-        # Create Dobot dual-arm robot configuration
-        robot_config = DobotDualArmConfig(
+        # Create robot configuration dynamically based on robot_type
+        robot_config = create_robot_config(
+            record_cfg.robot_type,
+            robot_ip=record_cfg.robot_ip,
             robot_port=record_cfg.robot_port,
             cameras=camera_config,
             debug=record_cfg.debug,
@@ -229,8 +242,8 @@ def run_record(record_cfg: RecordConfig):
             control_mode=record_cfg.control_mode,
         )
         
-        # Initialize the robot
-        robot = DobotDualArm(robot_config)
+        # Initialize the robot dynamically based on robot_type
+        robot = create_robot(record_cfg.robot_type, robot_config)
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
@@ -270,7 +283,7 @@ def run_record(record_cfg: RecordConfig):
         # configure the teleop and policy
         if record_cfg.run_mode == "run_record":
             logging.info("====== [INFO] Running in teleoperation mode ======")
-            teleop = create_teleop(teleop_config)
+            teleop = OculusTeleop(teleop_config)
             policy = None
         elif record_cfg.run_mode == "run_policy":
             logging.info("====== [INFO] Running in policy mode ======")
@@ -279,7 +292,7 @@ def run_record(record_cfg: RecordConfig):
         elif record_cfg.run_mode == "run_mix":
             logging.info("====== [INFO] Running in mixed mode ======")
             policy = make_policy(record_cfg.policy, ds_meta=dataset.meta)
-            teleop = create_teleop(teleop_config)
+            teleop = OculusTeleop(teleop_config)
         
         if policy is not None:
             preprocessor, postprocessor = make_pre_post_processors(

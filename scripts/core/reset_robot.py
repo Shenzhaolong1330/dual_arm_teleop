@@ -1,7 +1,11 @@
 import yaml
 from pathlib import Path
 from typing import Dict, Any
-from robots import DobotDualArmConfig, DobotDualArm
+from robots import (
+    SUPPORTED_ROBOTS,
+    create_robot_config,
+    create_robot,
+)
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -12,8 +16,12 @@ def main():
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
+    robot_type = cfg["record"].get("robot_type", "dobot_dual_arm")
+    
     # 创建机器人配置
-    robot_config = DobotDualArmConfig(
+    robot_config = create_robot_config(
+        robot_type=robot_type,
+        robot_ip=cfg["record"]["robot"].get("robot_ip", "localhost"),
         robot_port=cfg["record"]["robot"].get("robot_port", 4242),
         use_gripper=cfg["record"]["robot"]["use_gripper"],
         close_threshold=cfg["record"]["robot"].get("close_threshold", 0.5),
@@ -22,7 +30,7 @@ def main():
     )
     
     # 创建机器人实例并连接
-    robot = DobotDualArm(robot_config)
+    robot = create_robot(robot_type, robot_config)
     robot.connect()
     
     # 重置机器人到初始位置

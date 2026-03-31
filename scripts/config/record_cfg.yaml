@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "dual_dobot/milk_shake_3_16_step5" 
+  repo_id: &repo_id "test/test"
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
@@ -8,6 +8,10 @@ record:
   control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
   use_gripper: &use_gripper true  # whether to use gripper
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
+
+  # Robot type selection
+  # Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
+  robot_type: &robot_type "franka"
 
   teleop:
     control_mode: *control_mode
@@ -22,10 +26,10 @@ record:
       visualize_placo: false  # whether to visualize robot using placo
       
   robot:
-    robot_ip: &ip "localhost" # dobot server ip
+    robot_ip: &ip "192.168.110.15" # dobot server ip
     robot_port: 4242  # dual-arm zerorpc port (single port for both arms)
     use_gripper: *use_gripper
-    gripper_ip: "localhost" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
+    gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
     gripper_port: 4243  # gripper zerorpc port (single port for both arms)
     close_threshold: 0.7 # threshold to determine gripper open/close
     gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
@@ -36,8 +40,7 @@ record:
     type: "act"  # 策略类型 (act, diffusion)
     device: "cuda"  # 运行设备 (cuda, cpu)
     push_to_hub: False  # 禁用模型推送
-    pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/train/act_test9/checkpoints/last/pretrained_model"  
-    # 预训练模型路径下要包括config.json
+    pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/train/act_test9/checkpoints/last/pretrained_model"  # 预训练模型路径下要包括config.json
 
   task:
     description: "use the left hand to pick up the bottle and insert it into the blender then pressing the button" # task description
@@ -53,8 +56,8 @@ record:
 
   cameras:
     left_wrist_cam_serial: "317422075656"   # left wrist camera serial number
-    right_wrist_cam_serial: "243222071212"  # right wrist camera serial number
-    head_cam_serial: "337322072568"         # head (overhead) camera serial number
+    right_wrist_cam_serial: "344322074412"  # right wrist camera serial number
+    head_cam_serial: "243322071821"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 
@@ -64,6 +67,7 @@ record:
 replay:
   dataset_name: dual_dobot/milk_shake_3_15_step1_20260315_v08
   episode_idx: 0 # episode index to replay
+  robot_type: *robot_type  # robot type to use for replay
   robot:
     ip: *ip
     robot_port: 4242  # dual-arm zerorpc port
