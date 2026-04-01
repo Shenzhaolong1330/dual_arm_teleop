@@ -41,7 +41,7 @@ pip install -e .
 
 ### 1.3 Clone and Install Dual Arm Teleoperation Source
 ```bash
-mkdir dual_arm_data_collection && cd dual_arm_data_collection
+mkdir dual_arm_ws && cd dual_arm_ws
 git clone https://github.com/Shenzhaolong1330/dual_arm_teleop.git
 cd dual_arm_teleop
 pip install -e .
@@ -137,7 +137,7 @@ The Oculus Reader APK comes pre-packaged with this project. To install it:
 
 ```bash
 # Navigate to the APK directory
-cd lerobot_teleoperator/lerobot_teleoperator/oculus/oculus_reader/APK
+cd teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/APK
 
 # Install the APK to Oculus Quest
 adb install -r teleop-debug.apk
@@ -221,9 +221,7 @@ huggingface-cli whoami  # Verify successful login
 2. Verify that the parameters in `record_cfg.yaml` are correct.  
 3. To ensure standardized data collection, please read `9. Dataset Naming and Recording Details` before running the following command:
 ```bash
-unset LD_LIBRARY_PATH 
-unset PYTHONPATH 
-dobot-record
+robot-record
 ```
 
 <p align="center">
@@ -234,12 +232,12 @@ dobot-record
 
 ## 4. Dataset Replay
 ```bash
-dobot-replay # Make sure record_cfg.yaml is properly configured
+robot-replay # Make sure record_cfg.yaml is properly configured
 ```
 
 ## 5. Dataset Visualization
 ```bash
-dobot-visualize # Make sure record_cfg.yaml is properly configured
+robot-visualize # Make sure record_cfg.yaml is properly configured
 ```
 <p align="center">
   <img src="assets/visualize.png" alt="Visualization" width="600">
@@ -251,7 +249,7 @@ dobot-visualize # Make sure record_cfg.yaml is properly configured
 If you have already recorded a dataset under the specified `repo_id`, set `resume: True` in `record_cfg.yaml` and enter the dataset name in `resume_dataset` to continue recording new data on the existing dataset. Then, run the following command:
 
 ```bash
-dobot-record
+robot-record
 ```
 
 ## 7. Merge Datasets
@@ -315,7 +313,7 @@ lerobot-edit-dataset
 1. Complete step `2. Get and configure required parameters`.
 2. Fill in the task instruction in `record_cfg.yaml` under `task.description` and set `repo_id` according to the dataset naming rules.
 3. Check and adjust other parameters in `record_cfg.yaml` to ensure correctness.
-4. Run `dobot-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `dobot-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
+4. Run `robot-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `robot-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
 5. After recording, a `dataset_info.txt` file will be automatically created in the same directory to store local dataset information. If you have manually deleted any datasets, update the `dataset_info.txt` using:
 ```bash
 tools-check-dataset
@@ -333,7 +331,7 @@ Config the `train_cfg.yaml` file, including the following fields:
 
 Then run the following command to start training:
 ```bash
-dobot-train
+robot-train
 ```
 
 ### 10.2 Evaluation
@@ -344,5 +342,5 @@ To evaluate the trained policy, config the `record_cfg.yaml` file, including the
 
 Then run the following command to start evaluation:
 ```bash
-dobot-record
+robot-record
 ```
