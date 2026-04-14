@@ -4,13 +4,13 @@ record:
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
-  fps: 15 # dataset and camera frame rate
+  fps: 30  # dataset and camera frame rate
   control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
   use_gripper: &use_gripper true  # whether to use gripper
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
-  robot_type: &robot_type "franka"
+  robot_type: &robot_type "nero_dual_arm"
 
   teleop:
     control_mode: *control_mode
@@ -18,22 +18,26 @@ record:
     oculus_config:
       ip: "192.168.110.62"  # Oculus Quest IP address
       use_gripper: *use_gripper
-      left_pose_scaler: [1.0, 1.0]   # left arm scaler
-      left_channel_signs: [1, -1, 1, -1, 1, 1]  # left arm signs
-      right_pose_scaler: [1.0, 1.0]  # right arm scaler
-      right_channel_signs: [1, -1, 1, -1, 1, 1]  # right arm signs
+      left_pose_scaler: [0.3, 0.3]   # left arm scaler
+      left_channel_signs: [-1, -1, 1, 1, 1, 1]  # left arm signs
+      # left_channel_signs: [-1, -1, 1, -1, -1, -1] 
+      right_pose_scaler: [0.3, 0.3]  # right arm scalers
+      right_channel_signs: [-1, -1, 1, 1, 1, 1]  # right arm signs
+      # right_channel_signs: [-1, -1, 1, -1, -1, -1]
       visualize_placo: false  # whether to visualize robot using placo
       
   robot:
-    robot_ip: &ip "192.168.110.15" # dobot server ip
+    robot_ip: &ip "192.168.110.41" # dobot server ip
+    # robot_ip: &ip "localhost" # nero server ip
     robot_port: 4242  # dual-arm zerorpc port (single port for both arms)
     use_gripper: *use_gripper
-    gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
-    gripper_port: 4243  # gripper zerorpc port (single port for both arms)
-    close_threshold: 0.7 # threshold to determine gripper open/close
-    gripper_bin_threshold: 0.98 # threshold to determine gripper is closed
+    # gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
+    # gripper_port: 4243  # gripper zerorpc port (single port for both arms)
+    close_threshold: 0.05 # threshold to determine gripper open/close
+    # gripper_bin_threshold: 0.05 # threshold to determine gripper is closed
     gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.085 # Robotiq 2F-85 max open width in meters
+    gripper_max_open: 0.1 # Robotiq 2F-85 max open width in meters
+    gripper_force: 2.0 # Robotiq 2F-85 max force in Newtons
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
@@ -54,9 +58,9 @@ record:
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    left_wrist_cam_serial: "317422075656"   # left wrist camera serial number
-    right_wrist_cam_serial: "344322074412"  # right wrist camera serial number
-    head_cam_serial: "243322071821"         # head (overhead) camera serial number
+    left_wrist_cam_serial: "412622270929"   # left wrist camera serial number
+    right_wrist_cam_serial: "412622270701"  # right wrist camera serial number
+    head_cam_serial: "339322074423"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 

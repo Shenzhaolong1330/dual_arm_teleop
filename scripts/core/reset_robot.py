@@ -31,6 +31,7 @@ def main():
     
     # 创建机器人实例并连接
     robot = create_robot(robot_type, robot_config)
+    print("----------",robot.name)
     robot.connect()
     
     # 重置机器人到初始位置
@@ -38,7 +39,7 @@ def main():
     robot.reset()
     
     # 断开连接
-    robot.disconnect()
+    # robot.disconnect()
     logging.info("Robot reset completed successfully.")
 
 if __name__ == "__main__":

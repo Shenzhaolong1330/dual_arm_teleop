@@ -12,24 +12,24 @@ from lerobot.robots.config import RobotConfig
 @RobotConfig.register_subclass("nero_dual_arm")
 @dataclass
 class NeroDualArmConfig(RobotConfig):
-    """Configuration for Nero dual-arm robot with Robotiq 2F-85 grippers."""
+    """Configuration for Nero dual-arm robot with agx_grippers."""
     
     # Robot identification
     name: str = "nero_dual_arm"
     
     # Network configuration - single port for dual-arm control
-    robot_ip: str = "localhost"  # Nero server ip
+    robot_ip: str = "192.168.110.114"  # Nero server ip
     robot_port: int = 4242  # dual-arm zerorpc port (single port for both arms)
     
-    # Gripper configuration (Robotiq 2F-85)
-    gripper_ip: str = "localhost"  # gripper zerorpc ip, if different from robot_ip, set to robot_ip
+    # Gripper configuration (agx_grippers)
+    gripper_ip: str = "192.168.110.114"  # gripper zerorpc ip, if different from robot_ip, set to robot_ip
     gripper_port: int = 4243  # gripper zerorpc port (single port for both arms)
     use_gripper: bool = True
-    gripper_max_open: float = 0.085  # Robotiq 2F-85 max opening: 85mm
-    gripper_force: float = 10.0  # Gripping force in N
+    gripper_max_open: float = 0.1  # agx_gripper max opening: 10mm
+    gripper_force: float = 2.0  # Gripping force in N
     gripper_speed: float = 0.1  # Speed in m/s
     gripper_reverse: bool = False  # Whether to reverse gripper command
-    close_threshold: float = 0.5  # Threshold for binary gripper control
+    close_threshold: float = 0.05  # Threshold for binary gripper control
     
     # Control configuration
     control_mode: str = "oculus"
