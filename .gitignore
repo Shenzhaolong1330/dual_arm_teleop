@@ -20,3 +20,6 @@ dist/
 # Ignore VSCode and IDE configs
 .vscode/
 .idea/
+
+outputs/
+oculus/
