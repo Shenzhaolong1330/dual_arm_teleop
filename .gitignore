@@ -22,4 +22,4 @@ dist/
 .idea/
 
 outputs/
-oculus/
+oculus_reader/
