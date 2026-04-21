@@ -54,7 +54,7 @@ class NeroDualArm(Robot):
         # self._right_smoothed_delta = None
 
         # 发送频率控制
-        self.action_send_freq = 50.0  # 50Hz
+        self.action_send_freq = 100.0  # 50Hz
         self.action_send_dt = 1.0 / self.action_send_freq
         self.last_action_send_time = 0.0
 
@@ -257,7 +257,7 @@ class NeroDualArm(Robot):
             logger.warning(f"[{arm_side.upper()} GRIPPER] zerorpc error: {e}")
         
         t_handle_end = time.perf_counter()
-        logger.info(f"[TIMING] handle_gripper {arm_side}: {(t_handle_end-t_handle_start)*1000:.2f}ms")
+        # logger.info(f"[TIMING] handle_gripper {arm_side}: {(t_handle_end-t_handle_start)*1000:.2f}ms")
     
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         t_send_start = time.perf_counter()
@@ -296,7 +296,7 @@ class NeroDualArm(Robot):
             self.handle_gripper("right", action["right_gripper_cmd_bin"], is_binary=False)
 
         t_send_end = time.perf_counter()
-        logger.info(f"[TIMING] send_action total: {(t_send_end-t_send_start)*1000:.2f}ms")
+        # logger.info(f"[TIMING] send_action total: {(t_send_end-t_send_start)*1000:.2f}ms")
 
         return action
 
@@ -321,20 +321,20 @@ class NeroDualArm(Robot):
                     t_servo_start = time.perf_counter()
                     self._robot.servo_p_OL("left_robot", left_delta, delta=True)
                     t_servo_end = time.perf_counter()
-                    logger.info(f"[TIMING] left servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
+                    # logger.info(f"[TIMING] left servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
                 
                 # 右臂：直接传入增量
                 if np.linalg.norm(right_delta) >= 0.001:
                     t_servo_start = time.perf_counter()
                     self._robot.servo_p_OL("right_robot", right_delta, delta=True)
                     t_servo_end = time.perf_counter()
-                    logger.info(f"[TIMING] right servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
+                    # logger.info(f"[TIMING] right servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
                     
             except Exception as e:
                 logger.warning(f"[DUAL ARM] servo_p_OL failed: {e}")
         
         t_cart_end = time.perf_counter()
-        logger.info(f"[TIMING] send_action_cartesian total: {(t_cart_end-t_cart_start)*1000:.2f}ms")
+        # logger.info(f"[TIMING] send_action_cartesian total: {(t_cart_end-t_cart_start)*1000:.2f}ms")
 
 
     def get_observation(self) -> dict[str, Any]:
@@ -345,16 +345,16 @@ class NeroDualArm(Robot):
         
         try:
             t_query_start = time.perf_counter()
-            left_joint_pos = self._robot.left_robot_get_joint_positions()
+            # left_joint_pos = self._robot.left_robot_get_joint_positions()
             left_ee_pose = self._robot.left_robot_get_ee_pose()
             t_query_end = time.perf_counter()
-            logger.info(f"[TIMING] left robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
+            # logger.info(f"[TIMING] left robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
             
             t_query_start = time.perf_counter()
-            right_joint_pos = self._robot.right_robot_get_joint_positions()
+            # right_joint_pos = self._robot.right_robot_get_joint_positions()
             right_ee_pose = self._robot.right_robot_get_ee_pose()
             t_query_end = time.perf_counter()
-            logger.info(f"[TIMING] right robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
+            # logger.info(f"[TIMING] right robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
             
         except Exception as e:
             logger.warning(f"[ROBOT] zerorpc error in get_observation: {e}")
@@ -393,13 +393,13 @@ class NeroDualArm(Robot):
             t_cam_start = time.perf_counter()
             obs_dict[cam_key] = cam.read()
             t_cam_end = time.perf_counter()
-            logger.info(f"[TIMING] {cam_key} read: {(t_cam_end-t_cam_start)*1000:.2f}ms")
+            # logger.info(f"[TIMING] {cam_key} read: {(t_cam_end-t_cam_start)*1000:.2f}ms")
         t_cam_total_end = time.perf_counter()
-        logger.info(f"[TIMING] camera total: {(t_cam_total_end-t_cam_total_start)*1000:.2f}ms")
+        # logger.info(f"[TIMING] camera total: {(t_cam_total_end-t_cam_total_start)*1000:.2f}ms")
         
         self._prev_observation = obs_dict
         t_total_end = time.perf_counter()
-        logger.info(f"[TIMING] get_observation total: {(t_total_end-t_total_start)*1000:.2f}ms")
+        # logger.info(f"[TIMING] get_observation total: {(t_total_end-t_total_start)*1000:.2f}ms")
         return obs_dict
     
     def disconnect(self) -> None:
