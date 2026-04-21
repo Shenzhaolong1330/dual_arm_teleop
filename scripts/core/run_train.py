@@ -79,20 +79,51 @@ class TrainPipelineConfig(HubMixin):
         # )
         self.env = None
 
+        def normalize_temporal_ensemble_coeff(value: Any) -> float | None:
+            """Treat non-positive and None-like values as disabled temporal ensembling."""
+            if value is None:
+                return None
+
+            if isinstance(value, str):
+                text = value.strip().lower()
+                if text in {"", "none", "null", "~"}:
+                    return None
+                try:
+                    value = float(text)
+                except ValueError as exc:
+                    raise ValueError(
+                        "`policy.temporal_ensemble_coeff` must be a number, null, or None-like string. "
+                        f"Got: {value!r}"
+                    ) from exc
+
+            if isinstance(value, (int, float)):
+                return float(value) if value > 0 else None
+
+            raise ValueError(
+                "`policy.temporal_ensemble_coeff` must be numeric or null-like. "
+                f"Got type: {type(value).__name__}"
+            )
+
         policy_type = policy["type"]
         if policy_type == "act":
             from lerobot.policies import ACTConfig
+            temporal_ensemble_coeff = normalize_temporal_ensemble_coeff(
+                policy.get("temporal_ensemble_coeff")
+            )
             self.policy = ACTConfig(
                 device = policy["device"],
                 repo_id = policy["repo_id"],
-                push_to_hub = policy["push_to_hub"]
+                push_to_hub = policy["push_to_hub"],
+                temporal_ensemble_coeff = temporal_ensemble_coeff,
+                chunk_size = policy.get("chunk_size", 100),
+                n_action_steps = policy.get("n_action_steps", 1),
             )
         elif policy_type == "diffusion":
             from lerobot.policies import DiffusionConfig
             self.policy = DiffusionConfig(
                 device = policy["device"],
                 repo_id = policy["repo_id"],
-                push_to_hub = ["push_to_hub"]
+                push_to_hub = policy["push_to_hub"],
             )
         else:
             raise ValueError(f"no config for policy type: {policy_type}")
