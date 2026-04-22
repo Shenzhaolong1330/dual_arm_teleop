@@ -21,5 +21,9 @@ dist/
 .vscode/
 .idea/
 
+# Ignore runtime outputs, logs, and profiling artifacts
 outputs/
+logs/
+
+# Ignore vendored third-party reader (clone separately if needed)
 oculus_reader/
