@@ -25,7 +25,8 @@ class OculusDualArmRobot(Robot):
     - RTr (Right Trigger): Controls right gripper (0.0 = open, 1.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
-    - A button: Request robot reset
+    - A button: Request RIGHT arm reset
+    - X button: Request LEFT arm reset
     
     Coordinate Systems:
         Oculus: X(right), Y(up), Z(backward/towards user)
@@ -80,6 +81,8 @@ class OculusDualArmRobot(Robot):
         
         # Reset request
         self._reset_requested = False
+        self._left_arm_reset_requested = False
+        self._right_arm_reset_requested = False
 
     def _ema_smooth(self, current: np.ndarray, prev: Optional[np.ndarray]) -> np.ndarray:
         """Apply EMA smoothing to a 6D delta vector."""
@@ -172,8 +175,10 @@ class OculusDualArmRobot(Robot):
         lg_pressed = buttons.get('LG', False)
         rg_pressed = buttons.get('RG', False)
         a_pressed = buttons.get('A', False)
-        
-        self._reset_requested = a_pressed
+        x_pressed = buttons.get('X', False)
+        self._right_arm_reset_requested = a_pressed
+        self._left_arm_reset_requested = x_pressed
+        self._reset_requested = a_pressed or x_pressed
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
@@ -242,7 +247,7 @@ class OculusDualArmRobot(Robot):
         return action
 
     def is_reset_requested(self) -> bool:
-        """Check if reset was requested (A button pressed)."""
+        """Check if any arm reset was requested (A or X button pressed)."""
         return self._reset_requested
 
     def get_observations(self) -> Dict[str, np.ndarray]:
@@ -254,6 +259,8 @@ class OculusDualArmRobot(Robot):
             right_delta_ee_pose.{x,y,z,rx,ry,rz}
             left_gripper_cmd_bin
             right_gripper_cmd_bin
+            left_arm_reset_requested
+            right_arm_reset_requested
             reset_requested
         """
         action_data = self.get_action()
@@ -280,7 +287,9 @@ class OculusDualArmRobot(Robot):
             obs_dict["left_gripper_cmd_bin"] = None
             obs_dict["right_gripper_cmd_bin"] = None
         
-        # Reset request flag
+        # Reset request flags
+        obs_dict["left_arm_reset_requested"] = self._left_arm_reset_requested
+        obs_dict["right_arm_reset_requested"] = self._right_arm_reset_requested
         obs_dict["reset_requested"] = self._reset_requested
         
         return obs_dict
@@ -305,7 +314,8 @@ if __name__ == "__main__":
     print("  - RG (Right Grip):   Press to enable RIGHT arm action")
     print("  - LTr (Left Trigger):  Control LEFT gripper")
     print("  - RTr (Right Trigger): Control RIGHT gripper")
-    print("  - A button: Request robot reset")
+    print("  - A button: Request RIGHT arm reset")
+    print("  - X button: Request LEFT arm reset")
     print("Press Ctrl+C to exit\n")
     
     try:
