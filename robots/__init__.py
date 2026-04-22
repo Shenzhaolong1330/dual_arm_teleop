@@ -9,15 +9,15 @@ Action input format (from teleop):
 
 from typing import Dict, Any, Type
 
-# Import robot configurations
 from .franka.config_franka import FrankaConfig
 from .dual_dobot.config_dobot import DobotDualArmConfig
 from .dual_agilx_nero.config_nero import NeroDualArmConfig
+from .dual_arx_r5.config_arx import ArxDualArmConfig
 
-# Import robot classes
 from .franka.franka import Franka
 from .dual_dobot.dobot_dual_arm import DobotDualArm
 from .dual_agilx_nero.nero_dual_arm import NeroDualArm
+from .dual_arx_r5.arx_dual_arm import ArxDualArm
 
 
 # Robot type registry: {robot_type: (ConfigClass, RobotClass)}
@@ -26,10 +26,10 @@ ROBOT_CONFIG_REGISTRY: Dict[str, tuple] = {
     "franka": (FrankaConfig, Franka),
     # Dual-arm robots
     "dobot_dual_arm": (DobotDualArmConfig, DobotDualArm),
-    "nero_dual_arm": (NeroDualArmConfig, NeroDualArm)
+    "nero_dual_arm": (NeroDualArmConfig, NeroDualArm),
+    "arx_dual_arm": (ArxDualArmConfig, ArxDualArm),
 }
 
-# Supported robot types
 SUPPORTED_ROBOTS = list(ROBOT_CONFIG_REGISTRY.keys())
 
 
@@ -66,13 +66,14 @@ def create_robot(robot_type: str, config: Any):
 
 
 __all__ = [
-    # Configuration classes
     "FrankaConfig",
     "DobotDualArmConfig",
-    # Robot classes
+    "NeroDualArmConfig",
+    "ArxDualArmConfig",
     "Franka",
     "DobotDualArm",
-    # Registry and factory functions
+    "NeroDualArm",
+    "ArxDualArm",
     "ROBOT_CONFIG_REGISTRY",
     "SUPPORTED_ROBOTS",
     "get_robot_config_class",
