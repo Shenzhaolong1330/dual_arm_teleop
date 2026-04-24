@@ -4,7 +4,7 @@ record:
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
   user_notes:  # any additional notes about the dataset
-  fps: 30 # dataset and camera frame rate
+  fps: 30  # dataset and camera frame rate
   control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
   use_gripper: &use_gripper true  # whether to use gripper
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
@@ -53,16 +53,10 @@ record:
 
     # --- ARX R5 config (use when robot_type: "arx_dual_arm") ---
     robot_ip: &ip "10.10.10.2"  # ARX RPC server IP (robot-side Linux)
-    robot_port: 4242            # ZMQ+msgpack RPC port
-    use_gripper: true
+    robot_port: 4242            # zerorpc port
+    use_gripper: *use_gripper
     gripper_reverse: false      # ARX integrated gripper, 0=open 1=closed
     close_threshold: 0.5
-    enable_ee_action_filter: true     # 对 Oculus delta ee_pose 开启低通滤波 (EMA)
-    ee_action_filter_alpha_pos: 0.4   # 位置通道 alpha, 越小越平滑
-    ee_action_filter_alpha_rot: 0.35  # 姿态通道 alpha, 越小越平滑
-    enable_ee_action_deadband: true   # delta ee_pose 死区: 待机微抖不下发
-    ee_action_deadband_pos_norm: 0.00005  # 位置模长阈值 (m)
-    ee_action_deadband_rot_norm: 0.0005   # 姿态模长阈值 (rad)
     # Note: gripper_ip/port/max_open/force/speed are ignored for ARX (gripper is integrated)
 
   policy:
@@ -116,5 +110,4 @@ replay:
 visualize:
   dataset_name: dual_dobot/milk_shake_3_15_step1_20260315_v08
   episode_index: 0 # episode index to visualize
-
 
