@@ -32,8 +32,7 @@ class OculusTeleop(Teleoperator):
     - RTr (Right Trigger): Controls right gripper (0.0 = open, 1.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
-    - A button: Request RIGHT arm reset
-    - X button: Request LEFT arm reset
+    - A button: Request robot reset
     """
     
     config_class = OculusTeleopConfig
@@ -136,8 +135,6 @@ class OculusTeleop(Teleoperator):
             action["right_gripper_cmd_bin"] = float(obs.get("right_gripper_cmd_bin", 1.0))
         
         # Reset request flag (for external use)
-        action["left_arm_reset_requested"] = bool(obs.get("left_arm_reset_requested", False))
-        action["right_arm_reset_requested"] = bool(obs.get("right_arm_reset_requested", False))
         action["reset_requested"] = obs.get("reset_requested", False)
         
         return action
@@ -155,7 +152,7 @@ class OculusTeleop(Teleoperator):
         pass
     
     def is_reset_requested(self) -> bool:
-        """Check if any arm reset was requested (A or X button pressed)."""
+        """Check if reset was requested (A button pressed)."""
         if self.oculus_robot is None:
             return False
         return self.oculus_robot.is_reset_requested()
@@ -183,8 +180,7 @@ if __name__ == "__main__":
     print("  - RG (Right Grip):   Press to enable RIGHT arm action")
     print("  - LTr (Left Trigger):  Control LEFT gripper")
     print("  - RTr (Right Trigger): Control RIGHT gripper")
-    print("  - A button: Request RIGHT arm reset")
-    print("  - X button: Request LEFT arm reset")
+    print("  - A button: Request robot reset")
     print("Press Ctrl+C to exit\n")
     
     try:

@@ -1,7 +1,4 @@
 import yaml
-import argparse
-import time
-from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
@@ -34,183 +31,6 @@ from dataclasses import field
 import logging
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-
-class _RuntimeRecordLatencyProfiler:
-    """Optional runtime profiler for `robot-record` main loop."""
-
-    def __init__(self, fps: int, csv_path: str | None = None):
-        from scripts.tools.profile_dual_arx_r5_latency import StageLatencyCollector
-
-        self.collector = StageLatencyCollector()
-        self.fps = int(fps)
-        self.target_ms = 1000.0 / max(self.fps, 1)
-        self.csv_path = Path(csv_path) if csv_path else None
-
-        self._session_start = time.perf_counter()
-        self._frame_idx = 0
-        self._current_frame_start: float | None = None
-        self._installed = False
-        self._records: list[tuple[object, str, object]] = []
-        self._busy_wait_restore: tuple[object, object, object, object] | None = None
-        self._robot_hook_restore: tuple[object, object] | None = None
-
-    def wrap_callable(self, fn, stage_name: str):
-        def wrapped(*args, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return fn(*args, **kwargs)
-            finally:
-                self.collector.record(stage_name, (time.perf_counter() - t0) * 1e3)
-
-        return wrapped
-
-    def install(self, robot, teleop, dataset):
-        if self._installed:
-            return
-
-        self._wrap_method(robot, "get_observation", self._wrap_get_observation)
-        self._wrap_method(robot, "send_action", self._wrap_send_action)
-
-        if teleop is not None:
-            self._wrap_method(teleop, "get_action", self._wrap_teleop_get_action)
-        if dataset is not None:
-            self._wrap_method(dataset, "add_frame", self._wrap_dataset_add_frame)
-
-        try:
-            import lerobot.utils.robot_utils as ru_mod
-            import lerobot.scripts.lerobot_record as rec_mod
-
-            orig_ru = ru_mod.busy_wait
-            orig_rec = rec_mod.busy_wait
-
-            def wrapped_busy_wait(seconds):
-                self.collector.record("busy_wait_budget_ms", float(seconds) * 1e3)
-                t0 = time.perf_counter()
-                orig_ru(seconds)
-                self.collector.record("busy_wait_actual_ms", (time.perf_counter() - t0) * 1e3)
-                if self._current_frame_start is not None:
-                    loop_total_ms = (time.perf_counter() - self._current_frame_start) * 1e3
-                    self.collector.record("loop_total", loop_total_ms)
-                    self.collector.record("loop_overrun_ms", max(0.0, loop_total_ms - self.target_ms))
-                    self.collector.end_frame()
-                    self._current_frame_start = None
-
-            ru_mod.busy_wait = wrapped_busy_wait
-            rec_mod.busy_wait = wrapped_busy_wait
-            self._busy_wait_restore = (ru_mod, rec_mod, orig_ru, orig_rec)
-        except Exception as e:
-            logging.warning(f"[PROFILE] busy_wait patch failed: {e}")
-
-        if hasattr(robot, "set_latency_hook"):
-            try:
-                prev_hook = getattr(robot, "_latency_hook", None)
-                robot.set_latency_hook(self.collector.record)
-                self._robot_hook_restore = (robot, prev_hook)
-            except Exception as e:
-                logging.warning(f"[PROFILE] robot latency hook install failed: {e}")
-
-        self._installed = True
-        logging.info("[PROFILE] runtime latency profiling enabled for robot-record")
-
-    def _wrap_method(self, obj, method_name: str, wrapper_builder):
-        if not hasattr(obj, method_name):
-            return
-        original = getattr(obj, method_name)
-        wrapped = wrapper_builder(original)
-        setattr(obj, method_name, wrapped)
-        self._records.append((obj, method_name, original))
-
-    def _wrap_get_observation(self, original):
-        def wrapped(*args, **kwargs):
-            if self._current_frame_start is not None:
-                self.collector.end_frame()
-            self.collector.begin_frame(self._frame_idx)
-            self._frame_idx += 1
-            self._current_frame_start = time.perf_counter()
-
-            t0 = time.perf_counter()
-            try:
-                return original(*args, **kwargs)
-            finally:
-                self.collector.record("robot_get_observation_total", (time.perf_counter() - t0) * 1e3)
-
-        return wrapped
-
-    def _wrap_teleop_get_action(self, original):
-        def wrapped(*args, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return original(*args, **kwargs)
-            finally:
-                self.collector.record("teleop_get_action_total", (time.perf_counter() - t0) * 1e3)
-
-        return wrapped
-
-    def _wrap_send_action(self, original):
-        def wrapped(*args, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return original(*args, **kwargs)
-            finally:
-                self.collector.record("robot_send_action_total", (time.perf_counter() - t0) * 1e3)
-
-        return wrapped
-
-    def _wrap_dataset_add_frame(self, original):
-        def wrapped(*args, **kwargs):
-            t0 = time.perf_counter()
-            try:
-                return original(*args, **kwargs)
-            finally:
-                self.collector.record("dataset_add_frame", (time.perf_counter() - t0) * 1e3)
-
-        return wrapped
-
-    def _report_paths(self) -> tuple[Path, Path]:
-        ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        txt = Path("logs") / f"profile_{ts}.txt"
-        csv = self.csv_path if self.csv_path else txt.with_suffix(".csv")
-        return txt, csv
-
-    def close(self):
-        if self._current_frame_start is not None:
-            self.collector.end_frame()
-            self._current_frame_start = None
-
-        if self._busy_wait_restore is not None:
-            ru_mod, rec_mod, orig_ru, orig_rec = self._busy_wait_restore
-            ru_mod.busy_wait = orig_ru
-            rec_mod.busy_wait = orig_rec
-            self._busy_wait_restore = None
-
-        while self._records:
-            obj, method_name, original = self._records.pop()
-            setattr(obj, method_name, original)
-
-        if self._robot_hook_restore is not None:
-            robot, prev_hook = self._robot_hook_restore
-            try:
-                robot.set_latency_hook(prev_hook)
-            except Exception:
-                pass
-            self._robot_hook_restore = None
-
-        self._installed = False
-
-        if not self.collector.has_data():
-            logging.warning("[PROFILE] no latency data collected")
-            return
-
-        duration_s = time.perf_counter() - self._session_start
-        report = self.collector.format_report(fps=self.fps, duration_s=duration_s)
-        txt_path, csv_path = self._report_paths()
-        txt_path.parent.mkdir(parents=True, exist_ok=True)
-        txt_path.write_text(report, encoding="utf-8")
-        self.collector.export_csv(csv_path)
-
-        logging.info(f"[PROFILE] report txt: {txt_path}")
-        logging.info(f"[PROFILE] report csv: {csv_path}")
 
 
 class RecordConfig:
@@ -262,12 +82,6 @@ class RecordConfig:
         self.gripper_max_open: float = robot.get("gripper_max_open", 0.085)
         self.gripper_force: float = robot.get("gripper_force", 10.0)
         self.gripper_speed: float = robot.get("gripper_speed", 0.1)
-        self.enable_ee_action_filter: bool = robot.get("enable_ee_action_filter", True)
-        self.ee_action_filter_alpha_pos: float = robot.get("ee_action_filter_alpha_pos", 0.35)
-        self.ee_action_filter_alpha_rot: float = robot.get("ee_action_filter_alpha_rot", 0.25)
-        self.enable_ee_action_deadband: bool = robot.get("enable_ee_action_deadband", True)
-        self.ee_action_deadband_pos_norm: float = robot.get("ee_action_deadband_pos_norm", 0.00035)
-        self.ee_action_deadband_rot_norm: float = robot.get("ee_action_deadband_rot_norm", 0.0025)
         
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
@@ -402,11 +216,8 @@ def handle_incomplete_dataset(dataset_path):
         else:
             print("====== [KEEP] Incomplete dataset folder retained, please check manually. ======")
 
-
-def run_record(record_cfg: RecordConfig, enable_profile_latency: bool = False, profile_csv: str | None = None):
+def run_record(record_cfg: RecordConfig):
     print("====== [START] Starting recording ======")
-    profiler = _RuntimeRecordLatencyProfiler(int(record_cfg.fps), profile_csv) if enable_profile_latency else None
-
     try:
         dataset_name, data_version = generate_dataset_name(record_cfg)
 
@@ -466,12 +277,6 @@ def run_record(record_cfg: RecordConfig, enable_profile_latency: bool = False, p
             close_threshold=record_cfg.close_threshold,
             gripper_reverse=record_cfg.gripper_reverse,
             control_mode=record_cfg.control_mode,
-            enable_ee_action_filter=record_cfg.enable_ee_action_filter,
-            ee_action_filter_alpha_pos=record_cfg.ee_action_filter_alpha_pos,
-            ee_action_filter_alpha_rot=record_cfg.ee_action_filter_alpha_rot,
-            enable_ee_action_deadband=record_cfg.enable_ee_action_deadband,
-            ee_action_deadband_pos_norm=record_cfg.ee_action_deadband_pos_norm,
-            ee_action_deadband_rot_norm=record_cfg.ee_action_deadband_rot_norm,
         )
         
         # Initialize the robot dynamically based on robot_type
@@ -512,12 +317,6 @@ def run_record(record_cfg: RecordConfig, enable_profile_latency: bool = False, p
 
         # Create processor
         teleop_action_processor, robot_action_processor, robot_observation_processor = make_default_processors()
-        if profiler is not None:
-            teleop_action_processor = profiler.wrap_callable(teleop_action_processor, "teleop_action_processor")
-            robot_action_processor = profiler.wrap_callable(robot_action_processor, "robot_action_processor")
-            robot_observation_processor = profiler.wrap_callable(
-                robot_observation_processor, "robot_observation_processor"
-            )
         preprocessor = None
         postprocessor = None
 
@@ -549,8 +348,6 @@ def run_record(record_cfg: RecordConfig, enable_profile_latency: bool = False, p
         robot.connect()
         if teleop is not None:
             teleop.connect()
-        if profiler is not None:
-            profiler.install(robot=robot, teleop=teleop, dataset=dataset)
 
         episode_idx = 0
 
@@ -631,57 +428,28 @@ def run_record(record_cfg: RecordConfig, enable_profile_latency: bool = False, p
         update_dataset_info(record_cfg, dataset_name, data_version)
         if record_cfg.push_to_hub:
             dataset.push_to_hub()
-        if profiler is not None:
-            profiler.close()
 
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
-        if profiler is not None:
-            profiler.close()
         dataset_path = Path(HF_LEROBOT_HOME) / dataset_name
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
-        if profiler is not None:
-            profiler.close()
         dataset_path = Path(HF_LEROBOT_HOME) / dataset_name
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run dual-arm teleoperation recording.")
-    parser.add_argument(
-        "--config",
-        "-c",
-        default=None,
-        help="Path to record config YAML (default: scripts/config/record_cfg.yaml)",
-    )
-    parser.add_argument(
-        "--profile-latency",
-        action="store_true",
-        help="Enable runtime latency profiling during robot-record (writes TXT+CSV under logs/).",
-    )
-    parser.add_argument(
-        "--profile-csv",
-        default=None,
-        help="Optional CSV output path when --profile-latency is enabled.",
-    )
-    args = parser.parse_args()
-
     parent_path = Path(__file__).resolve().parent
-    cfg_path = Path(args.config) if args.config else parent_path.parent / "config" / "record_cfg.yaml"
+    cfg_path = parent_path.parent / "config" / "record_cfg.yaml"
     with open(cfg_path, 'r') as f:
         cfg = yaml.safe_load(f)
 
     record_cfg = RecordConfig(cfg["record"])
-    run_record(
-        record_cfg,
-        enable_profile_latency=args.profile_latency,
-        profile_csv=args.profile_csv,
-    )
+    run_record(record_cfg)
 
 if __name__ == "__main__":
     main()
