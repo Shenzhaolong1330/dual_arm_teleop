@@ -1,79 +1,91 @@
 """
-ARX R5 dual-arm RPC client (ZMQ + msgpack).
+ARX R5 dual-arm RPC client (ZeroRPC).
 
-Communicates with the ARX ROS2 RPC server running on the robot-side Linux.
-Protocol:
-  Request:  {"m": method_name, "a": [args...]}  → msgpack
-  Response: {"r": result}  or  {"e": error_msg}  → msgpack
+Communicates with the ARX ROS2 RPC server (`arx_ros2_rpc_server.py`) running on
+the robot-side Linux. The server exposes a ZeroRPC service whose methods mirror
+the names called below.
 
-Write commands (set_*) use fire-and-forget: server replies immediately
-with {"r": null}, then executes the ROS2 publish asynchronously.
+Notes:
+- Methods are always dispatched via ``Client.__call__`` (i.e. ``self._client(method, *args)``)
+  to avoid name collisions with ZeroRPC's own socket APIs (e.g. ``disconnect``,
+  ``close``).
+- The class name and method signatures are kept identical to the previous
+  ZMQ+msgpack implementation so callers (``arx_dual_arm.ArxDualArm``,
+  ``test_*``) require no changes.
 """
 
 import logging
+from typing import Optional
+
 import numpy as np
-import zmq
-import msgpack
+import zerorpc
 
 logger = logging.getLogger(__name__)
 
 NUM_ARM_JOINTS = 7  # 6 arm + 1 gripper
 NUM_POSE_DIMS = 6   # x, y, z, roll, pitch, yaw
 
-_DEFAULT_TIMEOUT_MS = 5000
-_CONNECT_TIMEOUT_MS = 30000
+# ZeroRPC 默认参数: timeout 仅约束“无响应”超时, 不影响正常请求延迟
+_RPC_TIMEOUT_S = 30
+_RPC_HEARTBEAT_S = 20
 
 
 class ArxDualArmClient:
-    """ZMQ+msgpack RPC client for ARX R5 dual-arm robot."""
+    """ZeroRPC client for ARX R5 dual-arm robot."""
 
     def __init__(self, ip: str = "localhost", port: int = 4242):
         self._addr = f"tcp://{ip}:{port}"
-        self._context = zmq.Context()
-        self._socket = self._context.socket(zmq.REQ)
-        self._socket.setsockopt(zmq.RCVTIMEO, _DEFAULT_TIMEOUT_MS)
-        self._socket.setsockopt(zmq.SNDTIMEO, _DEFAULT_TIMEOUT_MS)
-        self._socket.setsockopt(zmq.LINGER, 0)
-        self._socket.connect(self._addr)
-        logger.info(f"ZMQ REQ client connected to {self._addr}")
+        self._client: Optional[zerorpc.Client] = None
+        # 兼容旧调用习惯 (例如 client.server.<method>) 暴露同一个底层连接
+        self.server: Optional[zerorpc.Client] = None
 
-    def _call(self, method: str, *args, timeout_ms: int | None = None):
-        if self._socket is None:
+        client = zerorpc.Client(timeout=_RPC_TIMEOUT_S, heartbeat=_RPC_HEARTBEAT_S)
+        client.connect(self._addr)
+        self._client = client
+        self.server = client
+        logger.info(f"ZeroRPC client connected to {self._addr}")
+
+    def _call(self, method: str, *args):
+        """统一 RPC 调用入口.
+
+        总是走 ``Client.__call__`` 派发, 避免与 ZeroRPC 内置方法 (如 disconnect/close)
+        名字冲突.
+        """
+        if self._client is None:
             raise RuntimeError("RPC client already closed")
-
-        if timeout_ms is not None:
-            self._socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
         try:
-            payload = msgpack.packb({"m": method, "a": list(args)}, use_bin_type=True)
-            self._socket.send(payload)
-            raw = self._socket.recv()
-            resp = msgpack.unpackb(raw, raw=False)
-            if "e" in resp:
-                raise RuntimeError(f"Server error in {method}: {resp['e']}")
-            return resp.get("r")
-        finally:
-            if timeout_ms is not None:
-                self._socket.setsockopt(zmq.RCVTIMEO, _DEFAULT_TIMEOUT_MS)
+            return self._client(method, *args)
+        except Exception as e:
+            raise RuntimeError(f"RPC call failed in {method}: {e}") from e
+
+    @staticmethod
+    def _to_list(data):
+        if hasattr(data, "tolist"):
+            return data.tolist()
+        return list(data)
 
     # ========== System ==========
 
     def system_connect(self, timeout: float = 10.0) -> bool:
         try:
-            return self._call("system_connect", timeout, timeout_ms=_CONNECT_TIMEOUT_MS)
+            return bool(self._call("system_connect", float(timeout)))
         except Exception as e:
             logger.error(f"Error connecting to ARX system: {e}")
             return False
 
     def disconnect(self):
+        """请求服务端断开硬件连接 (本地 socket 不在此处关闭)."""
         try:
             self._call("disconnect")
             logger.info("Disconnected from ARX system")
+        except NameError:
+            logger.debug("Server does not expose disconnect method - skipping")
         except Exception as e:
-            logger.error(f"Error disconnecting: {e}")
+            logger.warning(f"Error disconnecting (continuing): {e}")
 
     def is_connected(self) -> bool:
         try:
-            return self._call("is_connected")
+            return bool(self._call("is_connected"))
         except Exception as e:
             logger.error(f"Error checking connection: {e}")
             return False
@@ -87,15 +99,22 @@ class ArxDualArmClient:
     # ========== Full state ==========
 
     def get_full_state(self):
-        """Get full system state. Returns dict with left_arm/right_arm sub-dicts,
-        each containing numpy arrays for joint_positions[7], joint_velocities[7],
-        joint_currents[7], end_pose[6], and float gripper (0-1)."""
+        """Get full system state.
+
+        Returns a dict with ``left_arm`` / ``right_arm`` sub-dicts, each containing
+        numpy arrays for ``joint_positions[7]``, ``joint_velocities[7]``,
+        ``joint_currents[7]``, ``end_pose[6]``, and a float ``gripper`` (0-1).
+        若服务端额外返回 ``chassis``, 也会原样透传.
+        """
         try:
             state = self._call("get_full_state")
             if state is None:
                 return None
 
             deserialized = {}
+            if "chassis" in state:
+                deserialized["chassis"] = state["chassis"]
+
             for side in ("left_arm", "right_arm"):
                 if side in state:
                     arm = state[side]
@@ -136,7 +155,7 @@ class ArxDualArmClient:
 
     def set_left_gripper(self, position: float):
         try:
-            self._call("set_left_gripper", position)
+            self._call("set_left_gripper", float(position))
         except Exception as e:
             logger.error(f"Error setting left gripper: {e}")
 
@@ -165,7 +184,7 @@ class ArxDualArmClient:
 
     def set_right_gripper(self, position: float):
         try:
-            self._call("set_right_gripper", position)
+            self._call("set_right_gripper", float(position))
         except Exception as e:
             logger.error(f"Error setting right gripper: {e}")
 
@@ -174,9 +193,11 @@ class ArxDualArmClient:
     def set_dual_joint_positions(self, left_positions, right_positions):
         """发送双臂关节位置. 每臂 7 个值 (6 arm + 1 gripper)."""
         try:
-            left = left_positions.tolist() if hasattr(left_positions, 'tolist') else list(left_positions)
-            right = right_positions.tolist() if hasattr(right_positions, 'tolist') else list(right_positions)
-            self._call("set_dual_joint_positions", left, right)
+            self._call(
+                "set_dual_joint_positions",
+                self._to_list(left_positions),
+                self._to_list(right_positions),
+            )
         except Exception as e:
             logger.error(f"Error setting dual joint positions: {e}")
 
@@ -185,16 +206,14 @@ class ArxDualArmClient:
     def set_left_ee_pose(self, pose, gripper: float = 0.0):
         """设置左臂末端位姿. pose: [x,y,z,roll,pitch,yaw] 米+弧度, gripper: 0-1."""
         try:
-            p = pose.tolist() if hasattr(pose, 'tolist') else list(pose)
-            self._call("set_left_ee_pose", p, gripper)
+            self._call("set_left_ee_pose", self._to_list(pose), float(gripper))
         except Exception as e:
             logger.error(f"Error setting left ee pose: {e}")
 
     def set_right_ee_pose(self, pose, gripper: float = 0.0):
         """设置右臂末端位姿. pose: [x,y,z,roll,pitch,yaw] 米+弧度, gripper: 0-1."""
         try:
-            p = pose.tolist() if hasattr(pose, 'tolist') else list(pose)
-            self._call("set_right_ee_pose", p, gripper)
+            self._call("set_right_ee_pose", self._to_list(pose), float(gripper))
         except Exception as e:
             logger.error(f"Error setting right ee pose: {e}")
 
@@ -202,27 +221,27 @@ class ArxDualArmClient:
                           left_gripper: float = 0.0, right_gripper: float = 0.0):
         """同时设置双臂末端位姿 + 夹爪. pose: [x,y,z,roll,pitch,yaw], gripper: 0-1."""
         try:
-            lp = left_pose.tolist() if hasattr(left_pose, 'tolist') else list(left_pose)
-            rp = right_pose.tolist() if hasattr(right_pose, 'tolist') else list(right_pose)
-            self._call("set_dual_ee_poses", lp, rp, left_gripper, right_gripper)
+            self._call(
+                "set_dual_ee_poses",
+                self._to_list(left_pose),
+                self._to_list(right_pose),
+                float(left_gripper),
+                float(right_gripper),
+            )
         except Exception as e:
             logger.error(f"Error setting dual ee poses: {e}")
 
     # ========== Lifecycle ==========
 
     def close(self):
-        if self._socket is not None:
+        """关闭 ZeroRPC 连接 (幂等)."""
+        if self._client is not None:
             try:
-                self._socket.close()
+                self._client.close()
             except Exception as e:
-                logger.error(f"Error closing socket: {e}")
-            self._socket = None
-        if self._context is not None:
-            try:
-                self._context.term()
-            except Exception as e:
-                logger.error(f"Error terminating context: {e}")
-            self._context = None
+                logger.error(f"Error closing RPC client: {e}")
+            self._client = None
+            self.server = None
 
 
 if __name__ == "__main__":
