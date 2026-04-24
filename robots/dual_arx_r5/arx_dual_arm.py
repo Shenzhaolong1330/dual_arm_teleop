@@ -625,12 +625,21 @@ class ArxDualArm(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         features = {}
+
+        # Left arm joints
         for i in range(self._num_arm_joints):
             features[f"left_joint_{i+1}.pos"] = float
+
+        # Right arm joints
+        for i in range(self._num_arm_joints):
             features[f"right_joint_{i+1}.pos"] = float
 
+        # Left arm end effector pose
         for axis in ["x", "y", "z", "rx", "ry", "rz"]:
             features[f"left_ee_pose.{axis}"] = float
+
+        # Right arm end effector pose
+        for axis in ["x", "y", "z", "rx", "ry", "rz"]:
             features[f"right_ee_pose.{axis}"] = float
 
         if self.config.use_gripper:
@@ -645,12 +654,20 @@ class ArxDualArm(Robot):
     def action_features(self) -> dict[str, type]:
         features = {}
         if self.config.control_mode == "oculus":
+            # Left arm delta pose
             for axis in ["x", "y", "z", "rx", "ry", "rz"]:
                 features[f"left_delta_ee_pose.{axis}"] = float
+
+            # Right arm delta pose
+            for axis in ["x", "y", "z", "rx", "ry", "rz"]:
                 features[f"right_delta_ee_pose.{axis}"] = float
         else:
+            # Left arm joints
             for i in range(self._num_arm_joints):
                 features[f"left_joint_{i+1}.pos"] = float
+
+            # Right arm joints
+            for i in range(self._num_arm_joints):
                 features[f"right_joint_{i+1}.pos"] = float
         if self.config.use_gripper:
             features["left_gripper_cmd_bin"] = float
