@@ -10,7 +10,7 @@ record:
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
-  robot_type: &robot_type "nero_dual_arm"
+  robot_type: &robot_type "arx_dual_arm"
 
   teleop:
     control_mode: *control_mode
@@ -18,26 +18,46 @@ record:
     oculus_config:
       ip: "192.168.110.62"  # Oculus Quest IP address
       use_gripper: *use_gripper
-      left_pose_scaler: [0.3, 0.3]   # left arm scaler
-      left_channel_signs: [-1, -1, 1, 1, 1, 1]  # left arm signs
-      # left_channel_signs: [-1, -1, 1, -1, -1, -1] 
-      right_pose_scaler: [0.3, 0.3]  # right arm scalers
-      right_channel_signs: [-1, -1, 1, 1, 1, 1]  # right arm signs
-      # right_channel_signs: [-1, -1, 1, -1, -1, -1]
+      # --- ARX R5 scalers/signs ---
+      left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
+      left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs [x,y,z,rx,ry,rz]
+      right_pose_scaler: [2.5, 2.5]  # right arm scaler [position, orientation]
+      right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs [x,y,z,rx,ry,rz]
+      # --- Nero scalers/signs (uncomment when robot_type: "nero_dual_arm") ---
+      # left_pose_scaler: [0.3, 0.3]
+      # left_channel_signs: [-1, -1, 1, 1, 1, 1]
+      # right_pose_scaler: [0.3, 0.3]
+      # right_channel_signs: [-1, -1, 1, 1, 1, 1]
       visualize_placo: false  # whether to visualize robot using placo
-      
+
   robot:
-    robot_ip: &ip "192.168.110.41" # dobot server ip
-    # robot_ip: &ip "localhost" # nero server ip
-    robot_port: 4242  # dual-arm zerorpc port (single port for both arms)
+    # --- Dobot config (use when robot_type: "dobot_dual_arm") ---
+    # robot_ip: &ip "192.168.110.41"
+    # robot_port: 4242
+    # use_gripper: *use_gripper
+    # gripper_ip: "192.168.110.15"
+    # gripper_port: 4243
+    # close_threshold: 0.05
+    # gripper_reverse: false
+    # gripper_max_open: 0.1
+    # gripper_force: 2.0
+
+    # --- Nero config (use when robot_type: "nero_dual_arm") ---
+    # robot_ip: &ip "localhost"
+    # robot_port: 4242
+    # use_gripper: *use_gripper
+    # close_threshold: 0.7
+    # gripper_bin_threshold: 0.98
+    # gripper_reverse: false
+    # gripper_max_open: 0.085
+
+    # --- ARX R5 config (use when robot_type: "arx_dual_arm") ---
+    robot_ip: &ip "10.10.10.2"  # ARX RPC server IP (robot-side Linux)
+    robot_port: 4242            # zerorpc port
     use_gripper: *use_gripper
-    # gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
-    # gripper_port: 4243  # gripper zerorpc port (single port for both arms)
-    close_threshold: 0.05 # threshold to determine gripper open/close
-    # gripper_bin_threshold: 0.05 # threshold to determine gripper is closed
-    gripper_reverse: false  # If gripper moves opposite, flip this value
-    gripper_max_open: 0.1 # Robotiq 2F-85 max open width in meters
-    gripper_force: 2.0 # Robotiq 2F-85 max force in Newtons
+    gripper_reverse: false      # ARX integrated gripper, 0=open 1=closed
+    close_threshold: 0.5
+    # Note: gripper_ip/port/max_open/force/speed are ignored for ARX (gripper is integrated)
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
@@ -58,9 +78,20 @@ record:
     save_meta_period: 1 # Save metadata after every N episodes
 
   cameras:
-    left_wrist_cam_serial: "412622270929"   # left wrist camera serial number
-    right_wrist_cam_serial: "412622270701"  # right wrist camera serial number
-    head_cam_serial: "339322074423"         # head (overhead) camera serial number
+    # --- Dobot serials (use when robot_type: "dobot_dual_arm") ---
+    # left_wrist_cam_serial: "317422075656"
+    # right_wrist_cam_serial: "344322074412"
+    # head_cam_serial: "243322071821"
+
+    # --- Nero serials (use when robot_type: "nero_dual_arm") ---
+    # left_wrist_cam_serial: "412622270929"
+    # right_wrist_cam_serial: "412622270701"
+    # head_cam_serial: "339322074423"
+
+    # --- ARX R5 serials (use when robot_type: "arx_dual_arm") ---
+    left_wrist_cam_serial: "218622274803"   # left wrist camera serial number
+    right_wrist_cam_serial: "218622278394"  # right wrist camera serial number
+    head_cam_serial: "218622271302"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 
@@ -79,7 +110,4 @@ replay:
 visualize:
   dataset_name: dual_dobot/milk_shake_3_15_step1_20260315_v08
   episode_index: 0 # episode index to visualize
-
-
-
 
