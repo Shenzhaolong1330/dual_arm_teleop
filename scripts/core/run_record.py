@@ -82,6 +82,11 @@ class RecordConfig:
         self.gripper_max_open: float = robot.get("gripper_max_open", 0.085)
         self.gripper_force: float = robot.get("gripper_force", 10.0)
         self.gripper_speed: float = robot.get("gripper_speed", 0.1)
+        self.reset_go_home: bool = robot.get("reset_go_home", True)
+        self.go_home_duration_sec: float | None = robot.get("go_home_duration_sec", None)
+        self.go_home_rate_hz: float | None = robot.get("go_home_rate_hz", None)
+        self.max_cartesian_delta: float | None = robot.get("max_cartesian_delta", None)
+        self.max_rotation_delta: float | None = robot.get("max_rotation_delta", None)
         
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
@@ -117,6 +122,7 @@ class RecordConfig:
             self.channel_signs = oculus_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
             self.visualize_placo = oculus_cfg.get("visualize_placo", False)
             self.action_smoothing_alpha = oculus_cfg.get("action_smoothing_alpha", 0.35)
+            self.mirror_teleop = oculus_cfg.get("mirror_teleop", False)
             if self.dual_arm:
                 self.left_pose_scaler = oculus_cfg.get("left_pose_scaler", self.pose_scaler)
                 self.right_pose_scaler = oculus_cfg.get("right_pose_scaler", self.pose_scaler)
@@ -191,6 +197,7 @@ class RecordConfig:
                     left_channel_signs=self.left_channel_signs,
                     right_channel_signs=self.right_channel_signs,
                     action_smoothing_alpha=self.action_smoothing_alpha,
+                    mirror_teleop=self.mirror_teleop,
                     visualize_placo=self.visualize_placo,
                 )
             return OculusTeleopConfig(
@@ -264,8 +271,7 @@ def run_record(record_cfg: RecordConfig):
         teleop_config = record_cfg.create_teleop_config()
         
         # Create robot configuration dynamically based on robot_type
-        robot_config = create_robot_config(
-            record_cfg.robot_type,
+        robot_kwargs = dict(
             robot_ip=record_cfg.robot_ip,
             robot_port=record_cfg.robot_port,
             cameras=camera_config,
@@ -278,6 +284,17 @@ def run_record(record_cfg: RecordConfig):
             gripper_reverse=record_cfg.gripper_reverse,
             control_mode=record_cfg.control_mode,
         )
+        if record_cfg.robot_type == "franka_dual_arm":
+            robot_kwargs.update(
+                reset_go_home=record_cfg.reset_go_home,
+                go_home_duration_sec=record_cfg.go_home_duration_sec,
+                go_home_rate_hz=record_cfg.go_home_rate_hz,
+            )
+            if record_cfg.max_cartesian_delta is not None:
+                robot_kwargs["max_cartesian_delta"] = record_cfg.max_cartesian_delta
+            if record_cfg.max_rotation_delta is not None:
+                robot_kwargs["max_rotation_delta"] = record_cfg.max_rotation_delta
+        robot_config = create_robot_config(record_cfg.robot_type, **robot_kwargs)
         
         # Initialize the robot dynamically based on robot_type
         robot = create_robot(record_cfg.robot_type, robot_config)

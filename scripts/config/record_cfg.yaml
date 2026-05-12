@@ -10,24 +10,31 @@ record:
   run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
-  robot_type: &robot_type "arx_dual_arm"
+  robot_type: &robot_type "franka_dual_arm"
 
   teleop:
     control_mode: *control_mode
     dual_arm: true  # dual-arm mode
     oculus_config:
-      ip: "192.168.110.62"  # Oculus Quest IP address
+      ip: "192.168.8.157"  # Oculus Quest IP address
       use_gripper: *use_gripper
       # --- ARX R5 scalers/signs ---
-      left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
-      left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs [x,y,z,rx,ry,rz]
-      right_pose_scaler: [2.5, 2.5]  # right arm scaler [position, orientation]
-      right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs [x,y,z,rx,ry,rz]
+      # left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
+      # left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs [x,y,z,rx,ry,rz]
+      # right_pose_scaler: [2.5, 2.5]  # right arm scaler [position, orientation]
+      # right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs [x,y,z,rx,ry,rz]
       # --- Nero scalers/signs (uncomment when robot_type: "nero_dual_arm") ---
       # left_pose_scaler: [0.3, 0.3]
       # left_channel_signs: [-1, -1, 1, 1, 1, 1]
       # right_pose_scaler: [0.3, 0.3]
       # right_channel_signs: [-1, -1, 1, 1, 1, 1]
+      # --- Dual Franka scalers/signs ---
+      left_pose_scaler: [0.8, 0.8]
+      left_channel_signs: [1, 1, 1, -1, -1, 1]
+      right_pose_scaler: [0.8, 0.8]
+      right_channel_signs: [1, 1, 1, -1, -1, 1]
+      action_smoothing_alpha: 1.0  # Franka integrates deltas; disable EMA tail on delta actions
+      mirror_teleop: true  # true: stand opposite the robot; swap left/right controllers and grippers
       visualize_placo: false  # whether to visualize robot using placo
 
   robot:
@@ -52,12 +59,27 @@ record:
     # gripper_max_open: 0.085
 
     # --- ARX R5 config (use when robot_type: "arx_dual_arm") ---
-    robot_ip: &ip "10.10.10.2"  # ARX RPC server IP (robot-side Linux)
-    robot_port: 4242            # zerorpc port
-    use_gripper: *use_gripper
-    gripper_reverse: false      # ARX integrated gripper, 0=open 1=closed
-    close_threshold: 0.5
+    # robot_ip: &ip "10.10.10.2"  # ARX RPC server IP (robot-side Linux)
+    # robot_port: 4242            # zerorpc port
+    # use_gripper: *use_gripper
+    # gripper_reverse: false      # ARX integrated gripper, 0=open 1=closed
+    # close_threshold: 0.5
     # Note: gripper_ip/port/max_open/force/speed are ignored for ARX (gripper is integrated)
+
+    # --- Dual Franka config (use when robot_type: "franka_dual_arm") ---
+    robot_ip: &ip "172.16.0.1"
+    robot_port: 4242
+    use_gripper: *use_gripper
+    close_threshold: 0.7
+    gripper_reverse: false
+    gripper_max_open: 0.085
+    gripper_force: 10.0
+    gripper_speed: 0.1
+    reset_go_home: true        # true: A/reset calls server go_home; false: only re-anchor target to current pose
+    go_home_duration_sec: 5.0
+    go_home_rate_hz: 50.0
+    max_cartesian_delta: 0.06 # max per-frame EE translation command in meters
+    max_rotation_delta: 0.10   # max per-frame EE rotation command in radians
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
@@ -89,9 +111,16 @@ record:
     # head_cam_serial: "339322074423"
 
     # --- ARX R5 serials (use when robot_type: "arx_dual_arm") ---
-    left_wrist_cam_serial: "218622274803"   # left wrist camera serial number
-    right_wrist_cam_serial: "218622278394"  # right wrist camera serial number
-    head_cam_serial: "218622271302"         # head (overhead) camera serial number
+    # left_wrist_cam_serial: "218622274803"   # left wrist camera serial number
+    # right_wrist_cam_serial: "218622278394"  # right wrist camera serial number
+    # head_cam_serial: "218622271302"         # head (overhead) camera serial number
+    # width: 424 # 640 424
+    # height: 240 # 360 240
+
+    # --- Dual Franka serials (use when robot_type: "franka_dual_arm") ---
+    left_wrist_cam_serial: "347622074336"   # left wrist camera serial number
+    right_wrist_cam_serial: "337322072568"  # right wrist camera  serial number 
+    head_cam_serial: "348522072761"         # head (overhead) camera serial number
     width: 424 # 640 424
     height: 240 # 360 240
 
@@ -99,7 +128,7 @@ record:
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
 
 replay:
-  dataset_name: dual_dobot/milk_shake_3_15_step1_20260315_v08
+  dataset_name: test/test_20260512_v10
   episode_idx: 0 # episode index to replay
   robot_type: *robot_type  # robot type to use for replay
   robot:
@@ -108,6 +137,5 @@ replay:
   control_mode: *control_mode 
 
 visualize:
-  dataset_name: dual_dobot/milk_shake_3_15_step1_20260315_v08
+  dataset_name: test/test_20260512_v11
   episode_index: 0 # episode index to visualize
-
