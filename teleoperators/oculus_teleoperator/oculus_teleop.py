@@ -88,11 +88,13 @@ class OculusTeleop(Teleoperator):
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
+            mirror_teleop=self.cfg.mirror_teleop,
         )
         
         self._is_connected = True
         logger.info(f"===== [TELEOP] {self.name} connected successfully =====")
         logger.info(f"[TELEOP] Oculus dual-arm connected at IP: {self.cfg.ip}")
+        logger.info(f"[TELEOP] mirror_teleop={self.cfg.mirror_teleop}")
     
     def disconnect(self) -> None:
         """Disconnect from Oculus Quest."""
@@ -169,6 +171,7 @@ if __name__ == "__main__":
         left_channel_signs=[1, 1, 1, 1, 1, 1],
         right_pose_scaler=[0.5, 0.5],
         right_channel_signs=[1, 1, 1, 1, 1, 1],
+        mirror_teleop=False,
     )
     
     teleop = OculusTeleop(config)

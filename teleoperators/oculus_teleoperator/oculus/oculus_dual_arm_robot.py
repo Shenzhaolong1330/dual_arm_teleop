@@ -2,8 +2,13 @@
 Oculus Quest dual-arm robot controller.
 Uses both left and right Oculus controllers to control a dual-arm robot system.
 
-Left controller  -> Left arm
-Right controller -> Right arm
+Default mode:
+    Left controller  -> Left arm
+    Right controller -> Right arm
+
+Mirror mode:
+    Left controller  -> Right arm, with mirrored pose deltas
+    Right controller -> Left arm, with mirrored pose deltas
 """
 
 from typing import Dict, Optional, Sequence
@@ -25,6 +30,8 @@ class OculusDualArmRobot(Robot):
     - RTr (Right Trigger): Controls right gripper (0.0 = open, 1.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
+    - mirror_teleop: Swap controller-to-arm assignment and convert motion back
+      to the canonical robot frame for opposite-side operation
     - A button: Request robot reset
     
     Coordinate Systems:
@@ -43,6 +50,7 @@ class OculusDualArmRobot(Robot):
         [-1.,  0.,  0.],
         [ 0.,  1.,  0.],
     ])
+    MIRROR_ACTION_SIGNS = np.array([-1., -1., 1., -1., -1., 1.])
 
     def __init__(
         self,
@@ -53,9 +61,11 @@ class OculusDualArmRobot(Robot):
         right_pose_scaler: Sequence[float] = [1.0, 1.0],
         right_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
         action_smoothing_alpha: float = 0.35,
+        mirror_teleop: bool = False,
     ):
         self._oculus_reader = OculusReader(ip_address=ip)
         self._use_gripper = use_gripper
+        self._mirror_teleop = bool(mirror_teleop)
         
         # Left arm configuration
         self._left_pose_scaler = left_pose_scaler
@@ -87,6 +97,21 @@ class OculusDualArmRobot(Robot):
         if prev is None or alpha >= 1.0:
             return current.copy()
         return alpha * current + (1.0 - alpha) * prev
+
+    def _mirror_pose_delta(self, delta_pose: np.ndarray) -> np.ndarray:
+        """Convert opposite-side operator motion back to the canonical robot frame."""
+        return np.asarray(delta_pose, dtype=float) * self.MIRROR_ACTION_SIGNS
+
+    def _get_trigger_value(self, buttons: Dict[str, object], analog_key: str, bool_key: str) -> float:
+        value = buttons.get(analog_key, None)
+        if value is None:
+            return 1.0 if buttons.get(bool_key, False) else 0.0
+        if isinstance(value, (tuple, list)) and len(value) > 0:
+            return float(value[0])
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 1.0 if buttons.get(bool_key, False) else 0.0
 
     def num_dofs(self) -> int:
         # Each arm: 6 DOF pose + 1 gripper = 7, total = 14
@@ -177,6 +202,8 @@ class OculusDualArmRobot(Robot):
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
+        left_delta_out = np.zeros(6)
+        right_delta_out = np.zeros(6)
         
         # ========== Left arm (left controller) ==========
         if 'l' in transforms:
@@ -187,7 +214,7 @@ class OculusDualArmRobot(Robot):
                 scaled_left = self._apply_scaling(delta_left, self._left_pose_scaler, self._left_channel_signs)
                 smoothed_left = self._ema_smooth(scaled_left, self._left_smoothed_delta)
                 self._left_smoothed_delta = smoothed_left.copy()
-                action[0:6] = smoothed_left
+                left_delta_out = smoothed_left
                 self._left_prev_transform = left_transform.copy()
             else:
                 self._left_prev_transform = None
@@ -205,10 +232,7 @@ class OculusDualArmRobot(Robot):
                 scaled_right = self._apply_scaling(delta_right, self._right_pose_scaler, self._right_channel_signs)
                 smoothed_right = self._ema_smooth(scaled_right, self._right_smoothed_delta)
                 self._right_smoothed_delta = smoothed_right.copy()
-                if self._use_gripper:
-                    action[7:13] = smoothed_right
-                else:
-                    action[6:12] = smoothed_right
+                right_delta_out = smoothed_right
                 self._right_prev_transform = right_transform.copy()
             else:
                 self._right_prev_transform = None
@@ -220,23 +244,28 @@ class OculusDualArmRobot(Robot):
         # ========== Gripper control ==========
         if self._use_gripper:
             # Left gripper: Left Trigger
-            left_trigger = buttons.get('leftTrig', (0.0,))
-            if isinstance(left_trigger, tuple) and len(left_trigger) > 0:
-                lt_value = left_trigger[0]
-            else:
-                lt_value = 0.0
+            lt_value = self._get_trigger_value(buttons, 'leftTrig', 'LTr')
             left_gripper = 1.0 - lt_value  # Invert: trigger pressed = closed (0.0)
             self._left_last_gripper_position = left_gripper
-            action[6] = left_gripper
             
             # Right gripper: Right Trigger
-            right_trigger = buttons.get('rightTrig', (0.0,))
-            if isinstance(right_trigger, tuple) and len(right_trigger) > 0:
-                rt_value = right_trigger[0]
-            else:
-                rt_value = 0.0
+            rt_value = self._get_trigger_value(buttons, 'rightTrig', 'RTr')
             right_gripper = 1.0 - rt_value  # Invert: trigger pressed = closed (0.0)
             self._right_last_gripper_position = right_gripper
+
+        if self._mirror_teleop:
+            left_delta_out, right_delta_out = (
+                self._mirror_pose_delta(right_delta_out),
+                self._mirror_pose_delta(left_delta_out),
+            )
+            if self._use_gripper:
+                left_gripper, right_gripper = right_gripper, left_gripper
+
+        action[0:6] = left_delta_out
+        right_offset = dof_per_arm
+        action[right_offset:right_offset + 6] = right_delta_out
+        if self._use_gripper:
+            action[6] = left_gripper
             action[13] = right_gripper
         
         return action
@@ -297,6 +326,7 @@ if __name__ == "__main__":
         left_channel_signs=[1, 1, 1, 1, 1, 1],
         right_pose_scaler=[0.5, 0.5],
         right_channel_signs=[1, 1, 1, 1, 1, 1],
+        mirror_teleop=False,
     )
     
     print("===== Oculus Dual-Arm Robot Test =====")

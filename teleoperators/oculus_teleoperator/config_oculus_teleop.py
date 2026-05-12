@@ -35,6 +35,11 @@ class OculusTeleopConfig(TeleoperatorConfig):
     # 1.0 means no smoothing, smaller values increase smoothing.
     action_smoothing_alpha: float = 0.35
 
+    # Mirror mode for operating while standing opposite the robot.
+    # When enabled, controller-to-arm assignment is mirrored and the final
+    # action remains expressed in the same robot-frame convention as normal.
+    mirror_teleop: bool = False
+
     use_ik: bool = False
     servo_time: float = 0.017
     visualize_placo: bool = True
