@@ -19,15 +19,21 @@ def main():
     robot_type = cfg["record"].get("robot_type", "dobot_dual_arm")
     
     # 创建机器人配置
-    robot_config = create_robot_config(
-        robot_type=robot_type,
+    robot_kwargs = dict(
         robot_ip=cfg["record"]["robot"].get("robot_ip", "localhost"),
         robot_port=cfg["record"]["robot"].get("robot_port", 4242),
         use_gripper=cfg["record"]["robot"]["use_gripper"],
         close_threshold=cfg["record"]["robot"].get("close_threshold", 0.5),
         gripper_max_open=cfg["record"]["robot"].get("gripper_max_open", 0.085),
-        debug=False
+        debug=False,
     )
+    if robot_type == "franka_dual_arm":
+        robot_kwargs.update(
+            reset_go_home=cfg["record"]["robot"].get("reset_go_home", True),
+            go_home_duration_sec=cfg["record"]["robot"].get("go_home_duration_sec", None),
+            go_home_rate_hz=cfg["record"]["robot"].get("go_home_rate_hz", None),
+        )
+    robot_config = create_robot_config(robot_type=robot_type, **robot_kwargs)
     
     # 创建机器人实例并连接
     robot = create_robot(robot_type, robot_config)
