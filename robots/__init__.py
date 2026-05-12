@@ -7,27 +7,27 @@ Action input format (from teleop):
 - Dual-arm robot: uses left/right_delta_ee_pose.{axis}, left/right_gripper_cmd_bin
 """
 
-from typing import Dict, Any, Type
+from typing import Any, Type
 
 from .franka.config_franka import FrankaConfig
 from .dual_dobot.config_dobot import DobotDualArmConfig
 from .dual_agilx_nero.config_nero import NeroDualArmConfig
 from .dual_arx_r5.config_arx import ArxDualArmConfig
+from .dual_franka.config_franka import FrankaDualArmConfig
 
 from .franka.franka import Franka
 from .dual_dobot.dobot_dual_arm import DobotDualArm
 from .dual_agilx_nero.nero_dual_arm import NeroDualArm
 from .dual_arx_r5.arx_dual_arm import ArxDualArm
+from .dual_franka.franka_dual_arm import FrankaDualArm
 
 
-# Robot type registry: {robot_type: (ConfigClass, RobotClass)}
-ROBOT_CONFIG_REGISTRY: Dict[str, tuple] = {
-    # Single-arm robots
+ROBOT_CONFIG_REGISTRY: dict[str, tuple] = {
     "franka": (FrankaConfig, Franka),
-    # Dual-arm robots
     "dobot_dual_arm": (DobotDualArmConfig, DobotDualArm),
     "nero_dual_arm": (NeroDualArmConfig, NeroDualArm),
     "arx_dual_arm": (ArxDualArmConfig, ArxDualArm),
+    "franka_dual_arm": (FrankaDualArmConfig, FrankaDualArm),
 }
 
 SUPPORTED_ROBOTS = list(ROBOT_CONFIG_REGISTRY.keys())
@@ -70,10 +70,12 @@ __all__ = [
     "DobotDualArmConfig",
     "NeroDualArmConfig",
     "ArxDualArmConfig",
+    "FrankaDualArmConfig",
     "Franka",
     "DobotDualArm",
     "NeroDualArm",
     "ArxDualArm",
+    "FrankaDualArm",
     "ROBOT_CONFIG_REGISTRY",
     "SUPPORTED_ROBOTS",
     "get_robot_config_class",

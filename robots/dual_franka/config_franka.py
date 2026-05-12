@@ -1,9 +1,13 @@
 """
-Configuration for Franka dual-arm robot system.
-Each arm has 6 DOF, with Robotiq 2F-85 grippers as end effectors.
+Configuration for the ROS2 dual-Franka + Robotiq robot.
+
+The LeRobot process talks to a ZeroRPC server. The server owns the ROS2 node
+and the exp_env_interact DualFrankaRobotiqEnv instance.
 """
+
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from lerobot.cameras import CameraConfig
 from lerobot.robots.config import RobotConfig
@@ -12,37 +16,39 @@ from lerobot.robots.config import RobotConfig
 @RobotConfig.register_subclass("franka_dual_arm")
 @dataclass
 class FrankaDualArmConfig(RobotConfig):
-    """Configuration for Franka dual-arm robot with Robotiq 2F-85 grippers."""
-    
-    # Robot identification
+    """Configuration for dual Franka arms with two Robotiq 2F-85 grippers."""
+
     name: str = "franka_dual_arm"
-    
-    # Network configuration - single port for dual-arm control
-    robot_ip: str = "localhost"  # Franka server ip
-    robot_port: int = 4242  # dual-arm zerorpc port (single port for both arms)
-    
-    # Gripper configuration (Robotiq 2F-85)
-    gripper_ip: str = "localhost"  # gripper zerorpc ip, if different from robot_ip, set to robot_ip
-    gripper_port: int = 4243  # gripper zerorpc port (single port for both arms)
+
+    # Unified ZeroRPC endpoint. The server controls both arms and both grippers.
+    robot_ip: str = "127.0.0.1"
+    robot_port: int = 4242
+    rpc_timeout_sec: float = 30.0
+
+    # Compatibility fields used by the generic recording config parser.
+    gripper_ip: str = "127.0.0.1"
+    gripper_port: int = 4242
+
     use_gripper: bool = True
-    gripper_max_open: float = 0.085  # Robotiq 2F-85 max opening: 85mm
-    gripper_force: float = 10.0  # Gripping force in N
-    gripper_speed: float = 0.1  # Speed in m/s
-    gripper_reverse: bool = False  # Whether to reverse gripper command
-    close_threshold: float = 0.5  # Threshold for binary gripper control
-    
-    # Control configuration
+    gripper_max_open: float = 0.085
+    gripper_force: float = 10.0
+    gripper_speed: float = 0.1
+    gripper_reverse: bool = False
+    close_threshold: float = 0.5
+    open_grippers_on_connect: bool = False
+    reset_opens_grippers: bool = True
+    reset_go_home: bool = True
+    go_home_duration_sec: float | None = None
+    go_home_rate_hz: float | None = None
+
     control_mode: str = "oculus"
     debug: bool = True
-    
-    # Joint configuration (6 DOF per arm)
-    num_joints_per_arm: int = 6
-    
-    # Cameras
-    cameras: dict[str, CameraConfig] = field(default_factory=dict)
-    
-    # Safety limits
-    max_joint_velocity: float = 2.0  # rad/s
-    max_ee_velocity: float = 0.5  # m/s
-    max_joint_delta: float = 0.3  # rad - max joint change per step
 
+    num_joints_per_arm: int = 7
+    max_joint_velocity: float = 2.0
+    max_ee_velocity: float = 0.5
+    max_joint_delta: float = 0.3
+    max_cartesian_delta: float = 0.006
+    max_rotation_delta: float = 0.05
+
+    cameras: dict[str, CameraConfig] = field(default_factory=dict)
