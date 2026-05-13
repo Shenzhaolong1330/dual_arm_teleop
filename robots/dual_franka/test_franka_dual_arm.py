@@ -194,6 +194,17 @@ class FrankaDualArmTest(unittest.TestCase):
         with self.assertRaises(DeviceNotConnectedError):
             disconnected.reset()
 
+    def test_go_home_moves_both_arms(self) -> None:
+        robot, fake = connected_robot(
+            use_gripper=False,
+            go_home_duration_sec=5.0,
+            go_home_rate_hz=50.0,
+        )
+
+        robot.go_home()
+
+        self.assertIn(("go_home", "both", 5.0, 50.0), fake.calls)
+
     def test_reset_requested_routes_through_reset(self) -> None:
         robot, fake = connected_robot(use_gripper=False, reset_go_home=False)
         returned = robot.send_action({"reset_requested": True})
@@ -209,7 +220,7 @@ class FrankaDualArmTest(unittest.TestCase):
             max_rotation_delta=0.25,
         )
 
-        robot.send_action(
+        sent_action = robot.send_action(
             {
                 "left_delta_ee_pose.x": 0.1,
                 "left_delta_ee_pose.y": -0.02,
@@ -237,6 +248,12 @@ class FrankaDualArmTest(unittest.TestCase):
         self.assertEqual(server_action["right_arm"]["motion"]["rotation_rotvec"], [0.0, -0.25, 0.0])
         self.assertAlmostEqual(server_action["left_arm"]["gripper"]["width"], 0.0425)
         self.assertAlmostEqual(server_action["right_arm"]["gripper"]["width"], 0.085)
+        self.assertEqual(sent_action["left_delta_ee_pose.x"], 0.04)
+        self.assertEqual(sent_action["left_delta_ee_pose.rx"], 0.25)
+        self.assertEqual(sent_action["right_delta_ee_pose.y"], 0.04)
+        self.assertEqual(sent_action["right_delta_ee_pose.ry"], -0.25)
+        self.assertEqual(sent_action["left_gripper_cmd_bin"], 0.5)
+        self.assertEqual(sent_action["right_gripper_cmd_bin"], 1.0)
 
     def test_duplicate_gripper_command_is_suppressed(self) -> None:
         robot, fake = connected_robot(debug=False, use_gripper=True)
@@ -251,7 +268,7 @@ class FrankaDualArmTest(unittest.TestCase):
     def test_debug_mode_skips_motion_but_keeps_gripper(self) -> None:
         robot, fake = connected_robot(debug=True, use_gripper=True)
 
-        robot.send_action(
+        sent_action = robot.send_action(
             {
                 "left_delta_ee_pose.x": 0.02,
                 "left_gripper_cmd_bin": 0.0,
@@ -262,6 +279,8 @@ class FrankaDualArmTest(unittest.TestCase):
         self.assertEqual(step_call[0], "step")
         self.assertNotIn("motion", step_call[1]["left_arm"])
         self.assertEqual(step_call[1]["left_arm"]["gripper"]["width"], 0.0)
+        self.assertEqual(sent_action["left_delta_ee_pose.x"], 0.0)
+        self.assertEqual(sent_action["left_gripper_cmd_bin"], 0.0)
 
     def test_private_cartesian_compatibility_path(self) -> None:
         robot, fake = connected_robot(debug=False, use_gripper=False)
@@ -269,7 +288,7 @@ class FrankaDualArmTest(unittest.TestCase):
         robot._send_action_cartesian({"left_delta_ee_pose.x": 0.01})
 
         self.assertEqual(fake.calls[-1][0], "dual_robot_move_to_ee_pose")
-        np.testing.assert_allclose(fake.calls[-1][1], [0.006, 0.0, 0.0, 0.0, 0.0, 0.0])
+        np.testing.assert_allclose(fake.calls[-1][1], [0.01, 0.0, 0.0, 0.0, 0.0, 0.0])
         np.testing.assert_allclose(fake.calls[-1][2], [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
         self.assertTrue(fake.calls[-1][3])
         self.assertFalse(fake.calls[-1][4])
@@ -300,9 +319,27 @@ class FrankaDualArmTest(unittest.TestCase):
         self.assertEqual(obs["left_gripper_cmd_bin"], 0.25)
         self.assertEqual(obs["front_image"].shape, (2, 3, 3))
 
+        robot._cached_rpc_state = None
         fake.fail_get_full_state = True
         fallback = robot.get_observation()
         self.assertIs(fallback, obs)
+
+    def test_observation_reuses_cached_step_state_and_cached_camera_frame(self) -> None:
+        robot, fake = connected_robot(use_gripper=True, debug=False)
+        camera = FakeCamera()
+        robot.cameras = {"front_image": camera}
+        cached_frame = np.full((2, 3, 3), 7, dtype=np.uint8)
+        robot._latest_frames["front_image"] = cached_frame
+
+        robot.send_action({"left_delta_ee_pose.x": 0.01})
+        fake.calls.clear()
+
+        obs = robot.get_observation()
+
+        self.assertEqual(obs["left_joint_2.pos"], 0.1)
+        self.assertIs(obs["front_image"], cached_frame)
+        self.assertEqual(camera.read_count, 0)
+        self.assertFalse(any(call[0] == "get_full_state" for call in fake.calls))
 
     def test_observation_accepts_nested_rpc_server_state(self) -> None:
         robot, fake = connected_robot(use_gripper=True)

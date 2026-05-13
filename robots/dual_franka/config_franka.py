@@ -48,7 +48,9 @@ class FrankaDualArmConfig(RobotConfig):
     max_joint_velocity: float = 2.0
     max_ee_velocity: float = 0.5
     max_joint_delta: float = 0.3
-    max_cartesian_delta: float = 0.006
-    max_rotation_delta: float = 0.05
+    # None disables wrapper-side action clipping. Keep controller/server-side
+    # safety limits separate so recorded actions match what this wrapper sends.
+    max_cartesian_delta: float | None = None
+    max_rotation_delta: float | None = None
 
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

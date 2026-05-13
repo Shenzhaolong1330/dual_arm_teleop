@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "test/test"
+  repo_id: &repo_id "dual_franka_1/pick_up_and_seal"
   # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
   # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
   debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
@@ -16,7 +16,7 @@ record:
     control_mode: *control_mode
     dual_arm: true  # dual-arm mode
     oculus_config:
-      ip: "192.168.8.157"  # Oculus Quest IP address
+      ip: "192.168.8.114"  # Oculus Quest IP address
       use_gripper: *use_gripper
       # --- ARX R5 scalers/signs ---
       # left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
@@ -78,8 +78,8 @@ record:
     reset_go_home: true        # true: A/reset calls server go_home; false: only re-anchor target to current pose
     go_home_duration_sec: 5.0
     go_home_rate_hz: 50.0
-    max_cartesian_delta: 0.06 # max per-frame EE translation command in meters
-    max_rotation_delta: 0.10   # max per-frame EE rotation command in radians
+    max_cartesian_delta: 0.06 # null disables wrapper-side EE translation clipping
+    max_rotation_delta: 0.08   # null disables wrapper-side EE rotation clipping
 
   policy:
     type: "act"  # 策略类型 (act, diffusion)
@@ -88,7 +88,7 @@ record:
     pretrained_path: "/home/deepcybo/lerobot/franka_workspace/outputs/train/act_test9/checkpoints/last/pretrained_model"  # 预训练模型路径下要包括config.json
 
   task:
-    description: "use the left hand to pick up the bottle and insert it into the blender then pressing the button" # task description
+    description: "Pick up all the objects into the basket and seal the basket" # task description
     num_episodes: 10 # number of episodes to record
     display: True # Whether to display the data during recording
     resume: false # whether to resume from an existing dataset
@@ -128,8 +128,8 @@ record:
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
 
 replay:
-  dataset_name: test/test_20260512_v10
-  episode_idx: 0 # episode index to replay
+  dataset_name: dual_franka_1/pick_up_and_seal_20260513_v13
+  episode_idx: 9 # episode index to replay
   robot_type: *robot_type  # robot type to use for replay
   robot:
     ip: *ip
@@ -137,5 +137,5 @@ replay:
   control_mode: *control_mode 
 
 visualize:
-  dataset_name: test/test_20260512_v11
+  dataset_name: dual_franka_1/pick_up_and_seal_20260513_v13
   episode_index: 0 # episode index to visualize

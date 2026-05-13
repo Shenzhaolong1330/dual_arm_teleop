@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections.abc import Mapping
 from typing import Any, Optional
 
@@ -110,6 +111,7 @@ class FrankaDualArm(Robot):
         self._is_connected = False
         self._robot: Optional[FrankaDualArmClient] = None
         self._prev_observation: Optional[dict[str, Any]] = None
+        self._cached_rpc_state: Optional[dict[str, Any]] = None
         self._num_joints_per_arm = int(config.num_joints_per_arm)
 
         self._last_left_gripper_open: Optional[float] = None
@@ -119,6 +121,10 @@ class FrankaDualArm(Robot):
         self._warned_joint_control = False
         self._delta_clip_warn_count = 0
         self._nonfinite_action_warn_count = 0
+        self._camera_stop_event = threading.Event()
+        self._camera_threads: dict[str, threading.Thread] = {}
+        self._frame_lock = threading.Lock()
+        self._latest_frames: dict[str, Any] = {}
 
     # ==================== Connection ====================
 
@@ -145,6 +151,7 @@ class FrankaDualArm(Robot):
         for cam_name, cam in self.cameras.items():
             cam.connect()
             logger.info("[CAM] %s connected", cam_name)
+            self._start_camera_thread(cam_name, cam)
 
         self._is_connected = True
         logger.info("[FRANKA] %s connected", self.name)
@@ -152,12 +159,15 @@ class FrankaDualArm(Robot):
     def disconnect(self) -> None:
         if not self.is_connected:
             return
+        self._stop_camera_threads()
         for cam in self.cameras.values():
             cam.disconnect()
         if self._robot is not None:
             self._robot.close()
             self._robot = None
         self._is_connected = False
+        self._cached_rpc_state = None
+        self._prev_observation = None
         logger.info("[FRANKA] %s disconnected", self.name)
 
     # ==================== Reset ====================
@@ -167,17 +177,25 @@ class FrankaDualArm(Robot):
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
         if self.config.reset_go_home:
-            logger.info("[FRANKA] Moving both arms to server home pose")
-            self._robot.go_home(
-                "both",
-                self.config.go_home_duration_sec,
-                self.config.go_home_rate_hz,
-            )
+            self.go_home()
         else:
             logger.info("[FRANKA] Resetting target poses to current poses")
             self._robot.reset()
+            self._cached_rpc_state = None
         if self.config.use_gripper and self.config.reset_opens_grippers:
             self._open_both_grippers(blocking=True)
+
+    def go_home(self) -> None:
+        if not self.is_connected or self._robot is None:
+            raise DeviceNotConnectedError(f"{self.name} is not connected.")
+
+        logger.info("[FRANKA] Moving both arms to server home pose")
+        self._robot.go_home(
+            "both",
+            self.config.go_home_duration_sec,
+            self.config.go_home_rate_hz,
+        )
+        self._cached_rpc_state = None
 
     def _open_both_grippers(self, blocking: bool = True) -> None:
         if self._robot is None:
@@ -196,6 +214,7 @@ class FrankaDualArm(Robot):
         )
         self._last_left_gripper_open = 1.0
         self._last_right_gripper_open = 1.0
+        self._cached_rpc_state = None
 
     # ==================== Actions ====================
 
@@ -203,29 +222,35 @@ class FrankaDualArm(Robot):
         if not self.is_connected or self._robot is None:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
+        sent_action = dict(action)
+
         if action.get("reset_requested", False):
             self.reset()
-            return action
+            return sent_action
 
         server_action: dict[str, Any] = {}
         gripper_updates: list[tuple[str, float]] = []
 
+        has_cartesian_action = "left_delta_ee_pose.x" in action or "right_delta_ee_pose.x" in action
         if not self.config.debug:
-            if "left_delta_ee_pose.x" in action or "right_delta_ee_pose.x" in action:
-                self._add_cartesian_step_action(server_action, action)
+            if has_cartesian_action:
+                self._add_cartesian_step_action(server_action, sent_action, action)
             elif all(f"left_joint_{i + 1}.pos" in action for i in range(self._num_joints_per_arm)):
                 self._send_action_joint(action)
+        elif has_cartesian_action:
+            zero_delta = np.zeros(6, dtype=float)
+            self._update_sent_cartesian_action(sent_action, zero_delta, zero_delta, action)
 
         if self.config.use_gripper:
             if "left_gripper_cmd_bin" in action:
-                self._add_gripper_step_action(
+                sent_action["left_gripper_cmd_bin"] = self._add_gripper_step_action(
                     server_action,
                     "left",
                     float(action["left_gripper_cmd_bin"]),
                     gripper_updates,
                 )
             if "right_gripper_cmd_bin" in action:
-                self._add_gripper_step_action(
+                sent_action["right_gripper_cmd_bin"] = self._add_gripper_step_action(
                     server_action,
                     "right",
                     float(action["right_gripper_cmd_bin"]),
@@ -233,17 +258,24 @@ class FrankaDualArm(Robot):
                 )
 
         if server_action:
-            self._robot.step(server_action)
+            step_result = self._robot.step(server_action)
+            self._update_cached_rpc_state_from_step(step_result)
             for side, open_fraction in gripper_updates:
                 if side == "left":
                     self._last_left_gripper_open = open_fraction
                 else:
                     self._last_right_gripper_open = open_fraction
 
-        return action
+        return sent_action
 
-    def _add_cartesian_step_action(self, server_action: dict[str, Any], action: dict[str, Any]) -> None:
+    def _add_cartesian_step_action(
+        self,
+        server_action: dict[str, Any],
+        sent_action: dict[str, Any],
+        action: dict[str, Any],
+    ) -> None:
         left_delta, right_delta = self._cartesian_deltas_from_action(action)
+        self._update_sent_cartesian_action(sent_action, left_delta, right_delta, action)
         if np.linalg.norm(left_delta) >= 1e-9:
             server_action.setdefault("left_arm", {})["motion"] = {
                 "translation": left_delta[:3].tolist(),
@@ -272,24 +304,52 @@ class FrankaDualArm(Robot):
             left_delta = np.nan_to_num(left_delta, nan=0.0, posinf=0.0, neginf=0.0)
             right_delta = np.nan_to_num(right_delta, nan=0.0, posinf=0.0, neginf=0.0)
 
+        if self.config.max_cartesian_delta is None and self.config.max_rotation_delta is None:
+            return left_delta, right_delta
+
         raw_left = left_delta.copy()
         raw_right = right_delta.copy()
-        left_delta[:3] = np.clip(left_delta[:3], -self.config.max_cartesian_delta, self.config.max_cartesian_delta)
-        right_delta[:3] = np.clip(right_delta[:3], -self.config.max_cartesian_delta, self.config.max_cartesian_delta)
-        left_delta[3:] = np.clip(left_delta[3:], -self.config.max_rotation_delta, self.config.max_rotation_delta)
-        right_delta[3:] = np.clip(right_delta[3:], -self.config.max_rotation_delta, self.config.max_rotation_delta)
+        if self.config.max_cartesian_delta is not None:
+            max_translation = float(self.config.max_cartesian_delta)
+            if max_translation > 0.0:
+                left_delta[:3] = np.clip(left_delta[:3], -max_translation, max_translation)
+                right_delta[:3] = np.clip(right_delta[:3], -max_translation, max_translation)
+
+        if self.config.max_rotation_delta is not None:
+            max_rotation = float(self.config.max_rotation_delta)
+            if max_rotation > 0.0:
+                left_delta[3:] = np.clip(left_delta[3:], -max_rotation, max_rotation)
+                right_delta[3:] = np.clip(right_delta[3:], -max_rotation, max_rotation)
+
         if not np.allclose(raw_left, left_delta) or not np.allclose(raw_right, right_delta):
             self._delta_clip_warn_count += 1
             if self._delta_clip_warn_count <= 5 or self._delta_clip_warn_count % 100 == 0:
                 logger.warning(
                     "[FRANKA] Cartesian action clipped to per-step limits "
-                    "(max_translation=%.4fm max_rotation=%.4frad); raw_left=%s raw_right=%s",
+                    "(max_translation=%s max_rotation=%s); raw_left=%s raw_right=%s",
                     self.config.max_cartesian_delta,
                     self.config.max_rotation_delta,
                     raw_left.tolist(),
                     raw_right.tolist(),
                 )
         return left_delta, right_delta
+
+    @staticmethod
+    def _update_sent_cartesian_action(
+        sent_action: dict[str, Any],
+        left_delta: np.ndarray,
+        right_delta: np.ndarray,
+        source_action: dict[str, Any],
+    ) -> None:
+        axes = ["x", "y", "z", "rx", "ry", "rz"]
+        for index, axis in enumerate(axes):
+            left_key = f"left_delta_ee_pose.{axis}"
+            if left_key in source_action:
+                sent_action[left_key] = float(left_delta[index])
+
+            right_key = f"right_delta_ee_pose.{axis}"
+            if right_key in source_action:
+                sent_action[right_key] = float(right_delta[index])
 
     def _send_action_cartesian(self, action: dict[str, Any]) -> None:
         left_delta, right_delta = self._cartesian_deltas_from_action(action)
@@ -314,7 +374,8 @@ class FrankaDualArm(Robot):
         gripper_updates: list[tuple[str, float]] = []
         self._add_gripper_step_action(server_action, side, value, gripper_updates)
         if server_action:
-            self._robot.step(server_action)
+            step_result = self._robot.step(server_action)
+            self._update_cached_rpc_state_from_step(step_result)
             for update_side, open_fraction in gripper_updates:
                 if update_side == "left":
                     self._last_left_gripper_open = open_fraction
@@ -327,19 +388,20 @@ class FrankaDualArm(Robot):
         side: str,
         value: float,
         gripper_updates: list[tuple[str, float]],
-    ) -> None:
-        open_fraction = _clamp(value, 0.0, 1.0)
+    ) -> float:
+        commanded_open_fraction = _clamp(value, 0.0, 1.0)
+        open_fraction = commanded_open_fraction
         if self.config.gripper_reverse:
             open_fraction = 1.0 - open_fraction
         width = open_fraction * self.config.gripper_max_open
 
         if side == "left":
             if self._last_left_gripper_open is not None and abs(open_fraction - self._last_left_gripper_open) < 1e-4:
-                return
+                return commanded_open_fraction
             side_key = "left_arm"
         else:
             if self._last_right_gripper_open is not None and abs(open_fraction - self._last_right_gripper_open) < 1e-4:
-                return
+                return commanded_open_fraction
             side_key = "right_arm"
 
         server_action.setdefault(side_key, {})["gripper"] = {
@@ -348,6 +410,7 @@ class FrankaDualArm(Robot):
             "max_effort": self.config.gripper_force,
         }
         gripper_updates.append((side, open_fraction))
+        return commanded_open_fraction
 
     # ==================== Observations ====================
 
@@ -356,7 +419,7 @@ class FrankaDualArm(Robot):
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
         try:
-            state = self._robot.get_full_state()
+            state = self._get_cached_or_live_state()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FRANKA] get_full_state failed: %s", exc)
             if self._prev_observation is not None:
@@ -403,11 +466,73 @@ class FrankaDualArm(Robot):
                 else self._right_gripper_state
             )
 
+        latest_frames = self._snapshot_latest_frames()
         for cam_name, cam in self.cameras.items():
-            obs[cam_name] = cam.read()
+            frame = latest_frames.get(cam_name)
+            if frame is None:
+                frame = cam.read()
+                with self._frame_lock:
+                    self._latest_frames[cam_name] = frame
+            obs[cam_name] = frame
 
         self._prev_observation = obs
         return obs
+
+    def _update_cached_rpc_state_from_step(self, step_result: Any) -> None:
+        if not isinstance(step_result, Mapping):
+            return
+        observation = step_result.get("observation")
+        if isinstance(observation, Mapping):
+            self._cached_rpc_state = dict(observation)
+
+    def _get_cached_or_live_state(self) -> dict[str, Any]:
+        if self._cached_rpc_state is not None:
+            return self._cached_rpc_state
+        state = self._robot.get_full_state()
+        if not isinstance(state, Mapping):
+            raise RuntimeError(f"Unexpected state payload from RPC server: {type(state)!r}")
+        self._cached_rpc_state = dict(state)
+        return self._cached_rpc_state
+
+    def _start_camera_thread(self, cam_name: str, cam: Any) -> None:
+        thread = threading.Thread(
+            target=self._camera_read_loop,
+            args=(cam_name, cam),
+            name=f"{self.name}_{cam_name}_reader",
+            daemon=True,
+        )
+        self._camera_threads[cam_name] = thread
+        thread.start()
+
+    def _stop_camera_threads(self) -> None:
+        self._camera_stop_event.set()
+        for thread in self._camera_threads.values():
+            thread.join(timeout=1.0)
+        self._camera_threads.clear()
+        self._camera_stop_event = threading.Event()
+        with self._frame_lock:
+            self._latest_frames.clear()
+
+    def _camera_read_loop(self, cam_name: str, cam: Any) -> None:
+        while not self._camera_stop_event.is_set():
+            try:
+                frame = cam.read()
+                with self._frame_lock:
+                    self._latest_frames[cam_name] = frame
+            except Exception as exc:  # noqa: BLE001
+                if self._camera_stop_event.is_set():
+                    break
+                logger.warning("[CAM] %s background read failed: %s", cam_name, exc)
+                self._camera_stop_event.wait(timeout=0.1)
+                continue
+
+            # RealSense reads block naturally. This tiny wait keeps synthetic test cameras
+            # from spinning a tight CPU loop while remaining effectively free in practice.
+            self._camera_stop_event.wait(timeout=0.001)
+
+    def _snapshot_latest_frames(self) -> dict[str, Any]:
+        with self._frame_lock:
+            return dict(self._latest_frames)
 
     # ==================== Features ====================
 

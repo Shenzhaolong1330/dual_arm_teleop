@@ -90,6 +90,7 @@ class OculusDualArmRobot(Robot):
         
         # Reset request
         self._reset_requested = False
+        self._prev_a_pressed = False
 
     def _ema_smooth(self, current: np.ndarray, prev: Optional[np.ndarray]) -> np.ndarray:
         """Apply EMA smoothing to a 6D delta vector."""
@@ -196,9 +197,10 @@ class OculusDualArmRobot(Robot):
         # Check grip buttons (both must be pressed for action)
         lg_pressed = buttons.get('LG', False)
         rg_pressed = buttons.get('RG', False)
-        a_pressed = buttons.get('A', False)
+        a_pressed = bool(buttons.get('A', False))
         
-        self._reset_requested = a_pressed
+        self._reset_requested = a_pressed and not self._prev_a_pressed
+        self._prev_a_pressed = a_pressed
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
