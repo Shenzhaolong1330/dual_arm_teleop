@@ -42,6 +42,7 @@ from lerobot.utils.utils import (
 import builtins
 import os
 
+import numpy as np
 from pathlib import Path
 
 import datetime as dt
@@ -59,6 +60,160 @@ from lerobot.utils.hub import HubMixin
 
 TRAIN_CONFIG_NAME = "train_config.json"
 
+
+def _as_optional_float(value: Any, default: float | None) -> float | None:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "none", "null", "~"}:
+            return None
+    return float(value)
+
+
+def _as_optional_int(value: Any, default: int | None) -> int | None:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"", "none", "null", "~"}:
+            return None
+    return int(value)
+
+
+def _as_bool(value: Any, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on"}:
+            return True
+        if text in {"0", "false", "no", "n", "off"}:
+            return False
+    return bool(value)
+
+
+def make_action_weighted_sampler(dataset: Any, cfg: "TrainPipelineConfig") -> torch.utils.data.WeightedRandomSampler | None:
+    """Bias training samples toward chunks containing non-zero Cartesian actions."""
+    if not cfg.action_sampling_enabled:
+        return None
+    if cfg.dataset.streaming:
+        logging.warning("[ACTION SAMPLING] Weighted action sampling is disabled for streaming datasets.")
+        return None
+
+    action_feature = dataset.features.get("action", {})
+    action_names = action_feature.get("names") or []
+    if not action_names:
+        logging.warning("[ACTION SAMPLING] Dataset has no named action feature; using normal shuffle.")
+        return None
+
+    raw_dataset = dataset.hf_dataset.with_format(None)
+    actions = np.asarray(raw_dataset["action"], dtype=np.float32)
+    if actions.ndim != 2 or actions.shape[0] == 0:
+        logging.warning("[ACTION SAMPLING] Unexpected action array shape %s; using normal shuffle.", actions.shape)
+        return None
+
+    translation_indices = [
+        i
+        for i, name in enumerate(action_names)
+        if "delta_ee_pose" in name and name.rsplit(".", 1)[-1] in {"x", "y", "z"}
+    ]
+    rotation_indices = [
+        i
+        for i, name in enumerate(action_names)
+        if "delta_ee_pose" in name and name.rsplit(".", 1)[-1] in {"rx", "ry", "rz"}
+    ]
+
+    translation_norm = (
+        np.linalg.norm(actions[:, translation_indices], axis=1)
+        if translation_indices
+        else np.zeros(actions.shape[0], dtype=np.float32)
+    )
+    rotation_norm = (
+        np.linalg.norm(actions[:, rotation_indices], axis=1)
+        if rotation_indices
+        else np.zeros(actions.shape[0], dtype=np.float32)
+    )
+    frame_active = (translation_norm >= cfg.action_sampling_min_translation_norm) | (
+        rotation_norm >= cfg.action_sampling_min_rotation_norm
+    )
+
+    window = cfg.action_sampling_window or getattr(cfg.policy, "chunk_size", 1)
+    window = max(1, int(window))
+    min_active_frames = min(window, max(1, int(cfg.action_sampling_min_active_frames)))
+    chunk_active = np.zeros_like(frame_active, dtype=bool)
+    episode_starts = np.asarray(dataset.meta.episodes["dataset_from_index"], dtype=int)
+    episode_ends = np.asarray(dataset.meta.episodes["dataset_to_index"], dtype=int)
+    kernel = np.ones(window, dtype=np.int32)
+
+    for start, end in zip(episode_starts, episode_ends, strict=False):
+        start = max(0, int(start))
+        end = min(int(end), len(frame_active))
+        if end <= start:
+            continue
+
+        active_segment = frame_active[start:end].astype(np.int32)
+        segment_window = min(window, len(active_segment))
+        segment_kernel = kernel[:segment_window]
+        active_counts = np.convolve(active_segment, segment_kernel, mode="full")[
+            segment_window - 1 : segment_window - 1 + len(active_segment)
+        ]
+        chunk_active[start:end] = active_counts >= min_active_frames
+
+    drop_n_last_frames = int(getattr(cfg.policy, "drop_n_last_frames", 0) or 0)
+    weights = np.where(chunk_active, cfg.action_sampling_active_weight, cfg.action_sampling_inactive_weight)
+    if drop_n_last_frames > 0:
+        for start, end in zip(episode_starts, episode_ends, strict=False):
+            start = max(0, int(start))
+            end = min(int(end), len(weights))
+            drop_start = max(start, end - drop_n_last_frames)
+            weights[drop_start:end] = 0.0
+
+    if float(weights.sum()) <= 0:
+        logging.warning("[ACTION SAMPLING] All sample weights are zero; using normal shuffle.")
+        return None
+
+    active_frame_ratio = float(frame_active.mean())
+    active_chunk_ratio = float(chunk_active.mean())
+    weighted_active_ratio = float(weights[chunk_active].sum() / weights.sum()) if chunk_active.any() else 0.0
+    logging.info(
+        "[ACTION SAMPLING] active_frame=%.1f%% active_chunk=%.1f%% weighted_active=%.1f%% "
+        "window=%d min_active_frames=%d trans_thr=%.6f rot_thr=%.6f "
+        "active_weight=%.2f inactive_weight=%.2f",
+        100.0 * active_frame_ratio,
+        100.0 * active_chunk_ratio,
+        100.0 * weighted_active_ratio,
+        window,
+        min_active_frames,
+        cfg.action_sampling_min_translation_norm,
+        cfg.action_sampling_min_rotation_norm,
+        cfg.action_sampling_active_weight,
+        cfg.action_sampling_inactive_weight,
+    )
+
+    return torch.utils.data.WeightedRandomSampler(
+        weights=torch.as_tensor(weights, dtype=torch.double),
+        num_samples=len(weights),
+        replacement=True,
+    )
+
+def load_policy_cfg(policy_cfg_path: str) -> Dict[str, Any]:
+    """从策略配置文件加载配置"""
+    if policy_cfg_path:
+        # 支持相对路径：相对于项目根目录
+        project_root = Path(__file__).resolve().parent.parent.parent
+        cfg_path = Path(policy_cfg_path)
+        if not cfg_path.is_absolute():
+            cfg_path = project_root / cfg_path
+        
+        if cfg_path.exists():
+            with open(cfg_path, 'r') as f:
+                logging.info(f"[POLICY] Loaded policy config from: {cfg_path}")
+                return yaml.safe_load(f).get("policy", {})
+        else:
+            logging.warning(f"[POLICY] Policy config file not found: {cfg_path}")
+    return {}
+
 class TrainPipelineConfig(HubMixin):
     def __init__(self, cfg: Dict[str, Any]):
         dataset = cfg["dataset"]
@@ -66,6 +221,14 @@ class TrainPipelineConfig(HubMixin):
         policy = cfg["policy"]
         eval = cfg["eval"]
         wandb = cfg["wandb"]
+        
+        # 加载策略配置文件（如果指定）
+        policy_cfg_path = cfg.get("policy_cfg")
+        policy_defaults = load_policy_cfg(policy_cfg_path) if policy_cfg_path else {}
+        
+        # 合并配置：cfg 中的值优先于 policy_cfg 文件
+        def get_policy_param(key, default=None):
+            return policy.get(key, policy_defaults.get(key, default))
     
         self.dataset: DatasetConfig = DatasetConfig(
             repo_id = dataset["repo_id"],
@@ -104,26 +267,88 @@ class TrainPipelineConfig(HubMixin):
                 f"Got type: {type(value).__name__}"
             )
 
-        policy_type = policy["type"]
+        policy_type = get_policy_param("type")
         if policy_type == "act":
             from lerobot.policies import ACTConfig
             temporal_ensemble_coeff = normalize_temporal_ensemble_coeff(
-                policy.get("temporal_ensemble_coeff")
+                get_policy_param("temporal_ensemble_coeff")
             )
             self.policy = ACTConfig(
-                device = policy["device"],
-                repo_id = policy["repo_id"],
-                push_to_hub = policy["push_to_hub"],
+                device = get_policy_param("device", "cuda"),
+                repo_id = get_policy_param("repo_id", ""),
+                push_to_hub = get_policy_param("push_to_hub", False),
                 temporal_ensemble_coeff = temporal_ensemble_coeff,
-                chunk_size = policy.get("chunk_size", 100),
-                n_action_steps = policy.get("n_action_steps", 1),
+                # 输入/输出结构
+                n_obs_steps = get_policy_param("n_obs_steps", 1),
+                chunk_size = get_policy_param("chunk_size", 100),
+                n_action_steps = get_policy_param("n_action_steps", 100),
+                # Transformer 架构
+                dim_model = get_policy_param("dim_model", 512),
+                n_heads = get_policy_param("n_heads", 8),
+                n_encoder_layers = get_policy_param("n_encoder_layers", 4),
+                n_decoder_layers = get_policy_param("n_decoder_layers", 1),
+                dim_feedforward = get_policy_param("dim_feedforward", 3200),
+                feedforward_activation = get_policy_param("feedforward_activation", "relu"),
+                pre_norm = get_policy_param("pre_norm", False),
+                dropout = get_policy_param("dropout", 0.1),
+                # VAE 相关
+                use_vae = get_policy_param("use_vae", True),
+                latent_dim = get_policy_param("latent_dim", 32),
+                n_vae_encoder_layers = get_policy_param("n_vae_encoder_layers", 4),
+                kl_weight = get_policy_param("kl_weight", 10.0),
+                # 视觉骨干网络
+                vision_backbone = get_policy_param("vision_backbone", "resnet18"),
+                pretrained_backbone_weights = get_policy_param("pretrained_backbone_weights", "ResNet18_Weights.IMAGENET1K_V1"),
+                replace_final_stride_with_dilation = get_policy_param("replace_final_stride_with_dilation", False),
+                # 优化器
+                optimizer_lr = get_policy_param("optimizer_lr", 1e-5),
+                optimizer_weight_decay = get_policy_param("optimizer_weight_decay", 1e-4),
+                optimizer_lr_backbone = get_policy_param("optimizer_lr_backbone", 1e-5),
             )
         elif policy_type == "diffusion":
             from lerobot.policies import DiffusionConfig
             self.policy = DiffusionConfig(
-                device = policy["device"],
-                repo_id = policy["repo_id"],
-                push_to_hub = policy["push_to_hub"],
+                device = get_policy_param("device", "cuda"),
+                repo_id = get_policy_param("repo_id", ""),
+                push_to_hub = get_policy_param("push_to_hub", False),
+                # 输入/输出结构
+                n_obs_steps = get_policy_param("n_obs_steps", 2),
+                horizon = get_policy_param("horizon", 16),
+                n_action_steps = get_policy_param("n_action_steps", 8),
+                # 视觉骨干网络
+                vision_backbone = get_policy_param("vision_backbone", "resnet18"),
+                crop_shape = tuple(get_policy_param("crop_shape", [84, 84])) if get_policy_param("crop_shape") else None,
+                crop_is_random = get_policy_param("crop_is_random", True),
+                pretrained_backbone_weights = get_policy_param("pretrained_backbone_weights", None),
+                use_group_norm = get_policy_param("use_group_norm", True),
+                spatial_softmax_num_keypoints = get_policy_param("spatial_softmax_num_keypoints", 32),
+                use_separate_rgb_encoder_per_camera = get_policy_param("use_separate_rgb_encoder_per_camera", False),
+                # U-Net 架构
+                down_dims = tuple(get_policy_param("down_dims", [512, 1024, 2048])),
+                kernel_size = get_policy_param("kernel_size", 5),
+                n_groups = get_policy_param("n_groups", 8),
+                diffusion_step_embed_dim = get_policy_param("diffusion_step_embed_dim", 128),
+                use_film_scale_modulation = get_policy_param("use_film_scale_modulation", True),
+                # 噪声调度器
+                noise_scheduler_type = get_policy_param("noise_scheduler_type", "DDPM"),
+                num_train_timesteps = get_policy_param("num_train_timesteps", 100),
+                beta_schedule = get_policy_param("beta_schedule", "squaredcos_cap_v2"),
+                beta_start = get_policy_param("beta_start", 0.0001),
+                beta_end = get_policy_param("beta_end", 0.02),
+                prediction_type = get_policy_param("prediction_type", "epsilon"),
+                clip_sample = get_policy_param("clip_sample", True),
+                clip_sample_range = get_policy_param("clip_sample_range", 1.0),
+                num_inference_steps = get_policy_param("num_inference_steps", None),
+                # 损失计算
+                do_mask_loss_for_padding = get_policy_param("do_mask_loss_for_padding", False),
+                # 优化器
+                optimizer_lr = get_policy_param("optimizer_lr", 1e-4),
+                optimizer_betas = tuple(get_policy_param("optimizer_betas", [0.95, 0.999])),
+                optimizer_eps = get_policy_param("optimizer_eps", 1e-8),
+                optimizer_weight_decay = get_policy_param("optimizer_weight_decay", 1e-6),
+                # 学习率调度器
+                scheduler_name = get_policy_param("scheduler_name", "cosine"),
+                scheduler_warmup_steps = get_policy_param("scheduler_warmup_steps", 500),
             )
         else:
             raise ValueError(f"no config for policy type: {policy_type}")
@@ -149,7 +374,34 @@ class TrainPipelineConfig(HubMixin):
         self.save_checkpoint: bool = cfg["save_checkpoint"]
         self.save_freq: int = cfg["save_freq"]
         self.use_policy_training_preset: bool = cfg["use_policy_training_preset"]
-        
+        self.log_policy_artifacts: bool = cfg.get("log_policy_artifacts", False)
+
+        action_sampling = cfg.get("action_sampling", {}) or {}
+        min_translation_norm = _as_optional_float(
+            action_sampling.get("min_translation_norm"), 1.0e-3
+        )
+        min_rotation_norm = _as_optional_float(
+            action_sampling.get("min_rotation_norm"), 5.0e-3
+        )
+        self.action_sampling_enabled: bool = _as_bool(action_sampling.get("enabled"), False)
+        self.action_sampling_min_translation_norm: float = (
+            0.0 if min_translation_norm is None else float(min_translation_norm)
+        )
+        self.action_sampling_min_rotation_norm: float = (
+            0.0 if min_rotation_norm is None else float(min_rotation_norm)
+        )
+        self.action_sampling_window: int | None = _as_optional_int(action_sampling.get("window"), None)
+        self.action_sampling_min_active_frames: int = max(
+            1, _as_optional_int(action_sampling.get("min_active_frames"), 1) or 1
+        )
+        self.action_sampling_active_weight: float = float(action_sampling.get("active_weight", 8.0))
+        self.action_sampling_inactive_weight: float = float(action_sampling.get("inactive_weight", 1.0))
+        if self.action_sampling_active_weight <= 0 or self.action_sampling_inactive_weight < 0:
+            raise ValueError(
+                "`action_sampling.active_weight` must be positive and "
+                "`action_sampling.inactive_weight` must be non-negative."
+            )
+
         self.eval: EvalConfig = EvalConfig(
             n_episodes = eval["n_episodes"],
             batch_size = eval["batch_size"]
@@ -416,6 +668,10 @@ def update_policy(
         accelerator.unwrap_model(policy, keep_fp32_wrapper=True).update()
 
     train_metrics.loss = loss.item()
+    if output_dict and "l1_loss" in output_dict:
+        train_metrics.l1_loss = output_dict["l1_loss"]
+    if output_dict and "kld_loss" in output_dict:
+        train_metrics.kld_loss = output_dict["kld_loss"]
     train_metrics.grad_norm = grad_norm.item()
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
@@ -563,7 +819,10 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
 
     # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
+    sampler = make_action_weighted_sampler(dataset, cfg)
+    if sampler is not None:
+        shuffle = False
+    elif hasattr(cfg.policy, "drop_n_last_frames"):
         shuffle = False
         sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
@@ -573,7 +832,6 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         )
     else:
         shuffle = True
-        sampler = None
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -597,6 +855,8 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
+        "l1_loss": AverageMeter("l1", ":.3f"),
+        "kld_loss": AverageMeter("kld", ":.5f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
         "lr": AverageMeter("lr", ":0.1e"),
         "update_s": AverageMeter("updt_s", ":.3f"),
@@ -665,8 +925,15 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     postprocessor=postprocessor,
                 )
                 update_last_checkpoint(checkpoint_dir)
-                if wandb_logger:
-                    wandb_logger.log_policy(checkpoint_dir)
+                if wandb_logger and cfg.log_policy_artifacts:
+                    try:
+                        wandb_logger.log_policy(checkpoint_dir)
+                    except Exception as exc:  # noqa: BLE001
+                        logging.warning(
+                            "W&B policy artifact upload failed after checkpoint save; "
+                            "continuing training. Error: %s",
+                            exc,
+                        )
 
             accelerator.wait_for_everyone()
 

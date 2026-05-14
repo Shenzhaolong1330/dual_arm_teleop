@@ -70,8 +70,9 @@ class RecordConfig:
         self.dual_arm = teleop.get("dual_arm", True)
         self._parse_teleop_config(teleop)
         
-        # Policy config
-        self._parse_policy_config(policy)
+        # Policy config - load from policy_cfg file if specified
+        policy_cfg_path = cfg.get("policy_cfg")
+        self._parse_policy_config(policy, policy_cfg_path)
         
         # Robot config
         self.robot_ip: str = robot.get("robot_ip", "localhost")
@@ -111,6 +112,8 @@ class RecordConfig:
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
+        # Debugging: verbose action logging (prints raw, postprocessed and robot action values)
+        self.verbose_action_debug: bool = cfg.get("verbose_action_debug", False)
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
@@ -132,8 +135,76 @@ class RecordConfig:
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
     
-    def _parse_policy_config(self, policy: Dict[str, Any]) -> None:
+    def _parse_policy_config(self, policy: Dict[str, Any], policy_cfg_path: str = None) -> None:
         """Parse policy configuration."""
+        pretrained_path = policy.get("pretrained_path")
+        if pretrained_path:
+            project_root = Path(__file__).resolve().parent.parent.parent
+            pretrained_path_text = str(pretrained_path)
+            pretrained_local_path = Path(pretrained_path_text).expanduser()
+            looks_like_local_path = (
+                pretrained_local_path.is_absolute()
+                or pretrained_path_text.startswith((".", "~"))
+                or len(pretrained_local_path.parts) > 2
+            )
+            if looks_like_local_path:
+                if not pretrained_local_path.is_absolute():
+                    pretrained_local_path = project_root / pretrained_local_path
+                pretrained_local_path = pretrained_local_path.resolve()
+                if not pretrained_local_path.exists():
+                    raise FileNotFoundError(
+                        "[POLICY] pretrained_path does not exist:\n"
+                        f"  {pretrained_local_path}\n"
+                        "Train that checkpoint first, or point `record.policy.pretrained_path` "
+                        "to an existing model directory."
+                    )
+                pretrained_path = str(pretrained_local_path)
+
+            try:
+                self.policy = PreTrainedConfig.from_pretrained(pretrained_path)
+                self.policy.pretrained_path = pretrained_path
+                if policy.get("device"):
+                    self.policy.device = policy["device"]
+                if "push_to_hub" in policy:
+                    self.policy.push_to_hub = policy["push_to_hub"]
+                logging.info(f"[POLICY] Loaded pretrained policy config from: {pretrained_path}")
+                logging.info(
+                    "[POLICY] Effective config: type=%s chunk_size=%s n_action_steps=%s "
+                    "temporal_ensemble_coeff=%s optimizer_lr=%s kl_weight=%s",
+                    getattr(self.policy, "type", None),
+                    getattr(self.policy, "chunk_size", None),
+                    getattr(self.policy, "n_action_steps", None),
+                    getattr(self.policy, "temporal_ensemble_coeff", None),
+                    getattr(self.policy, "optimizer_lr", None),
+                    getattr(self.policy, "kl_weight", None),
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    "[POLICY] Failed to load pretrained policy config from "
+                    f"{pretrained_path}. Check that the directory contains config.json."
+                ) from exc
+
+        # 加载策略配置文件（如果指定）
+        policy_defaults = {}
+        if policy_cfg_path:
+            # 支持相对路径：相对于项目根目录
+            project_root = Path(__file__).resolve().parent.parent.parent
+            cfg_path = Path(policy_cfg_path)
+            if not cfg_path.is_absolute():
+                cfg_path = project_root / cfg_path
+            
+            if cfg_path.exists():
+                with open(cfg_path, 'r') as f:
+                    policy_defaults = yaml.safe_load(f).get("policy", {})
+                logging.info(f"[POLICY] Loaded policy config from: {cfg_path}")
+            else:
+                logging.warning(f"[POLICY] Policy config file not found: {cfg_path}")
+        
+        # 合并配置：policy 中的值优先于 policy_cfg 文件
+        def get_policy_param(key, default=None):
+            return policy.get(key, policy_defaults.get(key, default))
+        
         def normalize_temporal_ensemble_coeff(value: Any) -> float | None:
             """Treat non-positive and None-like values as disabled temporal ensembling."""
             if value is None:
@@ -159,25 +230,87 @@ class RecordConfig:
                 f"Got type: {type(value).__name__}"
             )
 
-        policy_type = policy["type"]
+        policy_type = get_policy_param("type")
         if policy_type == "act":
             from lerobot.policies import ACTConfig
 
             temporal_ensemble_coeff = normalize_temporal_ensemble_coeff(
-                policy.get("temporal_ensemble_coeff")
+                get_policy_param("temporal_ensemble_coeff")
             )
             self.policy = ACTConfig(
-                device=policy["device"],
-                push_to_hub=policy["push_to_hub"],
+                device=get_policy_param("device", "cuda"),
+                push_to_hub=get_policy_param("push_to_hub", False),
                 temporal_ensemble_coeff=temporal_ensemble_coeff,
-                chunk_size=policy.get("chunk_size", 100),
-                n_action_steps=policy.get("n_action_steps", 100),
+                # 输入/输出结构
+                n_obs_steps=get_policy_param("n_obs_steps", 1),
+                chunk_size=get_policy_param("chunk_size", 100),
+                n_action_steps=get_policy_param("n_action_steps", 100),
+                # Transformer 架构
+                dim_model=get_policy_param("dim_model", 512),
+                n_heads=get_policy_param("n_heads", 8),
+                n_encoder_layers=get_policy_param("n_encoder_layers", 4),
+                n_decoder_layers=get_policy_param("n_decoder_layers", 1),
+                dim_feedforward=get_policy_param("dim_feedforward", 3200),
+                feedforward_activation=get_policy_param("feedforward_activation", "relu"),
+                pre_norm=get_policy_param("pre_norm", False),
+                dropout=get_policy_param("dropout", 0.1),
+                # VAE 相关
+                use_vae=get_policy_param("use_vae", True),
+                latent_dim=get_policy_param("latent_dim", 32),
+                n_vae_encoder_layers=get_policy_param("n_vae_encoder_layers", 4),
+                kl_weight=get_policy_param("kl_weight", 10.0),
+                # 视觉骨干网络
+                vision_backbone=get_policy_param("vision_backbone", "resnet18"),
+                pretrained_backbone_weights=get_policy_param("pretrained_backbone_weights", "ResNet18_Weights.IMAGENET1K_V1"),
+                replace_final_stride_with_dilation=get_policy_param("replace_final_stride_with_dilation", False),
+                # 优化器
+                optimizer_lr=get_policy_param("optimizer_lr", 1e-5),
+                optimizer_weight_decay=get_policy_param("optimizer_weight_decay", 1e-4),
+                optimizer_lr_backbone=get_policy_param("optimizer_lr_backbone", 1e-5),
             )
         elif policy_type == "diffusion":
             from lerobot.policies import DiffusionConfig
             self.policy = DiffusionConfig(
-                device=policy["device"],
-                push_to_hub=policy["push_to_hub"],
+                device=get_policy_param("device", "cuda"),
+                push_to_hub=get_policy_param("push_to_hub", False),
+                # 输入/输出结构
+                n_obs_steps=get_policy_param("n_obs_steps", 2),
+                horizon=get_policy_param("horizon", 16),
+                n_action_steps=get_policy_param("n_action_steps", 8),
+                # 视觉骨干网络
+                vision_backbone=get_policy_param("vision_backbone", "resnet18"),
+                crop_shape=tuple(get_policy_param("crop_shape", [84, 84])) if get_policy_param("crop_shape") else None,
+                crop_is_random=get_policy_param("crop_is_random", True),
+                pretrained_backbone_weights=get_policy_param("pretrained_backbone_weights", None),
+                use_group_norm=get_policy_param("use_group_norm", True),
+                spatial_softmax_num_keypoints=get_policy_param("spatial_softmax_num_keypoints", 32),
+                use_separate_rgb_encoder_per_camera=get_policy_param("use_separate_rgb_encoder_per_camera", False),
+                # U-Net 架构
+                down_dims=tuple(get_policy_param("down_dims", [512, 1024, 2048])),
+                kernel_size=get_policy_param("kernel_size", 5),
+                n_groups=get_policy_param("n_groups", 8),
+                diffusion_step_embed_dim=get_policy_param("diffusion_step_embed_dim", 128),
+                use_film_scale_modulation=get_policy_param("use_film_scale_modulation", True),
+                # 噪声调度器
+                noise_scheduler_type=get_policy_param("noise_scheduler_type", "DDPM"),
+                num_train_timesteps=get_policy_param("num_train_timesteps", 100),
+                beta_schedule=get_policy_param("beta_schedule", "squaredcos_cap_v2"),
+                beta_start=get_policy_param("beta_start", 0.0001),
+                beta_end=get_policy_param("beta_end", 0.02),
+                prediction_type=get_policy_param("prediction_type", "epsilon"),
+                clip_sample=get_policy_param("clip_sample", True),
+                clip_sample_range=get_policy_param("clip_sample_range", 1.0),
+                num_inference_steps=get_policy_param("num_inference_steps", None),
+                # 损失计算
+                do_mask_loss_for_padding=get_policy_param("do_mask_loss_for_padding", False),
+                # 优化器
+                optimizer_lr=get_policy_param("optimizer_lr", 1e-4),
+                optimizer_betas=tuple(get_policy_param("optimizer_betas", [0.95, 0.999])),
+                optimizer_eps=get_policy_param("optimizer_eps", 1e-8),
+                optimizer_weight_decay=get_policy_param("optimizer_weight_decay", 1e-6),
+                # 学习率调度器
+                scheduler_name=get_policy_param("scheduler_name", "cosine"),
+                scheduler_warmup_steps=get_policy_param("scheduler_warmup_steps", 500),
             )
         else:
             raise ValueError(f"No config for policy type: {policy_type}")
@@ -298,6 +431,8 @@ def run_record(record_cfg: RecordConfig):
         
         # Initialize the robot dynamically based on robot_type
         robot = create_robot(record_cfg.robot_type, robot_config)
+        if record_cfg.verbose_action_debug and hasattr(robot, "set_action_debug"):
+            robot.set_action_debug(True)
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
