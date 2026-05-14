@@ -1,346 +1,352 @@
-# Dual Arm Teleoperation and Data Collection System
+# Dual Arm Teleoperation, Data Collection and Policy Training
 
-## Introduction 
-This project is a teleoperation data collection tool for dual arm robots, embeded in [LeRobot](https://github.com/huggingface/lerobot.git).
+Dual Arm Teleoperation, Data Collection and Policy Training is a LeRobot-based toolkit for robot teleoperation, dataset collection, replay, visualization, preprocessing, and policy training. It is designed around dual-arm manipulation, but also keeps a single-arm Franka path for development and debugging.
 
-<p align="center">
-  <img src="assets/dobot.jpeg" alt="Record" width="600">
-  <br>
-</p>
-<p align="center">
-  <img src="assets/arx.jpeg" alt="Record" width="600">
-  <br>
-</p>
-
-
-It supports the end-effector pose control of the robot using Oculus Quest 3/3s devices, and collect the teleoperation data in LeRobot dataset format.
+Datasets collected with this repository are intended for training policies in [openpi-franka](https://github.com/Shenzhaolong1330/openpi-franka.git), StarVLA, and the local ACT / Diffusion Policy training pipeline provided here.
 
 <p align="center">
-  <img src="assets/quest3s.jpg" alt="Oculus Quest" width="600">
+  <img src="assets/record.png" alt="Recording interface" width="820">
   <br>
+  <sub>Record teleoperation episodes directly into the LeRobot dataset format.</sub>
 </p>
 
-The Oculus Quest controller provides 6-DoF tracking for intuitive end-effector control. 
+## Highlights
 
-## 1. Environment Setup
-### 1.1 Create and Activate Conda Environment
+- **Multi-robot abstraction**: one recording/training workflow for Franka, Dobot, ARX R5, and AgileX Nero style systems.
+- **Oculus Quest teleoperation**: 6-DoF controller tracking mapped to robot end-effector delta pose.
+- **LeRobot datasets**: records synchronized images, robot state, Cartesian delta actions, and gripper commands.
+- **OpenPI and StarVLA training data**: collected datasets can be used by [openpi-franka](https://github.com/Shenzhaolong1330/openpi-franka.git) and StarVLA training workflows.
+- **Replay and visualization**: quickly inspect collected trajectories and send recorded actions back to hardware.
+- **Policy training and deployment**: supports ACT and Diffusion Policy through LeRobot policy configs.
+- **Dataset cleaning tools**: trim long static spans, smooth noisy Cartesian actions, and preserve gripper event context before ACT training.
+
+## Supported Robots
+
+Robot support is registered in [robots/__init__.py](robots/__init__.py). Select the active robot with `record.robot_type` in [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml).
+
+| `robot_type` | System | Typical Action Space | Notes |
+| --- | --- | --- | --- |
+| `franka_dual_arm` | Dual Franka + Robotiq | left/right delta EE pose + binary gripper | Current primary deployment path. |
+| `dobot_dual_arm` | Dual Dobot Nova | left/right delta EE pose or joint action + gripper | Includes Dobot RPC client/server utilities. |
+| `arx_dual_arm` | ARX R5 dual arm | left/right delta EE pose or joint action + integrated gripper | Includes ARX filtering, deadband, and URDF assets. |
+| `nero_dual_arm` | AgileX Nero dual arm | left/right delta EE pose + gripper | Configured through `dual_agilx_nero`. |
+| `franka` | Single Franka | right delta EE pose or joint action + gripper | Useful for single-arm tests and development. |
+| `flexiv_dual_arm` | Flexiv dual arm | Coming soon | Flexiv support incoming. |
+
+<p align="center">
+  <img src="assets/dual_franka.jpeg" alt="Dual Franka" width="24%">
+  <img src="assets/dobot.jpeg" alt="Dual Dobot" width="32%">
+  <img src="assets/arx.jpeg" alt="ARX R5" width="24%">
+  <img src="assets/agilex.jpeg" alt="AgileX Nero" width="24%">
+  <br>
+  <sub>Hardware snapshots: Dual Franka, Dobot, ARX R5, AgileX Nero, and upcoming Flexiv support.</sub>
+</p>
+
+Additional assets:
+
+<p align="center">
+  <img src="assets/arx_lift.jpeg" alt="ARX lift setup" width="24%">
+  <img src="assets/flexiv.jpeg" alt="Flexiv setup asset" width="24%">
+  <img src="assets/quest3s.jpg" alt="Oculus Quest 3S" width="30%">
+  <br>
+  <sub>Other robot assets and Oculus Quest 3S teleoperation device.</sub>
+</p>
+
+## Supported Operations
+
+| Command | Purpose |
+| --- | --- |
+| `robot-record` | Record a dataset, run a trained policy, or mix policy and teleoperation depending on `record.run_mode`. |
+| `robot-replay` | Replay an episode from a LeRobot dataset on the selected robot. |
+| `robot-visualize` | Visualize dataset episodes and camera streams. |
+| `robot-reset` | Reset or home the selected robot. |
+| `robot-train` | Train ACT or Diffusion Policy using [scripts/config/train_cfg.yaml](scripts/config/train_cfg.yaml). |
+| `robot-help` | Print the available command summary. |
+| `tools-check-rs` | List connected RealSense camera serial numbers. |
+| `tools-check-dataset` | Inspect and repair local dataset bookkeeping. |
+| `tools-preprocess-dataset` | Generate a cleaned dataset for policy training. |
+| `bash scripts/tools/check_robotiq_ports.sh` | Check Robotiq serial ports. |
+| `bash scripts/tools/map_gripper.sh` | Helper script for gripper device mapping. |
+
+Recording mode is controlled by:
+
+```yaml
+record:
+  run_mode: "run_record"  # run_record, run_policy, or run_mix
+  robot_type: "franka_dual_arm"
+  control_mode: "oculus"
+```
+
+## Supported Algorithms
+
+Policy configuration files live in [scripts/config/policies](scripts/config/policies).
+
+| Algorithm | Config | Use Case |
+| --- | --- | --- |
+| ACT | [act_cfg.yaml](scripts/config/policies/act_cfg.yaml) | Action Chunking Transformer for vision/state conditioned imitation learning. |
+| Diffusion Policy | [diffusion_cfg.yaml](scripts/config/policies/diffusion_cfg.yaml) | Diffusion-based action sequence generation. |
+| OpenPI | [openpi-franka](https://github.com/Shenzhaolong1330/openpi-franka.git) | External OpenPI training pipeline for Franka policy learning from collected datasets. |
+| StarVLA | [starVLA/starVLA](https://github.com/starVLA/starVLA) | External VLA training framework that can consume collected robot datasets. |
+
+Training uses [scripts/config/train_cfg.yaml](scripts/config/train_cfg.yaml). The current training path also supports motion-biased sampling for datasets with many near-static frames:
+
+```yaml
+action_sampling:
+  enabled: True
+  min_translation_norm: 0.010
+  min_rotation_norm: 0.030
+  active_weight: 20.0
+  inactive_weight: 0.2
+```
+
+## Dataset Preprocessing for ACT
+
+The preprocessing tool is configured in [scripts/config/preprocess_dataset_cfg.yaml](scripts/config/preprocess_dataset_cfg.yaml). It writes a new dataset instead of modifying the original one.
+
+Supported cleaning steps:
+
+| Feature | Behavior |
+| --- | --- |
+| Static trimming | For continuous static spans longer than `min_static_frames`, keep only the first `keep_start_frames` and last `keep_end_frames`. |
+| Action smoothing | Apply median, EMA, or median+EMA smoothing to Cartesian `delta_ee_pose` labels. |
+| Gripper event preservation | Preserve a window around open/close transitions so grasp moments are not removed. |
+
+Run a dry-run first:
+
+```bash
+tools-preprocess-dataset --dry-run
+```
+
+Generate or overwrite the cleaned dataset:
+
+```bash
+tools-preprocess-dataset --overwrite
+```
+
+Equivalent direct Python command:
+
+```bash
+python scripts/tools/preprocess_dataset.py --overwrite
+```
+
+## Quick Start
+
+### 1. Create Environment
+
 ```bash
 conda create -n dual_arm_data python=3.10
 conda activate dual_arm_data
 ```
 
-### 1.2 Install lerobot
+### 2. Install LeRobot
+
 ```bash
-# Install specific version 0.3.4
-# git checkout da5d2f3e9187fa4690e6667fe8b294cae49016d6
 git clone https://github.com/huggingface/lerobot.git
 cd lerobot
 git checkout da5d2f3e9187fa4690e6667fe8b294cae49016d6
 pip install -e .
 ```
 
-### 1.3 Clone and Install Dual Arm Teleoperation Source
+### 3. Install This Repository
+
 ```bash
-mkdir dual_arm_ws && cd dual_arm_ws
+mkdir -p dual_arm_ws
+cd dual_arm_ws
 git clone https://github.com/Shenzhaolong1330/dual_arm_teleop.git
 cd dual_arm_teleop
 pip install -e .
 ```
 
-### 1.4 View Available Commands
-Run the following command to display all available scrtips:
+Check available commands:
+
 ```bash
 robot-help
 ```
 
-## 2. Obtain and Configure Necessary Parameters
+## Oculus Quest Teleoperation
 
-### 2.1 Get RealSense Camera Serial Number
-Please make sure only one camera is connected at a time.
-```bash
-tools-check-rs
-```
-Or you can check the serial number in the realsense-viewer.
-```
-realsense-viewer
-```
+This project uses Oculus Quest 3/3S controller poses as dual-arm Cartesian delta commands.
 
-### 2.2 Oculus Quest Setup (For Oculus Teleoperation Mode)
+<p align="center">
+  <img src="assets/quest3s.jpg" alt="Oculus Quest 3S" width="520">
+</p>
 
-If you plan to use Oculus Quest for teleoperation, follow these steps to set up the device:
+### Controller Mapping
 
-#### 2.2.0 Clone Oculus Reader
-```bash
-cd teleoperators/oculus_teleoperator/oculus
-git clone https://github.com/rail-berkeley/oculus_reader.git
-pip install -e oculus_reader
-```
-after pip, you can run 
-```bash
-python teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/reader.py
-```
-to test the Oculus Reader and check the data output.
+| Control | Function |
+| --- | --- |
+| Left Grip | Hold to enable left arm motion. |
+| Right Grip | Hold to enable right arm motion. |
+| Left / Right Trigger | Close the corresponding gripper while pressed; release to open. |
+| A Button | Request robot reset or go-home depending on robot config. |
+| Controller Pose | Generates end-effector delta pose. |
 
-#### 2.2.1 Install ADB (Android Debug Bridge)
+### Setup
 
-ADB is required for communication between Oculus Quest and the computer.
+Install ADB:
 
 ```bash
-# On Ubuntu
 sudo apt install android-tools-adb
-
-# Verify installation
 adb version
 ```
 
-#### 2.2.2 Enable Developer Mode on Oculus Quest
+Enable developer mode in the Meta Quest mobile app, then connect the headset and verify:
 
-1. Create or join a developer organization at [Meta for Developers](https://developer.oculus.com/manage/organizations/create/)
-2. Open the Meta Quest app on your phone
-3. Go to **Settings** → Select your device → **More Settings** → **Developer Mode**
-4. Enable **Developer Mode** toggle
-
-#### 2.2.3 Connect Oculus Quest to Computer
-
-**Option A: USB Connection (Recommended for initial setup)**
-
-1. Connect Oculus Quest to your computer using a USB-C cable
-2. Put on the headset and allow USB debugging when prompted
-3. Check **Always allow from this computer**
-4. Verify connection:
 ```bash
 adb devices
-# Expected output:
-# List of devices attached
-# <device_id>    device
 ```
 
-**Option B: Wireless Connection (More portable for operation)**
+For wireless operation, get the headset IP and set it in [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml):
 
-1. First connect via USB cable
-2. Ensure both Oculus Quest and computer are on the same network
-3. Get the Oculus Quest IP address:
 ```bash
 adb shell ip route
-# Look for the IP after "src", e.g., 192.168.110.62
 ```
-4. Configure the IP in `record_cfg.yaml`:
+
 ```yaml
 teleop:
   oculus_config:
-    ip: "192.168.110.62"  # Your Oculus Quest IP address
+    ip: "192.168.8.114"
 ```
 
-#### 2.2.4 Install Oculus Reader APK
-
-The Oculus Reader APK comes pre-packaged with this project. To install it:
+Install the Oculus Reader APK if needed:
 
 ```bash
-# Navigate to the APK directory
 cd teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/APK
-
-# Install the APK to Oculus Quest
 adb install -r teleop-debug.apk
 ```
 
-After installation, the app will appear in your Oculus Quest library under **Unknown Sources**.
+## Dataset Workflow
 
-#### 2.2.5 Configure Oculus Teleoperation in record_cfg.yaml
+### Record
 
-```yaml
-record:
-  control_mode: "oculus"  # Set control mode to oculus
-  
-  teleop:
+Configure [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml), then run:
 
-    control_mode: "oculus"
-    oculus_config:
-      ip: "192.168.110.62"  # Oculus Quest IP address
-      use_gripper: True
-      pose_scaler: [2.0, 1.5]  # [position_scale, orientation_scale]
-      channel_signs: [1, 1, 1, -1, -1, 1]  # Axis direction signs [x, y, z, rx, ry, rz]
-```
-
-#### 2.2.6 Oculus Controller Controls
-
-| Control                   | Function                                |
-| ------------------------- | --------------------------------------- |
-| **RG (Right Grip)**       | Press and hold to enable robot movement |
-| **RTr (Right Trigger)**   | Press to close gripper, release to open |
-| **A Button**              | Request robot reset                     |
-| **Right Controller Pose** | Controls end-effector delta pose        |
-
-#### 2.2.7 Coordinate System Mapping
-
-The Oculus coordinate system is mapped to the robot coordinate system as follows:
-
-| Oculus Axis  | Robot Axis  | Description               |
-| ------------ | ----------- | ------------------------- |
-| X (right)    | -Y (left)   | Lateral movement          |
-| Y (up)       | Z (up)      | Vertical movement         |
-| Z (backward) | X (forward) | Forward/backward movement |
-
-#### 2.2.8 Troubleshooting
-
-**Connection Issues:**
-```bash
-# Restart ADB server
-adb kill-server
-adb start-server
-
-# Check connected devices
-adb devices
-```
-
-**Stop the Oculus App:**
-```bash
-adb shell am force-stop com.rail.oculus.teleop
-```
-
-**Reinstall APK:**
-```bash
-adb uninstall com.rail.oculus.teleop
-adb install -r teleop-debug.apk
-```
-
-## 3. Dataset Recording
-
-### 3.1 Upload Data to Hugging Face (Optional)
-1. Set the following in `record_cfg.yaml`:
-```yaml
-push_to_hub: True
-```
-2. Obtain your Hugging Face account token and login:
-```bash
-huggingface-cli login --token ${HUGGINGFACE_TOKEN} 
-huggingface-cli whoami  # Verify successful login
-```
-
-### 3.2 Start Recording
-1. Activate robot.  
-2. Verify that the parameters in `record_cfg.yaml` are correct.  
-3. To ensure standardized data collection, please read `9. Dataset Naming and Recording Details` before running the following command:
 ```bash
 robot-record
 ```
 
 <p align="center">
-  <img src="assets/record.png" alt="Record" width="600">
-  <br>
-  <b>Figure 1: Record</b>
+  <img src="assets/record.png" alt="Record dataset" width="820">
 </p>
 
-## 4. Dataset Replay
-```bash
-robot-replay # Make sure record_cfg.yaml is properly configured
-```
+Recording keys:
 
-## 5. Dataset Visualization
-```bash
-robot-visualize # Make sure record_cfg.yaml is properly configured
-```
-<p align="center">
-  <img src="assets/visualize.png" alt="Visualization" width="600">
-  <br>
-  <b>Figure 2: Visualization</b>
-</p>
+| Key | Behavior |
+| --- | --- |
+| Right Arrow | Save current episode, enter reset stage, then start the next episode. |
+| Left Arrow | Restart the current episode. |
+| Esc | Exit recording and save completed data. |
+| Ctrl+C / Exception | Enter cleanup flow and ask whether to delete incomplete data. |
 
-## 6. Dataset Appending and Resume
-If you have already recorded a dataset under the specified `repo_id`, set `resume: True` in `record_cfg.yaml` and enter the dataset name in `resume_dataset` to continue recording new data on the existing dataset. Then, run the following command:
+### Replay
 
 ```bash
-robot-record
+robot-replay
 ```
 
-## 7. Merge Datasets
-If you recorded data in multiple stages, ensure each dataset has a unique `repo_id`. Use the following command to merge them into a single dataset:
+### Visualize
+
 ```bash
-lerobot-edit-dataset 
-    --repo_id <merged_repo_id> 
-    --operation.type merge 
-    --operation.repo_ids "['<repo_id_1>', '<repo_id2>']"
+robot-visualize
 ```
-- For more dataset processing commands, see [LeRobot](https://huggingface.co/docs/lerobot/using_dataset_tools).
-
-## 8. Recording Control Keys
-
-- **Right Arrow Key**  
-   1. Press the right arrow key: end the current episode and save the data. The program will pause.  
-   2. Enter the **reset** phase: press enter key to continue (the slave arm will follow the master arm), use the master arm to return the slave arm to its initial position.  
-   3. Press the right arrow key again to start recording the next episode.
-
-- **Left Arrow Key**  
-   - Press to restart the current episode recording (overwrite the current data).
-
-- **Esc Key**  
-   - Press to exit the recording session and save all recorded episodes.
-
-- **Ctrl+C or Exception**
-   - Pressing or on exception: enters exception handling and asks whether to delete the incomplete dataset.
-   - If you delete the dataset by accident, you can find it in the trash folder.
-  
-## 9. Dataset Naming and Recording Details
-### 9.1 Dataset Naming
-<p align="center">
-  <img src="assets/dataset.png" alt="dataset" width="600">
-  <br>
-  <b>Figure 3: Dataset</b>
-</p>
 
 <p align="center">
-  <img src="assets/dataset_info.png" alt="dataset_info" width="600">
-  <br>
-  <b>Figure 4: Dataset Info</b>
+  <img src="assets/visualize.png" alt="Visualize dataset" width="820">
 </p>
 
-1. The dataset is by default stored in the `~/.cache/huggingface/lerobot` directory and contains three types of items:
+## Dataset Organization
 
-   - `dataset_info.txt`: Automatically records local dataset information, including the following fields: `record_id`, `name`, `task`, `date`, `version`, `user_info`, and `type`. The `user_info` field can be annotated via the `user_notes` entry in `record_cfg.yaml`.
+Datasets are stored under the local LeRobot cache, usually:
 
-   - `dataset_info_backup`: When `tools-check-dataset` is used to manually update `dataset_info.txt`, this folder stores backups of the previous records.
+```bash
+~/.cache/huggingface/lerobot
+```
 
-   - Dataset folders: Stores the actual dataset contents.
+<p align="center">
+  <img src="assets/dataset.png" alt="Dataset folder" width="780">
+  <br>
+  <img src="assets/dataset_info.png" alt="Dataset information" width="780">
+</p>
 
-2. Dataset names follow the format `[description]_[date]_[version]`, where:
-   - `description` comes from `record_cfg.yaml` as `repo_id=<user_name>/<description>`;
-   - `date` is generated automatically;
-   - `version` is incremented automatically if a dataset with the same `repo_id` already exists.
-3. Description naming rule: `task.description -> Verb_SourceObject_prep_TargetObject`.  
-   For example:  
-   `Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin`.
+Recommended dataset naming:
 
-### 9.2 Recording Instructions
-1. Complete step `2. Get and configure required parameters`.
-2. Fill in the task instruction in `record_cfg.yaml` under `task.description` and set `repo_id` according to the dataset naming rules.
-3. Check and adjust other parameters in `record_cfg.yaml` to ensure correctness.
-4. Run `robot-record`. For safety, ensure the master and slave arm joint angles are approximately aligned; `robot-record` will automatically perform the `2.4 Master-Slave Joint Angle Error Check`. Then follow `8. Recording Control Keys` to complete the recording.
-5. After recording, a `dataset_info.txt` file will be automatically created in the same directory to store local dataset information. If you have manually deleted any datasets, update the `dataset_info.txt` using:
+```text
+<user_or_namespace>/<task_description>
+```
+
+The local helper records extra metadata such as task, date, version, and user notes. Use:
+
 ```bash
 tools-check-dataset
 ```
 
-## 10. Training and Evaluation Using Collected Datasets
-### 10.1 Training
-Config the `train_cfg.yaml` file, including the following fields:
-1. dataset_repo_id: The repository ID of the dataset to use for training.
-2. policy.type: The policy type to use for training. You can choose from `diffusion` and `act`.
-3. output_dir: The directory to save the training outputs.
-4. job_name: The name of the training job.
-5. batch_size: The batch size for training.
-6. steps: The total number of training steps.
+to inspect or refresh local dataset bookkeeping.
 
-Then run the following command to start training:
+## Training and Deployment
+
+### Train
+
+Edit [scripts/config/train_cfg.yaml](scripts/config/train_cfg.yaml), then run:
+
 ```bash
 robot-train
 ```
 
-### 10.2 Evaluation
-To evaluate the trained policy, config the `record_cfg.yaml` file, including the following fields:
-1. run_mode: Set to `run_policy` to enable evaluation mode.
-2. policy.type: The policy type to use for evaluation. You can choose from `diffusion` and `act`. Make sure it is the same as the policy type used for training.
-3. policy.checkpoint_path: The path to the trained policy checkpoint. The path should include `config.json`.
+Important fields:
 
-Then run the following command to start evaluation:
+```yaml
+train:
+  dataset:
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+  policy_cfg: "scripts/config/policies/act_cfg.yaml"
+  policy:
+    type: "act"
+```
+
+### Deploy a Policy
+
+Set `record.run_mode` to `run_policy` and point `record.policy.pretrained_path` to a checkpoint directory containing the pretrained model files:
+
+```yaml
+record:
+  run_mode: "run_policy"
+  policy_cfg: "scripts/config/policies/act_cfg.yaml"
+  policy:
+    type: "act"
+    pretrained_path: "outputs/train/<run_name>/checkpoints/last/pretrained_model"
+```
+
+Then run:
+
 ```bash
 robot-record
+```
+
+## Configuration Files
+
+| File | Purpose |
+| --- | --- |
+| [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml) | Robot, teleoperation, camera, dataset recording, replay, visualization, and deployment config. |
+| [scripts/config/train_cfg.yaml](scripts/config/train_cfg.yaml) | Dataset, policy, optimizer, logging, checkpoint, and training config. |
+| [scripts/config/preprocess_dataset_cfg.yaml](scripts/config/preprocess_dataset_cfg.yaml) | Dataset cleaning config for static trimming, smoothing, and gripper event preservation. |
+| [scripts/config/policies/act_cfg.yaml](scripts/config/policies/act_cfg.yaml) | ACT policy architecture and optimization config. |
+| [scripts/config/policies/diffusion_cfg.yaml](scripts/config/policies/diffusion_cfg.yaml) | Diffusion Policy architecture and optimization config. |
+
+## Extending to New Robots
+
+Use [robots/example_robot](robots/example_robot) as the template. A new robot integration usually needs:
+
+1. A config dataclass.
+2. A robot class with `connect`, `disconnect`, `get_observation`, `send_action`, `action_features`, and `observation_features`.
+3. Optional RPC client/server code.
+4. A registry entry in [robots/__init__.py](robots/__init__.py).
+
+Keep the action feature names compatible with the teleoperation and policy stack whenever possible:
+
+```text
+left_delta_ee_pose.{x,y,z,rx,ry,rz}
+right_delta_ee_pose.{x,y,z,rx,ry,rz}
+left_gripper_cmd_bin
+right_gripper_cmd_bin
 ```

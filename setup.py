@@ -7,7 +7,7 @@ ROOT = Path(__file__).parent.resolve()
 setup(
     name="dual_arm_teleop",
     version="0.1.0",
-    description="dual-arm teleoperation and dataset collection utilities",
+    description="Dual Arm Teleoperation, Data collection and policy training",
     python_requires=">=3.10",
     packages=find_packages(where=".", include=["scripts*", "scripts.*", "robots*", "robots.*", "teleoperators*", "teleoperators.*"]),
     include_package_data=True,
@@ -31,6 +31,7 @@ setup(
             # tools commands (helper tools)
             "tools-check-dataset = scripts.tools.check_dataset_info:main",
             "tools-check-rs = scripts.tools.rs_devices:main",
+            "tools-preprocess-dataset = scripts.tools.preprocess_dataset:main",
 
             # unified help command
             "robot-help = scripts.help.help_info:main",

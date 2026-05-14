@@ -1,7 +1,8 @@
 def main():
     print("""
 ==================================================
-Dual-Arm Teleoperation - Command Reference
+Dual Arm Teleoperation, Data collection and policy training
+Command Reference
 ==================================================
 
 Core Commands:
@@ -17,10 +18,12 @@ Utility Commands:
 Tool Commands:
   tools-check-dataset    Check local dataset information
   tools-check-rs         Retrieve connected RealSense camera serial numbers
-  tools-check-robotiq    Check Robotiq gripper serial ports
+  tools-preprocess-dataset
+                         Preprocess a LeRobot dataset for ACT training
 
 Shell Tools:
   check_robotiq_ports.sh  Get Robotiq gripper serial ports
+  map_gripper.sh          Helper for gripper device mapping
 
 Test Commands:
   test-gripper-ctrl      Run gripper control command (operate the gripper)
