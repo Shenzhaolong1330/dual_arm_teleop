@@ -1,0 +1,41 @@
+preprocess_dataset:
+  source:
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01"
+    episodes: null        # null means all episodes, or set e.g. [0, 1, 2]
+    max_episodes: null    # optional quick-test limit
+
+  output:
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+    overwrite: false
+    image_writer_threads: 4
+    batch_encoding_size: 1
+
+  dry_run: false
+
+  # 1) Compress long no-motion spans instead of deleting every zero-action frame.
+  static_trim:
+    enabled: true
+    min_static_frames: 30
+    keep_start_frames: 5
+    keep_end_frames: 5
+    translation_norm_threshold: 0.001
+    rotation_norm_threshold: 0.005
+
+  # 2) Smooth noisy Cartesian command labels before writing the new dataset.
+  action_smoothing:
+    enabled: true
+    method: "median"      # one of: median, ema, median_ema
+    median_window: 3      # odd number recommended
+    ema_alpha: 0.35       # used by ema / median_ema
+    smooth_cartesian: true
+    smooth_gripper: false
+    max_translation_delta: 0.06
+    max_rotation_delta: 0.08
+
+  # 3) Always preserve context around gripper open/close events.
+  gripper_events:
+    enabled: true
+    change_threshold: 0.5
+    keep_radius_frames: 15

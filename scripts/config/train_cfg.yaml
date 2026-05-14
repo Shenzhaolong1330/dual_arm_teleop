@@ -1,40 +1,56 @@
 train:
   dataset:
-    repo_id: "szl/pick_red_cube_grey_box_act_20260208_v01"
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
   # 指向包含数据集 repo 的本地目录（要包含 repo_id 子目录），
   # 例如本地缓存路径下的 physbrain3/pick_and_place_merged
-    root: "/home/deepcybo/.cache/huggingface/lerobot/szl/pick_red_cube_grey_box_act_20260208_v01"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
 
   env:
 
+  # 策略配置文件路径 (训练和部署共享同一配置)
+  policy_cfg: "scripts/config/policies/act_cfg.yaml"
+  
   policy:
     type: "act"
     device: "cuda"
     repo_id: "shenzhaolong/act_policy"
     push_to_hub: false  # 禁用模型推送
+    # 其他超参数从 policy_cfg 文件读取
 
-  output_dir: "outputs/train/act_test9"
-  job_name: "act_policy_test9"
+  output_dir: "outputs/train/act_dual_franka1_pick_up_and_seal_cleaned_1"
+  job_name: "act_policy_dual_franka1_pick_up_and_seal_cleaned_1"
 
   resume: false
   seed: 1000
   # Number of workers for the dataloader.
   num_workers: 4
-  batch_size: 8
-  steps: 200_00
-  eval_freq: 20_00
+  batch_size: 32
+  steps: 100000
+  eval_freq: 50_00
   log_freq: 200
   save_checkpoint: True
   # Checkpoint is saved every `save_freq` training iterations and after the last training step.
-  save_freq: 50_00
+  save_freq: 10_00
   use_policy_training_preset: True
+  # Keep checkpoint saving local. W&B model artifact upload can block training on unstable networks.
+  log_policy_artifacts: False
+  # Bias ACT training toward chunks that contain real Cartesian motion.
+  # The dataset has many near-stationary frames, and plain uniform sampling made the policy collapse to ~0 deltas.
+  action_sampling:
+    enabled: True
+    min_translation_norm: 0.010  # meters, computed across both arms' xyz deltas
+    min_rotation_norm: 0.030     # radians, computed across both arms' rx/ry/rz deltas
+    window: 1                    # score the current action, not any later action inside the ACT chunk
+    min_active_frames: 1         # current frame must be moving to count as active
+    active_weight: 20.0
+    inactive_weight: 0.2
 
   eval: 
     n_episodes: 10
     batch_size: 8
 
   wandb: 
-    enable: True
+    enable: true
     project: "lerobot"
     # entity: "your-wandb-username"  # 改为您的 WandB 用户名，或注释掉使用默认
     # notes: "训练备注"
