@@ -121,6 +121,9 @@ class FrankaDualArm(Robot):
         self._warned_joint_control = False
         self._delta_clip_warn_count = 0
         self._nonfinite_action_warn_count = 0
+        self._action_debug_enabled = False
+        self._action_debug_every_n = 30
+        self._action_debug_count = 0
         self._camera_stop_event = threading.Event()
         self._camera_threads: dict[str, threading.Thread] = {}
         self._frame_lock = threading.Lock()
@@ -266,7 +269,36 @@ class FrankaDualArm(Robot):
                 else:
                     self._last_right_gripper_open = open_fraction
 
+        self._log_action_debug(sent_action)
         return sent_action
+
+    def set_action_debug(self, enabled: bool, every_n: int = 30) -> None:
+        self._action_debug_enabled = bool(enabled)
+        self._action_debug_every_n = max(1, int(every_n))
+        self._action_debug_count = 0
+
+    def _log_action_debug(self, action: dict[str, Any]) -> None:
+        if not self._action_debug_enabled:
+            return
+
+        self._action_debug_count += 1
+        if self._action_debug_count > 5 and self._action_debug_count % self._action_debug_every_n != 0:
+            return
+
+        axes = ["x", "y", "z", "rx", "ry", "rz"]
+        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in axes], dtype=float)
+        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in axes], dtype=float)
+        logger.info(
+            "[FRANKA ACTION] step=%d left_xyz=%.6f right_xyz=%.6f left_rot=%.6f right_rot=%.6f "
+            "left_grip=%s right_grip=%s",
+            self._action_debug_count,
+            float(np.linalg.norm(left_delta[:3])),
+            float(np.linalg.norm(right_delta[:3])),
+            float(np.linalg.norm(left_delta[3:])),
+            float(np.linalg.norm(right_delta[3:])),
+            action.get("left_gripper_cmd_bin"),
+            action.get("right_gripper_cmd_bin"),
+        )
 
     def _add_cartesian_step_action(
         self,
