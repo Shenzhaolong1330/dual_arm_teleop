@@ -31,9 +31,14 @@ class OculusTeleopConfig(TeleoperatorConfig):
     # Left gripper: Left Trigger (LTr)
     # Right gripper: Right Trigger (RTr)
 
-    # Action smoothing (EMA) for 6D delta pose per arm.
-    # 1.0 means no smoothing, smaller values increase smoothing.
+    # Action smoothing for 6D delta pose per arm.
+    # one_euro is adaptive and usually feels more responsive than EMA for delta actions.
+    action_smoothing_method: str = "one_euro"
     action_smoothing_alpha: float = 0.35
+    action_smoothing_freq: float = 30.0
+    action_smoothing_min_cutoff: float = 1.2
+    action_smoothing_beta: float = 0.4
+    action_smoothing_d_cutoff: float = 1.0
 
     # Mirror mode for operating while standing opposite the robot.
     # When enabled, controller-to-arm assignment is mirrored and the final

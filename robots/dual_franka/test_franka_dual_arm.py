@@ -387,13 +387,36 @@ class FrankaDualArmTest(unittest.TestCase):
         robot = make_robot(use_gripper=True, control_mode="oculus")
         robot.cameras = {"front_image": FakeCamera(height=4, width=5)}
 
-        self.assertIn("left_delta_ee_pose.x", robot.action_features)
-        self.assertIn("right_gripper_cmd_bin", robot.action_features)
+        expected_action_names = [
+            *(f"left_delta_ee_pose.{axis}" for axis in ["x", "y", "z", "rx", "ry", "rz"]),
+            *(f"right_delta_ee_pose.{axis}" for axis in ["x", "y", "z", "rx", "ry", "rz"]),
+            "left_gripper_cmd_bin",
+            "right_gripper_cmd_bin",
+        ]
+        self.assertEqual(list(robot.action_features), expected_action_names)
+
+        expected_state_names = [
+            *(f"left_ee_pose.{axis}" for axis in ["x", "y", "z", "rx", "ry", "rz"]),
+            *(f"right_ee_pose.{axis}" for axis in ["x", "y", "z", "rx", "ry", "rz"]),
+            *(f"left_joint_{i + 1}.pos" for i in range(7)),
+            *(f"right_joint_{i + 1}.pos" for i in range(7)),
+            "left_gripper_state_norm",
+            "right_gripper_state_norm",
+            "left_gripper_cmd_bin",
+            "right_gripper_cmd_bin",
+            "front_image",
+        ]
+        self.assertEqual(list(robot.observation_features), expected_state_names)
         self.assertEqual(robot.observation_features["front_image"], (4, 5, 3))
 
         joint_robot = make_robot(use_gripper=False, control_mode="joint")
-        self.assertIn("left_joint_1.pos", joint_robot.action_features)
-        self.assertNotIn("left_gripper_cmd_bin", joint_robot.action_features)
+        self.assertEqual(
+            list(joint_robot.action_features),
+            [
+                *(f"left_joint_{i + 1}.pos" for i in range(7)),
+                *(f"right_joint_{i + 1}.pos" for i in range(7)),
+            ],
+        )
 
         robot.is_connected = True
         self.assertTrue(robot.is_calibrated())

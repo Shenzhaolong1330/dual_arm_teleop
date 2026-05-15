@@ -7,7 +7,7 @@ record:
   fps: 30  # dataset and camera frame rate
   control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
   use_gripper: &use_gripper true  # whether to use gripper
-  run_mode: "run_policy" # "run_record" or "run_policy" or "run_mix"
+  run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
   verbose_action_debug: true  # print policy/robot Cartesian delta norms during deployment
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
@@ -17,7 +17,7 @@ record:
     control_mode: *control_mode
     dual_arm: true  # dual-arm mode
     oculus_config:
-      ip: "192.168.8.114"  # Oculus Quest IP address
+      ip: #"192.168.8.114"  # Oculus Quest IP address
       use_gripper: *use_gripper
       # --- ARX R5 scalers/signs ---
       # left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
@@ -34,7 +34,12 @@ record:
       left_channel_signs: [1, 1, 1, -1, -1, 1]
       right_pose_scaler: [0.8, 0.8]
       right_channel_signs: [1, 1, 1, -1, -1, 1]
-      action_smoothing_alpha: 1.0  # Franka integrates deltas; disable EMA tail on delta actions
+      action_smoothing_method: "one_euro"  # one_euro, ema, or none
+      action_smoothing_alpha: 0.7  # only used when action_smoothing_method: "ema"
+      action_smoothing_freq: 30.0
+      action_smoothing_min_cutoff: 2.0
+      action_smoothing_beta: 1.0
+      action_smoothing_d_cutoff: 1.0
       mirror_teleop: true  # true: stand opposite the robot; swap left/right controllers and grippers
       visualize_placo: false  # whether to visualize robot using placo
 
@@ -89,7 +94,7 @@ record:
     type: "act"  # 策略类型 (act, diffusion)
     device: "cuda"  # 运行设备 (cuda, cpu)
     push_to_hub: False  # 禁用模型推送
-    pretrained_path: "/home/deepcybo/lerobot/dual_arm_ws/dual_arm_teleop/outputs/train/act_dual_franka1_pick_up_and_seal_merged_9/checkpoints/last/pretrained_model"  # 预训练模型路径下要包括config.json
+    pretrained_path: "/home/deepcybo/lerobot/dual_arm_ws/dual_arm_teleop/outputs/train/act_dual_franka1_pick_up_and_seal_merged_11/checkpoints/last/pretrained_model"  # 预训练模型路径下要包括config.json
     # 其他超参数从 policy_cfg 文件读取
 
   task:
@@ -133,8 +138,8 @@ record:
     push_to_hub: False # whether to push the dataset to your huggingface repo after recording
 
 replay:
-  dataset_name: dual_franka_1/pick_up_and_seal_20260513_v01_cleaned
-  episode_idx: 9 # episode index to replay
+  dataset_name: dual_franka_1/pick_up_and_seal_20260515_v27
+  episode_idx: 7 # episode index to replay
   robot_type: *robot_type  # robot type to use for replay
   robot:
     ip: *ip
@@ -142,5 +147,5 @@ replay:
   control_mode: *control_mode 
 
 visualize:
-  dataset_name: dual_franka_1/pick_up_and_seal_20260513_v01_cleaned
-  episode_index: 1 # episode index to visualize
+  dataset_name: dual_franka_1/pick_up_and_seal_20260515_v30
+  episode_index: 0 # episode index to visualize

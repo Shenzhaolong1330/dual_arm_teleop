@@ -379,6 +379,7 @@ class FrankaDualArm(Robot):
             if left_key in source_action:
                 sent_action[left_key] = float(left_delta[index])
 
+        for index, axis in enumerate(axes):
             right_key = f"right_delta_ee_pose.{axis}"
             if right_key in source_action:
                 sent_action[right_key] = float(right_delta[index])
@@ -467,15 +468,17 @@ class FrankaDualArm(Robot):
         left_joints = _as_np(left_robot_state.get("joint_positions"), self._num_joints_per_arm)
         right_joints = _as_np(right_robot_state.get("joint_positions"), self._num_joints_per_arm)
 
-        for i in range(self._num_joints_per_arm):
-            obs[f"left_joint_{i + 1}.pos"] = float(left_joints[i])
-            obs[f"right_joint_{i + 1}.pos"] = float(right_joints[i])
-
         left_pose = _ee_pose_from_side(left_side)
         right_pose = _ee_pose_from_side(right_side)
         for i, axis in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
             obs[f"left_ee_pose.{axis}"] = float(left_pose[i])
+        for i, axis in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
             obs[f"right_ee_pose.{axis}"] = float(right_pose[i])
+
+        for i in range(self._num_joints_per_arm):
+            obs[f"left_joint_{i + 1}.pos"] = float(left_joints[i])
+        for i in range(self._num_joints_per_arm):
+            obs[f"right_joint_{i + 1}.pos"] = float(right_joints[i])
 
         if self.config.use_gripper:
             left_grip = _gripper_open_fraction_from_side(left_side, self._left_gripper_state)
@@ -574,10 +577,12 @@ class FrankaDualArm(Robot):
         if self.config.control_mode in {"oculus", "spacemouse"}:
             for axis in ["x", "y", "z", "rx", "ry", "rz"]:
                 features[f"left_delta_ee_pose.{axis}"] = float
+            for axis in ["x", "y", "z", "rx", "ry", "rz"]:
                 features[f"right_delta_ee_pose.{axis}"] = float
         else:
             for i in range(self._num_joints_per_arm):
                 features[f"left_joint_{i + 1}.pos"] = float
+            for i in range(self._num_joints_per_arm):
                 features[f"right_joint_{i + 1}.pos"] = float
         if self.config.use_gripper:
             features["left_gripper_cmd_bin"] = float
@@ -591,12 +596,14 @@ class FrankaDualArm(Robot):
     @property
     def _motors_ft(self) -> dict[str, type]:
         features: dict[str, type] = {}
-        for i in range(self._num_joints_per_arm):
-            features[f"left_joint_{i + 1}.pos"] = float
-            features[f"right_joint_{i + 1}.pos"] = float
         for axis in ["x", "y", "z", "rx", "ry", "rz"]:
             features[f"left_ee_pose.{axis}"] = float
+        for axis in ["x", "y", "z", "rx", "ry", "rz"]:
             features[f"right_ee_pose.{axis}"] = float
+        for i in range(self._num_joints_per_arm):
+            features[f"left_joint_{i + 1}.pos"] = float
+        for i in range(self._num_joints_per_arm):
+            features[f"right_joint_{i + 1}.pos"] = float
         if self.config.use_gripper:
             features["left_gripper_state_norm"] = float
             features["right_gripper_state_norm"] = float

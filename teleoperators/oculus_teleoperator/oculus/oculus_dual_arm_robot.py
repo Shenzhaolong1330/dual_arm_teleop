@@ -12,11 +12,17 @@ Mirror mode:
 """
 
 from typing import Dict, Optional, Sequence
+import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from .oculus_reader.oculus_reader import OculusReader
 from .robot import Robot
+
+try:
+    from OneEuroFilter import OneEuroFilter
+except ImportError:
+    OneEuroFilter = None
 
 
 class OculusDualArmRobot(Robot):
@@ -61,8 +67,24 @@ class OculusDualArmRobot(Robot):
         right_pose_scaler: Sequence[float] = [1.0, 1.0],
         right_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
         action_smoothing_alpha: float = 0.35,
+        action_smoothing_method: str = "one_euro",
+        action_smoothing_freq: float = 30.0,
+        action_smoothing_min_cutoff: float = 1.2,
+        action_smoothing_beta: float = 0.4,
+        action_smoothing_d_cutoff: float = 1.0,
         mirror_teleop: bool = False,
     ):
+        smoothing_method = str(action_smoothing_method).strip().lower()
+        if smoothing_method not in {"one_euro", "ema", "none", "off", "raw"}:
+            raise ValueError(
+                "action_smoothing_method must be one of: one_euro, ema, none/off/raw"
+            )
+        if smoothing_method == "one_euro" and OneEuroFilter is None:
+            raise ImportError(
+                "action_smoothing_method='one_euro' requires the OneEuroFilter package. "
+                "Install it with `pip install oneeurofilter` or reinstall this project."
+            )
+
         self._oculus_reader = OculusReader(ip_address=ip)
         self._use_gripper = use_gripper
         self._mirror_teleop = bool(mirror_teleop)
@@ -83,10 +105,17 @@ class OculusDualArmRobot(Robot):
         self._right_prev_transform = None
         self._right_last_gripper_position = 1.0  # Default: open
 
-        # EMA smoothing state (6D delta pose for each arm)
+        # Smoothing state (6D delta pose for each arm)
+        self._action_smoothing_method = smoothing_method
         self._action_smoothing_alpha = float(action_smoothing_alpha)
         self._left_smoothed_delta = None
         self._right_smoothed_delta = None
+        self._one_euro_freq = float(action_smoothing_freq)
+        self._one_euro_min_cutoff = float(action_smoothing_min_cutoff)
+        self._one_euro_beta = float(action_smoothing_beta)
+        self._one_euro_d_cutoff = float(action_smoothing_d_cutoff)
+        self._left_delta_filters = None
+        self._right_delta_filters = None
         
         # Reset request
         self._reset_requested = False
@@ -98,6 +127,56 @@ class OculusDualArmRobot(Robot):
         if prev is None or alpha >= 1.0:
             return current.copy()
         return alpha * current + (1.0 - alpha) * prev
+
+    def _make_one_euro_filter(self):
+        if OneEuroFilter is None:
+            raise ImportError(
+                "action_smoothing_method='one_euro' requires the OneEuroFilter package. "
+                "Install it with `pip install oneeurofilter` or reinstall this project."
+            )
+        return OneEuroFilter(
+            freq=self._one_euro_freq,
+            mincutoff=self._one_euro_min_cutoff,
+            beta=self._one_euro_beta,
+            dcutoff=self._one_euro_d_cutoff,
+        )
+
+    def _make_one_euro_filter_bank(self):
+        return [self._make_one_euro_filter() for _ in range(6)]
+
+    def _one_euro_smooth(
+        self,
+        current: np.ndarray,
+        filter_attr: str,
+        timestamp: float,
+    ) -> np.ndarray:
+        filters = getattr(self, filter_attr)
+        if filters is None:
+            filters = self._make_one_euro_filter_bank()
+            setattr(self, filter_attr, filters)
+
+        filtered = np.empty(6, dtype=float)
+        for idx, value in enumerate(current):
+            filtered[idx] = float(filters[idx](float(value), timestamp))
+        return filtered
+
+    def _smooth_delta(self, current: np.ndarray, side: str, timestamp: float) -> np.ndarray:
+        """Smooth a 6D delta vector for one arm."""
+        if self._action_smoothing_method in {"none", "off", "raw"}:
+            return current.copy()
+
+        smoothed_attr = f"_{side}_smoothed_delta"
+        if self._action_smoothing_method == "ema":
+            smoothed = self._ema_smooth(current, getattr(self, smoothed_attr))
+            setattr(self, smoothed_attr, smoothed.copy())
+            return smoothed
+
+        filter_attr = f"_{side}_delta_filters"
+        return self._one_euro_smooth(current, filter_attr, timestamp)
+
+    def _reset_smoothing(self, side: str) -> None:
+        setattr(self, f"_{side}_smoothed_delta", None)
+        setattr(self, f"_{side}_delta_filters", None)
 
     def _mirror_pose_delta(self, delta_pose: np.ndarray) -> np.ndarray:
         """Convert opposite-side operator motion back to the canonical robot frame."""
@@ -193,6 +272,7 @@ class OculusDualArmRobot(Robot):
              right_dx, right_dy, right_dz, right_drx, right_dry, right_drz]
         """
         transforms, buttons = self._oculus_reader.get_transformations_and_buttons()
+        timestamp = time.monotonic()
         
         # Check grip buttons (both must be pressed for action)
         lg_pressed = buttons.get('LG', False)
@@ -214,16 +294,14 @@ class OculusDualArmRobot(Robot):
             if lg_pressed:
                 delta_left = self._compute_delta_pose(left_transform, self._left_prev_transform)
                 scaled_left = self._apply_scaling(delta_left, self._left_pose_scaler, self._left_channel_signs)
-                smoothed_left = self._ema_smooth(scaled_left, self._left_smoothed_delta)
-                self._left_smoothed_delta = smoothed_left.copy()
-                left_delta_out = smoothed_left
+                left_delta_out = self._smooth_delta(scaled_left, "left", timestamp)
                 self._left_prev_transform = left_transform.copy()
             else:
                 self._left_prev_transform = None
-                self._left_smoothed_delta = None
+                self._reset_smoothing("left")
         else:
             self._left_prev_transform = None
-            self._left_smoothed_delta = None
+            self._reset_smoothing("left")
         
         # ========== Right arm (right controller) ==========
         if 'r' in transforms:
@@ -232,16 +310,14 @@ class OculusDualArmRobot(Robot):
             if rg_pressed:
                 delta_right = self._compute_delta_pose(right_transform, self._right_prev_transform)
                 scaled_right = self._apply_scaling(delta_right, self._right_pose_scaler, self._right_channel_signs)
-                smoothed_right = self._ema_smooth(scaled_right, self._right_smoothed_delta)
-                self._right_smoothed_delta = smoothed_right.copy()
-                right_delta_out = smoothed_right
+                right_delta_out = self._smooth_delta(scaled_right, "right", timestamp)
                 self._right_prev_transform = right_transform.copy()
             else:
                 self._right_prev_transform = None
-                self._right_smoothed_delta = None
+                self._reset_smoothing("right")
         else:
             self._right_prev_transform = None
-            self._right_smoothed_delta = None
+            self._reset_smoothing("right")
         
         # ========== Gripper control ==========
         if self._use_gripper:

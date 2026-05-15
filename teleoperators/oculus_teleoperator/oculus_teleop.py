@@ -88,6 +88,11 @@ class OculusTeleop(Teleoperator):
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
+            action_smoothing_method=self.cfg.action_smoothing_method,
+            action_smoothing_freq=self.cfg.action_smoothing_freq,
+            action_smoothing_min_cutoff=self.cfg.action_smoothing_min_cutoff,
+            action_smoothing_beta=self.cfg.action_smoothing_beta,
+            action_smoothing_d_cutoff=self.cfg.action_smoothing_d_cutoff,
             mirror_teleop=self.cfg.mirror_teleop,
         )
         
