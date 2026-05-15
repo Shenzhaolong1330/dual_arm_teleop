@@ -1,0 +1,72 @@
+split_label_dataset:
+  source:
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01"
+    episodes: null        # null means all episodes, or set e.g. [0, 1, 2]
+    max_episodes: null    # optional quick-test limit
+
+  output:
+    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes"
+    overwrite: false
+    write_dataset: true
+    image_writer_threads: 4
+    batch_encoding_size: 1
+
+  manifests:
+    # Defaults to output.root/meta when empty.
+    dir:
+
+  dry_run: false
+  label_only: false
+  resume_cache: true
+
+  segmentation:
+    prefer_action_gripper: true
+    open_threshold: 0.75
+    closed_threshold: 0.25
+    debounce_frames: 5
+    close_is_low: true
+    context_before_sec: 1.5
+    context_after_sec: 1.5
+    min_segment_sec: 1.0
+    merge_gap_sec: 0.5
+    motion_fallback_enabled: true
+    motion_context_sec: 1.0
+    min_motion_sec: 0.4
+    motion_translation_threshold: 0.001
+    motion_rotation_threshold: 0.005
+
+  keyframes:
+    head_camera_key: "observation.images.head_image"
+    left_wrist_camera_key: "observation.images.left_wrist_image"
+    right_wrist_camera_key: "observation.images.right_wrist_image"
+    pre_close_sec: 0.5
+    jpeg_quality: 85
+
+  labeling:
+    min_confidence: 0.55
+
+  language_augmentation:
+    num_variants: 3
+    write_variants_as_episodes: true
+
+  openrouter:
+    # Set true only when you are ready to upload keyframes to OpenRouter.
+    enabled: false
+    # Optional. Prefer env var OPENROUTER_API_KEY for shared configs; if set here,
+    # do not commit your real key.
+    api_key: ""
+    model: "google/gemini-3.1-flash-lite"
+    validate_model: true
+    timeout_sec: 60
+    temperature: 0.2
+    max_tokens: 500
+    cache_path: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes/openrouter_label_cache.jsonl"
+    referer: "dual_arm_teleop"
+    title: "dual_arm_teleop_split_label_dataset"
+
+  vla_export:
+    write_starvla_modality: true
+    # Defaults to manifests.dir/modality.json or output.root/meta/modality.json when empty.
+    starvla_modality_path:

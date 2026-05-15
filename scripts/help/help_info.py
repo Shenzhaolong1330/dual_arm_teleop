@@ -20,6 +20,8 @@ Tool Commands:
   tools-check-rs         Retrieve connected RealSense camera serial numbers
   tools-preprocess-dataset
                          Preprocess a LeRobot dataset for ACT training
+  tools-split-label-dataset
+                         Split long LeRobot episodes and label sub-episodes
 
 Shell Tools:
   check_robotiq_ports.sh  Get Robotiq gripper serial ports

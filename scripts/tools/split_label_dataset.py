@@ -1,0 +1,1215 @@
+#!/usr/bin/env python
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import logging
+import os
+import shutil
+import time
+import urllib.error
+import urllib.request
+from dataclasses import asdict, dataclass, field
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import yaml
+
+try:  # Keep pure segmentation tests importable outside the LeRobot env.
+    import torch
+except ModuleNotFoundError:  # pragma: no cover - depends on local env
+    torch = None
+
+try:
+    from PIL import Image
+except ModuleNotFoundError:  # pragma: no cover - depends on local env
+    Image = None
+
+try:
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.datasets.utils import DEFAULT_FEATURES
+except ModuleNotFoundError:  # pragma: no cover - depends on local env
+    LeRobotDataset = None
+    DEFAULT_FEATURES = {
+        "timestamp": {},
+        "frame_index": {},
+        "episode_index": {},
+        "index": {},
+        "task_index": {},
+    }
+
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+logger = logging.getLogger(__name__)
+
+
+OPENROUTER_CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
+
+
+@dataclass
+class ArmEvent:
+    arm: str
+    event: str
+    frame: int
+    value: float
+
+
+@dataclass
+class RawSegment:
+    parent_episode: int
+    segment_id: int
+    stage_id: str
+    active_arm: str
+    start: int
+    end: int
+    core_start: int
+    core_end: int
+    close_frames: dict[str, int] = field(default_factory=dict)
+    open_frames: dict[str, int] = field(default_factory=dict)
+    source_segments: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def length(self) -> int:
+        return max(0, self.end - self.start)
+
+
+@dataclass
+class LabelResult:
+    canonical_instruction: str
+    stage_label: str
+    object: str
+    target: str
+    confidence: float
+    variants: list[str]
+    needs_review: bool
+    source: str
+    error: str | None = None
+
+
+def _load_config(path: Path) -> dict[str, Any]:
+    with open(path, "r") as f:
+        data = yaml.safe_load(f)
+    if "split_label_dataset" not in data:
+        raise ValueError(f"Invalid config, missing split_label_dataset: {path}")
+    return data["split_label_dataset"]
+
+
+def _as_path_or_none(value: str | None) -> Path | None:
+    return Path(value).expanduser() if value else None
+
+
+def _require_lerobot() -> None:
+    if LeRobotDataset is None:
+        raise ModuleNotFoundError(
+            "lerobot is not importable in this Python environment. "
+            "Activate the project environment before running this tool."
+        )
+
+
+def _select_episodes(dataset: Any, cfg: dict[str, Any]) -> list[int]:
+    episodes = cfg["source"].get("episodes")
+    if episodes is None:
+        episodes = list(range(dataset.meta.total_episodes))
+    else:
+        episodes = [int(ep) for ep in episodes]
+
+    max_episodes = cfg["source"].get("max_episodes")
+    if max_episodes is not None:
+        episodes = episodes[: int(max_episodes)]
+    return episodes
+
+
+def _feature_names(source: Any, key: str) -> list[str]:
+    feature = source.features.get(key, {})
+    names = feature.get("names") or []
+    return [str(name) for name in names]
+
+
+def _side_from_name(name: str, fallback_index: int) -> str:
+    lower = name.lower()
+    if "left" in lower:
+        return "left"
+    if "right" in lower:
+        return "right"
+    return f"gripper_{fallback_index}"
+
+
+def _gripper_indices(names: list[str], *, prefer_state: bool = False) -> list[int]:
+    indices = [idx for idx, name in enumerate(names) if "gripper" in name.lower()]
+    if not prefer_state:
+        return indices
+
+    state_like = [
+        idx
+        for idx in indices
+        if any(token in names[idx].lower() for token in ("state", "pos", "position", "width", "open"))
+        and "cmd" not in names[idx].lower()
+    ]
+    return state_like or indices
+
+
+def _episode_columns(dataset: Any, start: int, end: int, columns: list[str]) -> dict[str, np.ndarray]:
+    raw_dataset = dataset.hf_dataset.with_format(None)
+    batch = raw_dataset[start:end]
+    out: dict[str, np.ndarray] = {}
+    for key in columns:
+        if key in batch:
+            out[key] = np.asarray(batch[key], dtype=np.float32)
+    return out
+
+
+def _extract_gripper_signal(
+    arrays: dict[str, np.ndarray],
+    action_names: list[str],
+    state_names: list[str],
+    cfg: dict[str, Any],
+) -> tuple[np.ndarray | None, list[str], str]:
+    split_cfg = cfg.get("segmentation", {}) or {}
+    if split_cfg.get("prefer_action_gripper", True) and "action" in arrays:
+        indices = _gripper_indices(action_names)
+        if indices:
+            side_names = [_side_from_name(action_names[idx], i) for i, idx in enumerate(indices)]
+            return arrays["action"][:, indices], side_names, "action"
+
+    if "observation.state" in arrays:
+        indices = _gripper_indices(state_names, prefer_state=True)
+        if indices:
+            side_names = [_side_from_name(state_names[idx], i) for i, idx in enumerate(indices)]
+            return arrays["observation.state"][:, indices], side_names, "observation.state"
+
+    return None, [], "none"
+
+
+def _motion_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray:
+    split_cfg = cfg.get("segmentation", {}) or {}
+    suffix_groups = {
+        "translation": {"x", "y", "z"},
+        "rotation": {"rx", "ry", "rz", "roll", "pitch", "yaw"},
+    }
+
+    def matching(suffixes: set[str]) -> list[int]:
+        return [
+            idx
+            for idx, name in enumerate(action_names)
+            if "delta_ee_pose" in name and name.rsplit(".", 1)[-1] in suffixes
+        ]
+
+    translation_indices = matching(suffix_groups["translation"])
+    rotation_indices = matching(suffix_groups["rotation"])
+    translation_norm = (
+        np.linalg.norm(actions[:, translation_indices], axis=1)
+        if translation_indices
+        else np.zeros(actions.shape[0], dtype=np.float32)
+    )
+    rotation_norm = (
+        np.linalg.norm(actions[:, rotation_indices], axis=1)
+        if rotation_indices
+        else np.zeros(actions.shape[0], dtype=np.float32)
+    )
+    return (translation_norm >= float(split_cfg.get("motion_translation_threshold", 0.001))) | (
+        rotation_norm >= float(split_cfg.get("motion_rotation_threshold", 0.005))
+    )
+
+
+def _stable_state_events(
+    values: np.ndarray,
+    arm: str,
+    *,
+    open_threshold: float,
+    closed_threshold: float,
+    debounce_frames: int,
+    close_is_low: bool = True,
+) -> list[ArmEvent]:
+    if values.size == 0:
+        return []
+
+    values = np.asarray(values, dtype=np.float32).reshape(-1)
+    if not close_is_low:
+        values = 1.0 - values
+
+    raw = np.full(values.shape[0], fill_value=-1, dtype=np.int8)
+    raw[values >= open_threshold] = 1
+    raw[values <= closed_threshold] = 0
+
+    first_known = next((int(v) for v in raw if v >= 0), -1)
+    current = first_known
+    candidate = -1
+    candidate_count = 0
+    events: list[ArmEvent] = []
+
+    for idx, state in enumerate(raw):
+        state = int(state)
+        if state < 0:
+            candidate = -1
+            candidate_count = 0
+            continue
+        if current < 0:
+            current = state
+            continue
+        if state == current:
+            candidate = -1
+            candidate_count = 0
+            continue
+        if state != candidate:
+            candidate = state
+            candidate_count = 1
+        else:
+            candidate_count += 1
+
+        if candidate_count >= max(1, debounce_frames):
+            event_frame = idx - candidate_count + 1
+            event_name = "open" if candidate == 1 else "close"
+            events.append(
+                ArmEvent(
+                    arm=arm,
+                    event=event_name,
+                    frame=int(event_frame),
+                    value=float(values[event_frame]),
+                )
+            )
+            current = candidate
+            candidate = -1
+            candidate_count = 0
+
+    return events
+
+
+def _arm_segments_from_events(
+    parent_episode: int,
+    arm: str,
+    events: list[ArmEvent],
+    episode_len: int,
+    cfg: dict[str, Any],
+) -> list[RawSegment]:
+    split_cfg = cfg.get("segmentation", {}) or {}
+    fps = float(cfg.get("_fps", split_cfg.get("fps", 30)))
+    context_before = int(round(float(split_cfg.get("context_before_sec", 1.5)) * fps))
+    context_after = int(round(float(split_cfg.get("context_after_sec", 1.5)) * fps))
+    min_len = int(round(float(split_cfg.get("min_segment_sec", 1.0)) * fps))
+
+    segments: list[RawSegment] = []
+    pending_close: ArmEvent | None = None
+    for event in events:
+        if event.event == "close":
+            pending_close = event
+            continue
+        if event.event != "open" or pending_close is None:
+            continue
+
+        start = max(0, pending_close.frame - context_before)
+        end = min(episode_len, event.frame + context_after + 1)
+        if end - start >= min_len:
+            segments.append(
+                RawSegment(
+                    parent_episode=parent_episode,
+                    segment_id=-1,
+                    stage_id="",
+                    active_arm=arm,
+                    start=start,
+                    end=end,
+                    core_start=pending_close.frame,
+                    core_end=event.frame,
+                    close_frames={arm: pending_close.frame},
+                    open_frames={arm: event.frame},
+                    source_segments=[
+                        {
+                            "active_arm": arm,
+                            "core_start": pending_close.frame,
+                            "core_end": event.frame,
+                            "close_frame": pending_close.frame,
+                            "open_frame": event.frame,
+                        }
+                    ],
+                )
+            )
+        pending_close = None
+
+    return segments
+
+
+def _motion_segments(
+    parent_episode: int,
+    moving: np.ndarray,
+    episode_len: int,
+    cfg: dict[str, Any],
+) -> list[RawSegment]:
+    split_cfg = cfg.get("segmentation", {}) or {}
+    if not split_cfg.get("motion_fallback_enabled", True) or moving.size == 0:
+        return []
+
+    fps = float(cfg.get("_fps", split_cfg.get("fps", 30)))
+    context = int(round(float(split_cfg.get("motion_context_sec", 1.0)) * fps))
+    min_len = int(round(float(split_cfg.get("min_segment_sec", 1.0)) * fps))
+    min_motion = int(round(float(split_cfg.get("min_motion_sec", 0.4)) * fps))
+
+    segments: list[RawSegment] = []
+    idx = 0
+    while idx < len(moving):
+        if not moving[idx]:
+            idx += 1
+            continue
+        run_start = idx
+        while idx < len(moving) and moving[idx]:
+            idx += 1
+        run_end = idx
+        if run_end - run_start < min_motion:
+            continue
+        start = max(0, run_start - context)
+        end = min(episode_len, run_end + context)
+        if end - start < min_len:
+            continue
+        segments.append(
+            RawSegment(
+                parent_episode=parent_episode,
+                segment_id=-1,
+                stage_id="",
+                active_arm="motion",
+                start=start,
+                end=end,
+                core_start=run_start,
+                core_end=run_end - 1,
+                source_segments=[
+                    {
+                        "active_arm": "motion",
+                        "core_start": run_start,
+                        "core_end": run_end - 1,
+                    }
+                ],
+            )
+        )
+    return segments
+
+
+def _merge_segments(
+    segments: list[RawSegment],
+    parent_episode: int,
+    cfg: dict[str, Any],
+) -> list[RawSegment]:
+    if not segments:
+        return []
+
+    split_cfg = cfg.get("segmentation", {}) or {}
+    fps = float(cfg.get("_fps", split_cfg.get("fps", 30)))
+    merge_gap = int(round(float(split_cfg.get("merge_gap_sec", 0.5)) * fps))
+
+    ordered = sorted(segments, key=lambda seg: (seg.start, seg.end))
+    merged: list[RawSegment] = []
+    for seg in ordered:
+        if not merged or seg.start - merged[-1].end > merge_gap:
+            merged.append(seg)
+            continue
+
+        current = merged[-1]
+        current.end = max(current.end, seg.end)
+        current.core_start = min(current.core_start, seg.core_start)
+        current.core_end = max(current.core_end, seg.core_end)
+        current.source_segments.extend(seg.source_segments)
+        current.close_frames.update(seg.close_frames)
+        current.open_frames.update(seg.open_frames)
+        arms = sorted(
+            {
+                src.get("active_arm", current.active_arm)
+                for src in current.source_segments
+                if src.get("active_arm") != "motion"
+            }
+        )
+        if len(arms) > 1:
+            current.active_arm = "both"
+        elif len(arms) == 1:
+            current.active_arm = arms[0]
+
+    for idx, seg in enumerate(merged):
+        seg.segment_id = idx
+        seg.stage_id = f"episode_{parent_episode:06d}_stage_{idx:03d}"
+    return merged
+
+
+def split_episode(
+    parent_episode: int,
+    gripper_values: np.ndarray | None,
+    gripper_sides: list[str],
+    actions: np.ndarray | None,
+    action_names: list[str],
+    cfg: dict[str, Any],
+) -> list[RawSegment]:
+    episode_len = 0
+    if gripper_values is not None:
+        episode_len = int(gripper_values.shape[0])
+    elif actions is not None:
+        episode_len = int(actions.shape[0])
+    if episode_len <= 0:
+        return []
+
+    split_cfg = cfg.get("segmentation", {}) or {}
+    segments: list[RawSegment] = []
+    if gripper_values is not None and gripper_values.size > 0:
+        for col, arm in enumerate(gripper_sides):
+            events = _stable_state_events(
+                gripper_values[:, col],
+                arm,
+                open_threshold=float(split_cfg.get("open_threshold", 0.75)),
+                closed_threshold=float(split_cfg.get("closed_threshold", 0.25)),
+                debounce_frames=int(split_cfg.get("debounce_frames", 5)),
+                close_is_low=bool(split_cfg.get("close_is_low", True)),
+            )
+            segments.extend(_arm_segments_from_events(parent_episode, arm, events, episode_len, cfg))
+
+    if not segments and actions is not None:
+        segments.extend(_motion_segments(parent_episode, _motion_mask(actions, action_names, cfg), episode_len, cfg))
+
+    return _merge_segments(segments, parent_episode, cfg)
+
+
+def _template_instruction(segment: RawSegment, parent_task: str, total_segments: int) -> LabelResult:
+    arm_text = {
+        "left": "left arm",
+        "right": "right arm",
+        "both": "both arms",
+        "motion": "robot",
+    }.get(segment.active_arm, segment.active_arm)
+    index_text = f"subtask {segment.segment_id + 1} of {max(total_segments, 1)}"
+    parent_task = parent_task or "the long-horizon task"
+    canonical = f"Use the {arm_text} to complete {index_text} for: {parent_task}."
+    variants = [
+        f"Perform {index_text} of the task: {parent_task}.",
+        f"Continue the manipulation with the {arm_text} for {index_text}.",
+        f"Execute this grasp-and-release step toward: {parent_task}.",
+    ]
+    return LabelResult(
+        canonical_instruction=canonical,
+        stage_label="grasp_release_primitive",
+        object="unknown",
+        target="unknown",
+        confidence=0.0,
+        variants=variants,
+        needs_review=True,
+        source="template",
+    )
+
+
+def _normalize_label(raw: dict[str, Any], fallback: LabelResult, min_confidence: float) -> LabelResult:
+    variants = raw.get("variants")
+    if not isinstance(variants, list):
+        variants = []
+    variants = [str(item).strip() for item in variants if str(item).strip()]
+    if len(variants) < 3:
+        variants.extend(fallback.variants)
+    variants = variants[:3]
+
+    try:
+        confidence = float(raw.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    label = LabelResult(
+        canonical_instruction=str(raw.get("canonical_instruction") or fallback.canonical_instruction).strip(),
+        stage_label=str(raw.get("stage_label") or fallback.stage_label).strip(),
+        object=str(raw.get("object") or fallback.object).strip(),
+        target=str(raw.get("target") or fallback.target).strip(),
+        confidence=confidence,
+        variants=variants,
+        needs_review=bool(raw.get("needs_review", False)) or confidence < min_confidence,
+        source="openrouter",
+    )
+    if not label.canonical_instruction:
+        return fallback
+    return label
+
+
+def _to_numpy(value: Any) -> Any:
+    if torch is not None and isinstance(value, torch.Tensor):
+        return value.cpu().numpy()
+    if isinstance(value, np.ndarray):
+        return value
+    return value
+
+
+def _restore_image_layout(value: Any, feature: dict[str, Any]) -> Any:
+    array = _to_numpy(value)
+    if not isinstance(array, np.ndarray):
+        return array
+
+    expected_shape = tuple(feature.get("shape", ()))
+    if (
+        array.ndim == 3
+        and len(expected_shape) == 3
+        and expected_shape[-1] in (1, 3, 4)
+        and array.shape[0] == expected_shape[-1]
+        and array.shape[1:] == expected_shape[:2]
+    ):
+        return np.transpose(array, (1, 2, 0))
+    return array
+
+
+def _frame_from_source_item(
+    source: Any,
+    item: dict[str, Any],
+    task: str,
+) -> dict[str, Any]:
+    frame = {}
+    for key in source.features:
+        if key in DEFAULT_FEATURES:
+            continue
+        if source.features[key]["dtype"] in ["image", "video"]:
+            frame[key] = _restore_image_layout(item[key], source.features[key])
+        else:
+            frame[key] = _to_numpy(item[key])
+    frame["task"] = task
+    return frame
+
+
+def _camera_keys_for_segment(source: Any, segment: RawSegment, cfg: dict[str, Any]) -> list[str]:
+    key_cfg = cfg.get("keyframes", {}) or {}
+    available = set(getattr(source.meta, "camera_keys", [])) or {
+        key for key, feature in source.features.items() if feature.get("dtype") in ("image", "video")
+    }
+    head_key = key_cfg.get("head_camera_key", "observation.images.head_image")
+    left_key = key_cfg.get("left_wrist_camera_key", "observation.images.left_wrist_image")
+    right_key = key_cfg.get("right_wrist_camera_key", "observation.images.right_wrist_image")
+
+    keys = [head_key]
+    if segment.active_arm == "left":
+        keys.append(left_key)
+    elif segment.active_arm == "right":
+        keys.append(right_key)
+    else:
+        keys.extend([left_key, right_key])
+    return [key for key in dict.fromkeys(keys) if key in available]
+
+
+def _keyframe_indices(segment: RawSegment, episode_start: int, episode_len: int, cfg: dict[str, Any]) -> dict[str, int]:
+    key_cfg = cfg.get("keyframes", {}) or {}
+    fps = float(cfg.get("_fps", 30))
+    pre_offset = int(round(float(key_cfg.get("pre_close_sec", 0.5)) * fps))
+    return {
+        "pre_interaction": episode_start + max(0, min(episode_len - 1, segment.core_start - pre_offset)),
+        "grasp": episode_start + max(0, min(episode_len - 1, segment.core_start)),
+        "release": episode_start + max(0, min(episode_len - 1, segment.core_end)),
+    }
+
+
+def _image_to_jpeg_bytes(value: Any, feature: dict[str, Any], quality: int) -> bytes:
+    if Image is None:
+        raise ModuleNotFoundError("Pillow is required for OpenRouter image labeling.")
+
+    value = _restore_image_layout(value, feature)
+    if isinstance(value, Image.Image):
+        image = value.convert("RGB")
+    else:
+        array = np.asarray(value)
+        if np.issubdtype(array.dtype, np.floating):
+            if array.max(initial=0) <= 1.0:
+                array = array * 255.0
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        elif array.dtype != np.uint8:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        if array.ndim == 3 and array.shape[0] in (1, 3, 4) and array.shape[-1] not in (1, 3, 4):
+            array = np.transpose(array, (1, 2, 0))
+        image = Image.fromarray(array).convert("RGB")
+
+    buffer = BytesIO()
+    image.save(buffer, format="JPEG", quality=int(quality))
+    return buffer.getvalue()
+
+
+def _collect_keyframe_images(
+    source: Any,
+    segment: RawSegment,
+    episode_start: int,
+    episode_len: int,
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    key_cfg = cfg.get("keyframes", {}) or {}
+    camera_keys = _camera_keys_for_segment(source, segment, cfg)
+    indices = _keyframe_indices(segment, episode_start, episode_len, cfg)
+    quality = int(key_cfg.get("jpeg_quality", 85))
+
+    images: list[dict[str, str]] = []
+    manifest: dict[str, Any] = {
+        "indices": indices,
+        "camera_keys": camera_keys,
+        "hashes": [],
+    }
+    for role, source_idx in indices.items():
+        item = source[int(source_idx)]
+        for camera_key in camera_keys:
+            if camera_key not in item:
+                continue
+            image_bytes = _image_to_jpeg_bytes(item[camera_key], source.features[camera_key], quality)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            manifest["hashes"].append(
+                {
+                    "role": role,
+                    "camera_key": camera_key,
+                    "source_index": int(source_idx),
+                    "sha256": digest,
+                }
+            )
+            images.append(
+                {
+                    "role": role,
+                    "camera_key": camera_key,
+                    "source_index": str(source_idx),
+                    "sha256": digest,
+                    "data_url": "data:image/jpeg;base64,"
+                    + base64.b64encode(image_bytes).decode("ascii"),
+                }
+            )
+    return images, manifest
+
+
+class JsonlCache:
+    def __init__(self, path: Path | None, *, resume: bool):
+        self.path = path
+        self.records: dict[str, dict[str, Any]] = {}
+        if resume and path is not None and path.exists():
+            with open(path, "r") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    cache_key = record.get("cache_key")
+                    if cache_key:
+                        self.records[str(cache_key)] = record
+
+    def get(self, cache_key: str) -> dict[str, Any] | None:
+        return self.records.get(cache_key)
+
+    def append(self, cache_key: str, record: dict[str, Any]) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"cache_key": cache_key, **record}
+        with open(self.path, "a") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        self.records[cache_key] = payload
+
+
+class OpenRouterLabeler:
+    def __init__(self, cfg: dict[str, Any], cache: JsonlCache | None):
+        self.cfg = cfg
+        self.openrouter_cfg = cfg.get("openrouter", {}) or {}
+        self.enabled = bool(self.openrouter_cfg.get("enabled", False))
+        self.cache = cache
+        self.api_key = str(self.openrouter_cfg.get("api_key") or os.environ.get("OPENROUTER_API_KEY", "")).strip()
+        self.model = str(self.openrouter_cfg.get("model", "google/gemini-3.1-flash-lite"))
+        self.timeout = float(self.openrouter_cfg.get("timeout_sec", 60))
+        self.min_confidence = float((cfg.get("labeling", {}) or {}).get("min_confidence", 0.55))
+
+    def validate_model(self) -> None:
+        if not self.enabled or not self.openrouter_cfg.get("validate_model", True):
+            return
+        if not self.api_key:
+            logger.warning("[LABEL] openrouter.api_key / OPENROUTER_API_KEY is not set; template labels will be used.")
+            self.enabled = False
+            return
+
+        request = urllib.request.Request(OPENROUTER_MODELS_URL, method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[LABEL] Could not validate OpenRouter model %s: %s", self.model, exc)
+            return
+
+        model_info = next((item for item in payload.get("data", []) if item.get("id") == self.model), None)
+        if not model_info:
+            logger.warning("[LABEL] Model %s was not found in OpenRouter model list.", self.model)
+            return
+        input_modalities = set(((model_info.get("architecture") or {}).get("input_modalities") or []))
+        supported = set(model_info.get("supported_parameters") or [])
+        if "image" not in input_modalities:
+            logger.warning("[LABEL] Model %s does not advertise image input support.", self.model)
+        if not ({"response_format", "structured_outputs"} & supported):
+            logger.warning("[LABEL] Model %s may not support JSON schema output.", self.model)
+
+    def label(
+        self,
+        segment: RawSegment,
+        parent_task: str,
+        total_segments: int,
+        images: list[dict[str, str]],
+    ) -> LabelResult:
+        fallback = _template_instruction(segment, parent_task, total_segments)
+        if not self.enabled:
+            return fallback
+        if not self.api_key:
+            fallback.error = "openrouter.api_key / OPENROUTER_API_KEY is not set"
+            return fallback
+
+        cache_key = self._cache_key(segment, parent_task, images)
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached and isinstance(cached.get("label"), dict):
+                label = _normalize_label(cached["label"], fallback, self.min_confidence)
+                label.source = "cache"
+                return label
+
+        try:
+            raw_label = self._request_label(segment, parent_task, images)
+            label = _normalize_label(raw_label, fallback, self.min_confidence)
+            if self.cache is not None:
+                self.cache.append(
+                    cache_key,
+                    {
+                        "label": asdict(label),
+                        "parent_episode": segment.parent_episode,
+                        "segment_id": segment.segment_id,
+                        "created_at": time.time(),
+                    },
+                )
+            return label
+        except Exception as exc:  # noqa: BLE001
+            fallback.error = str(exc)
+            logger.warning(
+                "[LABEL] OpenRouter failed for episode=%s segment=%s: %s",
+                segment.parent_episode,
+                segment.segment_id,
+                exc,
+            )
+            return fallback
+
+    def _cache_key(self, segment: RawSegment, parent_task: str, images: list[dict[str, str]]) -> str:
+        payload = {
+            "model": self.model,
+            "parent_task": parent_task,
+            "segment": {
+                "episode": segment.parent_episode,
+                "start": segment.start,
+                "end": segment.end,
+                "core_start": segment.core_start,
+                "core_end": segment.core_end,
+                "active_arm": segment.active_arm,
+            },
+            "image_hashes": [image["sha256"] for image in images],
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def _request_label(self, segment: RawSegment, parent_task: str, images: list[dict[str, str]]) -> dict[str, Any]:
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are labeling robot manipulation sub-episodes for imitation learning. "
+                    "Use the images and metadata to produce a concise English instruction. "
+                    "Do not invent object names when the object is unclear; use generic wording. "
+                    f"Parent task: {parent_task}\n"
+                    f"Active arm: {segment.active_arm}\n"
+                    f"Segment index: {segment.segment_id}\n"
+                    "Return exactly the requested JSON schema."
+                ),
+            }
+        ]
+        for image in images:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image["data_url"],
+                    },
+                }
+            )
+
+        request_payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You write grounded robot task labels for VLA training datasets.",
+                },
+                {
+                    "role": "user",
+                    "content": content,
+                },
+            ],
+            "temperature": float(self.openrouter_cfg.get("temperature", 0.2)),
+            "max_tokens": int(self.openrouter_cfg.get("max_tokens", 500)),
+            "provider": {"require_parameters": True},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "robot_subepisode_label",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "canonical_instruction": {"type": "string"},
+                            "stage_label": {"type": "string"},
+                            "object": {"type": "string"},
+                            "target": {"type": "string"},
+                            "confidence": {"type": "number"},
+                            "variants": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "minItems": 3,
+                                "maxItems": 3,
+                            },
+                            "needs_review": {"type": "boolean"},
+                        },
+                        "required": [
+                            "canonical_instruction",
+                            "stage_label",
+                            "object",
+                            "target",
+                            "confidence",
+                            "variants",
+                            "needs_review",
+                        ],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+        body = json.dumps(request_payload).encode("utf-8")
+        request = urllib.request.Request(
+            OPENROUTER_CHAT_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": str(self.openrouter_cfg.get("referer", "dual_arm_teleop")),
+                "X-Title": str(self.openrouter_cfg.get("title", "dual_arm_teleop_split_label_dataset")),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+        message = response_payload["choices"][0]["message"]
+        content_text = message.get("content", "")
+        if isinstance(content_text, dict):
+            return content_text
+        if isinstance(content_text, list):
+            content_text = "".join(
+                str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content_text
+            )
+        return json.loads(str(content_text))
+
+
+def _create_output_dataset(source: Any, cfg: dict[str, Any]) -> Any:
+    _require_lerobot()
+    output_cfg = cfg["output"]
+    output_root = _as_path_or_none(output_cfg.get("root"))
+    if output_root is not None and output_root.exists():
+        if output_cfg.get("overwrite", False):
+            shutil.rmtree(output_root)
+        else:
+            raise FileExistsError(
+                f"Output dataset already exists: {output_root}. "
+                "Set output.overwrite=true or pass --overwrite to replace it."
+            )
+
+    return LeRobotDataset.create(
+        repo_id=output_cfg["repo_id"],
+        root=output_root,
+        fps=source.fps,
+        features={
+            key: value
+            for key, value in source.features.items()
+            if key not in DEFAULT_FEATURES
+        },
+        robot_type=source.meta.info.get("robot_type"),
+        use_videos=len(source.meta.video_keys) > 0,
+        image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
+        batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
+    )
+
+
+def _manifest_dir(cfg: dict[str, Any]) -> Path:
+    manifest_cfg = cfg.get("manifests", {}) or {}
+    if manifest_cfg.get("dir"):
+        return Path(manifest_cfg["dir"]).expanduser()
+    output_root = _as_path_or_none((cfg.get("output", {}) or {}).get("root"))
+    if output_root is not None:
+        return output_root / "meta"
+    return Path("outputs") / "split_label_dataset"
+
+
+def _append_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+
+
+def _segment_manifest(
+    source: Any,
+    segment: RawSegment,
+    label: LabelResult,
+    parent_task: str,
+    keyframes: dict[str, Any],
+    output_episodes: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "parent_repo_id": source.repo_id,
+        "parent_episode": segment.parent_episode,
+        "stage_id": segment.stage_id,
+        "segment_id": segment.segment_id,
+        "active_arm": segment.active_arm,
+        "frame_range": [segment.start, segment.end],
+        "source_index_range": [
+            int(source.meta.episodes[int(segment.parent_episode)]["dataset_from_index"]) + segment.start,
+            int(source.meta.episodes[int(segment.parent_episode)]["dataset_from_index"]) + segment.end,
+        ],
+        "event_frames": {
+            "close": segment.close_frames,
+            "open": segment.open_frames,
+        },
+        "source_segments": segment.source_segments,
+        "parent_task": parent_task,
+        "label": asdict(label),
+        "keyframes": keyframes,
+        "output_episodes": output_episodes,
+    }
+
+
+def _vla_manifest_record(split_record: dict[str, Any], output_repo_id: str) -> dict[str, Any]:
+    return {
+        "dataset_type": "lerobot_v3",
+        "target": "openpi",
+        "repo_id": output_repo_id,
+        "parent_repo_id": split_record["parent_repo_id"],
+        "parent_episode": split_record["parent_episode"],
+        "segment_id": split_record["segment_id"],
+        "stage_id": split_record["stage_id"],
+        "active_arm": split_record["active_arm"],
+        "instruction": split_record["label"]["canonical_instruction"],
+        "instruction_variants": split_record["label"]["variants"],
+        "needs_review": split_record["label"]["needs_review"],
+        "output_episodes": split_record["output_episodes"],
+    }
+
+
+def _starvla_modality(source: Any) -> dict[str, Any]:
+    video: dict[str, dict[str, str]] = {}
+    for key in getattr(source.meta, "camera_keys", []):
+        name = key.removeprefix("observation.images.")
+        if name == "head_image":
+            name = "base_view"
+        video[name] = {"original_key": key}
+
+    action_shape = tuple(source.features.get("action", {}).get("shape", [0]))
+    state_shape = tuple(source.features.get("observation.state", {}).get("shape", [0]))
+    return {
+        "state": {
+            "dual_arm_state": {
+                "start": 0,
+                "end": int(state_shape[0]) if state_shape else 0,
+                "original_key": "observation.state",
+            }
+        },
+        "action": {
+            "dual_arm_action": {
+                "start": 0,
+                "end": int(action_shape[0]) if action_shape else 0,
+                "original_key": "action",
+                "absolute": False,
+            }
+        },
+        "video": video,
+        "annotation": {
+            "human.action.task_description": {
+                "original_key": "task_index",
+            }
+        },
+    }
+
+
+def _tasks_for_output(label: LabelResult, cfg: dict[str, Any]) -> list[str]:
+    language_cfg = cfg.get("language_augmentation", {}) or {}
+    tasks = [label.canonical_instruction]
+    if language_cfg.get("write_variants_as_episodes", True):
+        tasks.extend(label.variants[: int(language_cfg.get("num_variants", 3))])
+    deduped: list[str] = []
+    for task in tasks:
+        task = str(task).strip()
+        if task and task not in deduped:
+            deduped.append(task)
+    return deduped
+
+
+def split_label_dataset(cfg: dict[str, Any]) -> None:
+    _require_lerobot()
+    source_cfg = cfg["source"]
+    source = LeRobotDataset(
+        source_cfg["repo_id"],
+        root=_as_path_or_none(source_cfg.get("root")),
+    )
+    cfg["_fps"] = source.fps
+    episodes = _select_episodes(source, cfg)
+    dry_run = bool(cfg.get("dry_run", False))
+    write_dataset = bool((cfg.get("output", {}) or {}).get("write_dataset", True)) and not dry_run
+    label_only = bool(cfg.get("label_only", False))
+    if label_only:
+        write_dataset = False
+
+    manifest_dir = _manifest_dir(cfg)
+    split_manifest_path = manifest_dir / "split_manifest.jsonl"
+    vla_manifest_path = manifest_dir / "vla_manifest.jsonl"
+    cache_path = _as_path_or_none((cfg.get("openrouter", {}) or {}).get("cache_path"))
+    cache = JsonlCache(cache_path, resume=bool(cfg.get("resume_cache", True)))
+    labeler = OpenRouterLabeler(cfg, cache)
+    if not dry_run:
+        labeler.validate_model()
+
+    if not dry_run:
+        if split_manifest_path.exists() and (cfg.get("output", {}) or {}).get("overwrite", False):
+            split_manifest_path.unlink()
+        if vla_manifest_path.exists() and (cfg.get("output", {}) or {}).get("overwrite", False):
+            vla_manifest_path.unlink()
+
+    output = None if not write_dataset else _create_output_dataset(source, cfg)
+    output_episode_idx = 0
+    total_segments = 0
+    total_input_frames = 0
+    total_output_frames = 0
+
+    action_names = _feature_names(source, "action")
+    state_names = _feature_names(source, "observation.state")
+
+    try:
+        for ep_idx in episodes:
+            ep = source.meta.episodes[int(ep_idx)]
+            start = int(ep["dataset_from_index"])
+            end = int(ep["dataset_to_index"])
+            episode_len = end - start
+            total_input_frames += episode_len
+            arrays = _episode_columns(source, start, end, ["action", "observation.state"])
+            gripper_values, gripper_sides, gripper_source = _extract_gripper_signal(
+                arrays, action_names, state_names, cfg
+            )
+            segments = split_episode(
+                parent_episode=int(ep_idx),
+                gripper_values=gripper_values,
+                gripper_sides=gripper_sides,
+                actions=arrays.get("action"),
+                action_names=action_names,
+                cfg=cfg,
+            )
+            parent_task = source[int(start)]["task"] if episode_len else ""
+            total_segments += len(segments)
+            logger.info(
+                "[EP %s] frames=%d gripper_source=%s sides=%s segments=%d",
+                ep_idx,
+                episode_len,
+                gripper_source,
+                gripper_sides,
+                len(segments),
+            )
+            for segment in segments:
+                logger.info(
+                    "  [SEG %d] arm=%s frames=%d:%d core=%d:%d close=%s open=%s",
+                    segment.segment_id,
+                    segment.active_arm,
+                    segment.start,
+                    segment.end,
+                    segment.core_start,
+                    segment.core_end,
+                    segment.close_frames,
+                    segment.open_frames,
+                )
+
+            if dry_run:
+                continue
+
+            split_records: list[dict[str, Any]] = []
+            vla_records: list[dict[str, Any]] = []
+            for segment in segments:
+                images, keyframes = _collect_keyframe_images(source, segment, start, episode_len, cfg)
+                label = labeler.label(segment, parent_task, len(segments), images)
+                output_episodes: list[dict[str, Any]] = []
+                task_variants = _tasks_for_output(label, cfg)
+
+                if output is not None:
+                    for variant_idx, task in enumerate(task_variants):
+                        for local_idx in range(segment.start, segment.end):
+                            item = source[int(start + local_idx)]
+                            output.add_frame(_frame_from_source_item(source, item, task))
+                        output.save_episode()
+                        output_episodes.append(
+                            {
+                                "episode_index": output_episode_idx,
+                                "variant_index": variant_idx,
+                                "task": task,
+                            }
+                        )
+                        output_episode_idx += 1
+                        total_output_frames += segment.length
+
+                split_record = _segment_manifest(
+                    source, segment, label, parent_task, keyframes, output_episodes
+                )
+                split_records.append(split_record)
+                vla_records.append(_vla_manifest_record(split_record, cfg["output"]["repo_id"]))
+
+            _append_jsonl(split_manifest_path, split_records)
+            _append_jsonl(vla_manifest_path, vla_records)
+
+        if not dry_run and (cfg.get("vla_export", {}) or {}).get("write_starvla_modality", True):
+            modality_path = _as_path_or_none((cfg.get("vla_export", {}) or {}).get("starvla_modality_path"))
+            if modality_path is None:
+                modality_path = manifest_dir / "modality.json"
+            _write_json(modality_path, _starvla_modality(source))
+            logger.info("[VLA] StarVLA modality draft: %s", modality_path)
+    finally:
+        if output is not None:
+            output.finalize()
+
+    logger.info(
+        "[DONE] episodes=%d input_frames=%d segments=%d output_frames=%d%s",
+        len(episodes),
+        total_input_frames,
+        total_segments,
+        total_output_frames,
+        " [dry-run]" if dry_run else f" manifests={manifest_dir}",
+    )
+
+
+def main() -> None:
+    default_cfg = Path(__file__).resolve().parents[1] / "config" / "split_label_dataset_cfg.yaml"
+    parser = argparse.ArgumentParser(description="Split long LeRobot episodes and label sub-episodes.")
+    parser.add_argument("--config", type=Path, default=default_cfg)
+    parser.add_argument("--dry-run", action="store_true", help="Only report segments; do not label or write.")
+    parser.add_argument("--label-only", action="store_true", help="Label and write manifests without dataset output.")
+    parser.add_argument("--write-dataset", action="store_true", help="Force writing the output LeRobot dataset.")
+    parser.add_argument("--max-episodes", type=int, default=None, help="Override source.max_episodes.")
+    parser.add_argument("--overwrite", action="store_true", help="Override output.overwrite=true.")
+    parser.add_argument("--resume-cache", action="store_true", help="Reuse OpenRouter label cache if present.")
+    args = parser.parse_args()
+
+    cfg = _load_config(args.config)
+    if args.dry_run:
+        cfg["dry_run"] = True
+    if args.label_only:
+        cfg["label_only"] = True
+        cfg.setdefault("output", {})["write_dataset"] = False
+    if args.write_dataset:
+        cfg.setdefault("output", {})["write_dataset"] = True
+        cfg["label_only"] = False
+    if args.max_episodes is not None:
+        cfg["source"]["max_episodes"] = args.max_episodes
+    if args.overwrite:
+        cfg.setdefault("output", {})["overwrite"] = True
+    if args.resume_cache:
+        cfg["resume_cache"] = True
+
+    split_label_dataset(cfg)
+
+
+if __name__ == "__main__":
+    main()
