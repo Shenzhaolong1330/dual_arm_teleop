@@ -181,6 +181,37 @@ This project uses Oculus Quest 3/3S controller poses as dual-arm Cartesian delta
 | A Button | Request robot reset or go-home depending on robot config. |
 | Controller Pose | Generates end-effector delta pose. |
 
+### Runtime Action Filtering
+
+Oculus Cartesian actions are filtered before they leave the teleoperator. The live path is:
+
+```text
+controller pose delta
+  -> scaler / channel signs
+  -> action_smoothing_method
+  -> optional mirror mapping
+  -> LeRobot record_loop
+  -> Franka send_action limit clipping
+  -> robot server
+```
+
+The default runtime filter is One Euro Filter, configured in [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml):
+
+```yaml
+teleop:
+  oculus_config:
+    action_smoothing_method: "one_euro"  # one_euro, ema, or none
+    action_smoothing_alpha: 0.7          # only used for ema
+    action_smoothing_freq: 30.0
+    action_smoothing_min_cutoff: 1.2
+    action_smoothing_beta: 0.7
+    action_smoothing_d_cutoff: 1.0
+```
+
+Both the recorded LeRobot `action` and the action passed into `FrankaDualArm.send_action()` come from this filtered teleoperator output. The Franka wrapper then applies per-step safety limits such as `max_cartesian_delta` and `max_rotation_delta` before sending commands to the robot server. Therefore the dataset stores filtered Cartesian delta actions, while the hardware may receive the same filtered actions after additional clipping if a command exceeds the configured limits. Gripper trigger commands are not One Euro filtered so that open/close transitions stay sharp.
+
+For tuning, increase `action_smoothing_beta` for a more responsive feel during fast motion, or reduce `action_smoothing_min_cutoff` for stronger low-speed jitter suppression. Set `action_smoothing_method: "none"` to disable live filtering.
+
 ### Setup
 
 Install ADB:

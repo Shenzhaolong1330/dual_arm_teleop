@@ -179,6 +179,37 @@ robot-help
 | A 按钮 | 请求机器人 reset / go-home，具体行为由机器人配置决定。 |
 | 手柄位姿 | 生成末端执行器增量位姿。 |
 
+### 运行时 Action 滤波
+
+Oculus 的 Cartesian action 会先在遥操作器内部完成滤波，再进入录制和机器人执行链路。实时路径是：
+
+```text
+手柄位姿 delta
+  -> scaler / channel signs
+  -> action_smoothing_method
+  -> 可选 mirror 映射
+  -> LeRobot record_loop
+  -> Franka send_action 限幅
+  -> 机器人 server
+```
+
+默认运行时滤波器是 One Euro Filter，在 [scripts/config/record_cfg.yaml](scripts/config/record_cfg.yaml) 中配置：
+
+```yaml
+teleop:
+  oculus_config:
+    action_smoothing_method: "one_euro"  # one_euro, ema, or none
+    action_smoothing_alpha: 0.7          # 仅在 ema 模式下使用
+    action_smoothing_freq: 30.0
+    action_smoothing_min_cutoff: 1.2
+    action_smoothing_beta: 0.7
+    action_smoothing_d_cutoff: 1.0
+```
+
+LeRobot 数据集里记录的 `action` 和传入 `FrankaDualArm.send_action()` 的 action 都来自这一路已经滤波的遥操作输出。随后 Franka wrapper 会在发给机器人 server 前再做每步安全限幅，例如 `max_cartesian_delta` 和 `max_rotation_delta`。因此数据集保存的是滤波后的 Cartesian delta action；如果某个指令超过限幅，真实硬件收到的是同一个滤波 action 的限幅版本。夹爪 trigger 命令不做 One Euro 滤波，这样开/合切换可以保持清晰边界。
+
+调参时，增大 `action_smoothing_beta` 会让快速运动更跟手；降低 `action_smoothing_min_cutoff` 会增强低速去抖但可能增加粘滞感。要完全关闭实时滤波，可以设置 `action_smoothing_method: "none"`。
+
 ### Oculus 配置
 
 安装 ADB：
