@@ -1,0 +1,60 @@
+# LeRobot ACT reason/deploy policy configuration.
+# Current Le-nero loading passes this config into from_pretrained, so model
+# architecture fields must match the checkpoint.
+
+# =========================
+# Required / frequently edited
+# =========================
+pretrained_path: null # move to record_cfg_*.yaml
+device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
+use_amp: false  # inference autocast flag used by run_record/predict_action on CUDA.
+n_obs_steps: 1  # ACT supports exactly 1; ACTConfig raises if n_obs_steps != 1.
+chunk_size: 15  # int > 0. ACT predicted action chunk length; must match checkpoint architecture.
+n_action_steps: 1  # int > 0 and <= chunk_size. Number of actions queued/executed; must be 1 when temporal ensemble is enabled.
+
+# =========================
+# Model / policy architecture
+# =========================
+normalization_mapping:  # supported modes: MIN_MAX | MEAN_STD | IDENTITY | QUANTILES | QUANTILE10.
+  VISUAL: MEAN_STD  # Used by preprocessor image normalization.
+  STATE: MEAN_STD  # Used by preprocessor robot state normalization.
+  ACTION: MEAN_STD  # Used by postprocessor action unnormalization.
+
+vision_backbone: resnet18  # must start with "resnet"; passed to torchvision.models.<vision_backbone>.
+pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1  # options not enumerated in LeRobot; passed to torchvision backbone weights.
+replace_final_stride_with_dilation: false  # ResNet layer4 stride/dilation option.
+
+pre_norm: false  # Transformer pre-norm switch.
+dim_model: 512  # Transformer hidden dimension.
+n_heads: 8  # Multi-head attention head count.
+dim_feedforward: 3200  # Transformer feed-forward hidden dimension.
+feedforward_activation: relu  # options: relu | gelu | glu. Used by ACT get_activation_fn.
+n_encoder_layers: 4  # Number of ACT transformer encoder layers.
+n_decoder_layers: 1  # Number of ACT transformer decoder layers; this repo defaults to 1 to match original bug-compatible behavior.
+
+use_vae: true  # Kept because reason config is passed to from_pretrained; controls VAE encoder modules expected by checkpoint.
+latent_dim: 32  # VAE latent dimension; inference uses a zero latent input.
+n_vae_encoder_layers: 4  # Kept to match checkpoint VAE encoder module structure.
+
+# =========================
+# Training-only parameters
+# =========================
+# None in reason/deploy config. Optimizer, dropout, and KL-loss weight belong
+# in act_train_config.yaml unless a future loader needs them for architecture.
+
+# =========================
+# Inference-only parameters
+# =========================
+temporal_ensemble_coeff: 0.03  # ACT inference only. null/non-positive disables; positive float enables smoothing and requires n_action_steps=1.
+
+# =========================
+# Default semantic overrides / 默认语义补充
+# Keep these explicit even if they are not directly used in this phase.
+# They protect checkpoint config / validation / downstream inference semantics.
+# =========================
+push_to_hub: false  # PreTrainedConfig default is true; run_record does not push, but keep config semantics explicit.
+
+# input_features / output_features are omitted intentionally.
+# Empty values are dropped by policy_config_utils, then make_policy infers them
+# from dataset metadata before model construction.
+# Hub metadata repo_id/private/tags/license is omitted while push_to_hub=false.

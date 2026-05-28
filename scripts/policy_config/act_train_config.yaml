@@ -1,0 +1,65 @@
+# LeRobot ACT training policy configuration.
+# The main training knobs stay near the top; rollout-only semantics that still
+# affect saved checkpoint config are kept explicit at the end.
+
+# =========================
+# Required / frequently edited
+# =========================
+device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
+use_amp: false  # AMP flag on policy config. Custom run_train uses Accelerator, but keep explicit for saved config semantics.
+n_obs_steps: 1  # ACT supports exactly 1; ACTConfig raises if n_obs_steps != 1.
+chunk_size: 15  # int > 0. ACT predicted action chunk length and training target sequence length.
+
+# =========================
+# Model / policy architecture
+# =========================
+normalization_mapping:  # supported modes: MIN_MAX | MEAN_STD | IDENTITY | QUANTILES | QUANTILE10.
+  VISUAL: MEAN_STD  # Used by preprocessor image normalization.
+  STATE: MEAN_STD  # Used by preprocessor robot state normalization.
+  ACTION: MEAN_STD  # Used by training targets and action unnormalization.
+
+vision_backbone: resnet18  # must start with "resnet"; passed to torchvision.models.<vision_backbone>: resnet18/34 | resnet50(untested)
+pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1  # options not enumerated in LeRobot; passed to torchvision backbone weights.
+replace_final_stride_with_dilation: false  # ResNet layer4 stride/dilation option. Note: true increases feature map size and may cause OOM.
+
+pre_norm: false  # Transformer pre-norm switch.
+dim_model: 512  # Transformer hidden dimension.
+n_heads: 8  # Multi-head attention head count.
+dim_feedforward: 3200  # Transformer feed-forward hidden dimension.
+feedforward_activation: relu  # options: relu | gelu | glu. Used by ACT get_activation_fn.
+n_encoder_layers: 4  # Number of ACT transformer encoder layers.
+n_decoder_layers: 1  # Number of ACT transformer decoder layers; this repo defaults to 1 to match original bug-compatible behavior.
+
+use_vae: true  # Enables ACT variational training path and VAE encoder modules.
+latent_dim: 32  # VAE latent dimension; also used at inference as zero latent input.
+n_vae_encoder_layers: 4  # Number of transformer layers in the VAE encoder.
+
+# =========================
+# Training-only parameters
+# =========================
+kl_weight: 5  # training loss only when use_vae=true; loss = l1_loss + kl_weight * kld_loss.
+dropout: 0.05  # Dropout probability used in transformer layers during training.
+optimizer_lr: 0.00001  # AdamW preset lr when use_policy_training_preset is true.
+optimizer_weight_decay: 0.0001  # AdamW preset weight_decay.
+optimizer_lr_backbone: 0.00001  # ACT get_optim_params assigns this lr to model.backbone params.
+
+# =========================
+# Inference-only parameters
+# =========================
+# temporal_ensemble_coeff is rollout-only, but kept as an explicit semantic
+# override below so checkpoints default to no temporal ensemble.
+
+# =========================
+# Default semantic overrides / 默认语义补充
+# Keep these explicit even if they are not directly used in this phase.
+# They protect checkpoint config / validation / downstream inference semantics.
+# =========================
+push_to_hub: false  # PreTrainedConfig default is true; keep explicit to avoid accidental model upload validation/push.
+pretrained_path: null  # null means train from scratch; set to a pretrained_model directory only for finetune.
+n_action_steps: 5  # int > 0 and <= chunk_size. Not part of ACT loss, but saved for later select_action queue semantics.
+temporal_ensemble_coeff: null  # ACT inference only. null/non-positive disables temporal ensemble; positive float enables it and requires n_action_steps=1.
+
+# input_features / output_features are omitted intentionally.
+# Empty values are dropped by policy_config_utils, then make_policy infers them
+# from dataset metadata before model construction.
+# Hub metadata repo_id/private/tags/license is omitted while push_to_hub=false.

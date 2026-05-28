@@ -1,58 +1,66 @@
 train:
+  training:
+    device: cuda # cuda / cpu / auto; priority is higher than policy.device
+    gpu:
+      enabled: true
+      visible_devices: "0" # same effect as CUDA_VISIBLE_DEVICES; empty string keeps the current environment
+      max_num_gpus: 1 # when multiple GPUs are visible, keep the first N
+      memory_fraction: 0.70 # PyTorch per-process CUDA memory cap; null means no cap
+      allow_tf32: true
+      cudnn_benchmark: false
+      empty_cache_on_start: true
+      log_gpu_info: true
+      fail_if_cuda_unavailable: false
+
   dataset:
-    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
-  # 指向包含数据集 repo 的本地目录（要包含 repo_id 子目录），
-  # 例如本地缓存路径下的 physbrain3/pick_and_place_merged
-    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+    repo_id: "franka_dual_arm/left_right_pick_merged_E150" # HuggingFace dataset repo_id, format "username/dataset_name"
+    # repo_id: "nero_task3_step1/2mL_empty_right_merged_20260521_E249"
+    # Local dataset directory. It should point to the dataset repo root.
+    root: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/left_right_pick_merged_E150"
+    # root: "/home/geist/.cache/huggingface/lerobot/nero_task3_step1/2mL_empty_right_merged_20260521_E249"
 
   env:
 
-  # 策略配置文件路径 (训练和部署共享同一配置)
-  policy_cfg: "scripts/config/policies/act_cfg.yaml"
-  
   policy:
-    type: "act"
-    device: "cuda"
-    repo_id: "shenzhaolong/act_policy"
-    push_to_hub: false  # 禁用模型推送
-    # 其他超参数从 policy_cfg 文件读取
+    # Supported: act | diffusion | dp | diffusion_policy.
+    # 推荐保持为普通 ACT；轮次式 DAgger 会由 run_dagger_rounds.py 在内存中注入训练参数。
+    # type: "act"
+    # config_path: scripts/policy_config/act_train_config.yaml
+    # For diffusion:
+    type: "diffusion"
+    config_path: scripts/policy_config/diffusion_train_config.yaml
 
-  output_dir: "outputs/train/act_dual_franka1_pick_up_and_seal_cleaned_1"
-  job_name: "act_policy_dual_franka1_pick_up_and_seal_cleaned_1"
+    # Policy hyperparameters have been moved to scripts/policy_config/*_train_config.yaml.
+
+  output_dir: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150" # model and log output directory
+  # output_dir: "/home/geist/wbcd_workspace/lerobot/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/task3_step1/2mL_empty_right/dp_20260523_E249_Crop224"
+  job_name: "dp_left_right_pick_20260526_E150"
+  # job_name: "2mL_empty_right_dp_20260523_E249_Crop224"
 
   resume: false
   seed: 1000
   # Number of workers for the dataloader.
   num_workers: 4
   batch_size: 32
-  steps: 100000
-  eval_freq: 50_00
+  # batch_size: 32 # Nero historical value
+  steps: 40_000
+  eval_freq: 2_000
   log_freq: 200
-  save_checkpoint: True
+  # log_freq: 500 # Nero historical value
+  save_checkpoint: true
   # Checkpoint is saved every `save_freq` training iterations and after the last training step.
-  save_freq: 10_00
-  use_policy_training_preset: True
-  # Keep checkpoint saving local. W&B model artifact upload can block training on unstable networks.
-  log_policy_artifacts: False
-  # Bias ACT training toward chunks that contain real Cartesian motion.
-  # The dataset has many near-stationary frames, and plain uniform sampling made the policy collapse to ~0 deltas.
-  action_sampling:
-    enabled: True
-    min_translation_norm: 0.010  # meters, computed across both arms' xyz deltas
-    min_rotation_norm: 0.030     # radians, computed across both arms' rx/ry/rz deltas
-    window: 1                    # score the current action, not any later action inside the ACT chunk
-    min_active_frames: 1         # current frame must be moving to count as active
-    active_weight: 20.0
-    inactive_weight: 0.2
+  save_freq: 4_000
+  use_policy_training_preset: true
 
-  eval: 
+  eval:
     n_episodes: 10
     batch_size: 8
 
-  wandb: 
+  wandb:
     enable: true
-    project: "lerobot"
-    # entity: "your-wandb-username"  # 改为您的 WandB 用户名，或注释掉使用默认
-    # notes: "训练备注"
-    # run_id: "自定义运行ID"
-    mode: "online"  # Allowed values: 'online', 'offline' 'disabled'. Defaults to 'online"
+    project: "lerobot_franka"
+    # project: "lerobot_nero"
+    # entity: "your-wandb-username"
+    # notes: "training notes"
+    # run_id: "custom-run-id"
+    mode: "online" # Allowed values: online, offline, disabled. Defaults to online.

@@ -1,0 +1,67 @@
+# LeRobot Diffusion Policy reason/deploy configuration.
+# Current Le-nero loading passes this config into from_pretrained, so model
+# architecture and scheduler fields must match the checkpoint.
+
+# =========================
+# Required / frequently edited
+# =========================
+pretrained_path: null # move to record_cfg_*.yaml
+device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
+use_amp: false  # inference autocast flag used by run_record/predict_action on CUDA.
+n_obs_steps: 2  # int > 0. Number of observation frames cached before diffusion sampling.
+horizon: 8  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
+n_action_steps: 7  # int > 0 and <= horizon - n_obs_steps + 1. Number of sampled actions queued/executed per denoising call.
+
+# =========================
+# Model / policy architecture
+# =========================
+normalization_mapping:  # supported modes: MIN_MAX | MEAN_STD | IDENTITY | QUANTILES | QUANTILE10.
+  VISUAL: MEAN_STD  # Used by preprocessor image normalization.
+  STATE: MIN_MAX  # Used by preprocessor robot state normalization.
+  ACTION: MIN_MAX  # Used by postprocessor action unnormalization.
+
+vision_backbone: resnet18  # must start with "resnet"; passed to torchvision.models.<vision_backbone>.
+crop_shape: [160, 160]  # null or [H, W] with positive dims; must fit image features inferred from dataset metadata.
+crop_is_random: false  # reason config should be false for deterministic deployment; eval path center crops.
+pretrained_backbone_weights: null  # options not enumerated in LeRobot; passed to torchvision backbone weights.
+use_group_norm: true  # Diffusion RGB encoder option; cannot be true with pretrained_backbone_weights set.
+spatial_softmax_num_keypoints: 32  # int > 0. Number of spatial-softmax keypoints.
+use_separate_rgb_encoder_per_camera: false  # true creates one RGB encoder per camera; false shares one encoder.
+
+down_dims: [512, 1024, 2048]  # non-empty positive ints; controls U-Net channels and downsampling depth.
+kernel_size: 5  # int > 0. Conv1d kernel size in diffusion U-Net residual blocks.
+n_groups: 8  # int > 0. GroupNorm groups in diffusion U-Net Conv1d blocks.
+diffusion_step_embed_dim: 128  # int > 0. Timestep embedding dimension used by the U-Net.
+use_film_scale_modulation: true  # true uses FiLM scale+bias; false uses FiLM bias only.
+
+noise_scheduler_type: DDPM  # options: DDPM | DDIM. Used by _make_noise_scheduler during rollout.
+num_train_timesteps: 100  # int > 0. Scheduler train timesteps; used as fallback when num_inference_steps is null.
+beta_schedule: squaredcos_cap_v2  # options not enumerated in LeRobot; passed to diffusers DDPMScheduler/DDIMScheduler.
+beta_start: 0.0001  # float > 0 and <= beta_end. Passed to diffusers scheduler.
+beta_end: 0.02  # float > 0 and >= beta_start. Passed to diffusers scheduler.
+prediction_type: epsilon  # options: epsilon | sample. Must match checkpoint training target.
+clip_sample: true  # inference scheduler behavior; clips denoised samples to +/- clip_sample_range.
+clip_sample_range: 1.0  # float. Scheduler clip magnitude used when clip_sample is true.
+
+# =========================
+# Training-only parameters
+# =========================
+# None in reason/deploy config. Optimizer, scheduler preset, sampler, and loss
+# masking parameters belong in diffusion_train_config.yaml.
+
+# =========================
+# Inference-only parameters
+# =========================
+num_inference_steps: 8  # int > 0 or null. Reverse diffusion denoising steps; null uses num_train_timesteps.
+
+# =========================
+# Default semantic overrides / 默认语义补充
+# Keep these explicit even if they are not directly used in this phase.
+# They protect checkpoint config / validation / downstream inference semantics.
+# =========================
+push_to_hub: false  # PreTrainedConfig default is true; run_record does not push, but keep config semantics explicit.
+
+# input_features / output_features are omitted intentionally.
+# Empty values are dropped by policy_config_utils, then make_policy infers them
+# from dataset metadata before model construction.
+# Hub metadata repo_id/private/tags/license is omitted while push_to_hub=false.

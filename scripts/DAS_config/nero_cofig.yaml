@@ -1,0 +1,38 @@
+# Nero hardware-side configuration loaded by scripts/core/run_record.py
+# when record.robot_type is nero_dual_arm.
+teleop:
+  control_mode: "oculus" # teleoperation control mode (only "oculus" supported)
+  dual_arm: true # dual-arm mode
+  oculus_config:
+    # ip: "192.168.110.43" # Oculus Quest IP address
+    # ip: "192.168.110.16" # Oculus Quest IP address
+    ip: null
+    use_gripper: true
+    left_pose_scaler: [1.2, 1.2] # left arm scaler
+    left_channel_signs: [-1, -1, 1, 1, 1, 1] # left arm signs
+    # left_channel_signs: [-1, -1, 1, -1, -1, -1]
+    right_pose_scaler: [1.2, 1.2] # right arm scaler
+    right_channel_signs: [-1, -1, 1, 1, 1, 1] # right arm signs
+    # right_channel_signs: [-1, -1, 1, -1, -1, -1]
+    visualize_placo: false # whether to visualize robot using placo
+
+robot:
+  # robot_ip: "192.168.110.203" # dobot server ip
+  # robot_ip: "localhost" # nero server ip
+  robot_ip: "10.10.10.1" # dobot server ip
+  robot_port: 4242 # dual-arm zerorpc port (single port for both arms)
+  use_gripper: true
+  # gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
+  # gripper_port: 4243 # gripper zerorpc port (single port for both arms)
+  close_threshold: 0.05 # threshold to determine gripper open/close
+  # gripper_bin_threshold: 0.05 # threshold to determine gripper is closed
+  gripper_reverse: false # if gripper moves opposite, flip this value
+  gripper_max_open: 0.1 # Robotiq 2F-85 max open width in meters
+  gripper_force: 2.0 # Robotiq 2F-85 max force in Newtons
+
+cameras:
+  left_wrist_cam_serial: "412622270929" # left wrist camera serial number
+  right_wrist_cam_serial: "412622270701" # right wrist camera serial number
+  head_cam_serial: "339322074423" # head (overhead) camera serial number
+  width: 424 # 640 424
+  height: 240 # 360 240

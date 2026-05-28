@@ -3,7 +3,6 @@ Configuration for Nero dual-arm robot system.
 Each arm has 7 DOF
 """
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 from lerobot.cameras import CameraConfig
 from lerobot.robots.config import RobotConfig
@@ -45,4 +44,3 @@ class NeroDualArmConfig(RobotConfig):
     max_joint_velocity: float = 2.0  # rad/s
     max_ee_velocity: float = 0.5  # m/s
     max_joint_delta: float = 0.3  # rad - max joint change per step
-

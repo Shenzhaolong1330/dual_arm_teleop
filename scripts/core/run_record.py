@@ -1,6 +1,9 @@
+import argparse
+import copy
 import yaml
 from pathlib import Path
 from typing import Dict, Any
+import numpy as np
 from scripts.utils.dataset_utils import generate_dataset_name, update_dataset_info
 from robots import (
     SUPPORTED_ROBOTS,
@@ -17,42 +20,305 @@ from lerobot.scripts.lerobot_record import record_loop
 from lerobot.processor import make_default_processors
 from lerobot.utils.visualization_utils import init_rerun
 from lerobot.utils.control_utils import init_keyboard_listener
-from send2trash import send2trash
+# from send2trash import send2trash
+import shutil
 import termios, sys
+import time
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import hw_to_dataset_features
+from lerobot.datasets.utils import hw_to_dataset_features, build_dataset_frame
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
-from lerobot.configs.policies import PreTrainedConfig
 from lerobot.policies.factory import make_policy, make_pre_post_processors
+from lerobot.policies.utils import make_robot_action
 from lerobot.processor.rename_processor import rename_stats
+from lerobot.utils.constants import ACTION, OBS_STR
+from lerobot.utils.control_utils import predict_action
+from lerobot.utils.robot_utils import busy_wait
+from lerobot.utils.utils import get_safe_torch_device
+from lerobot.utils.visualization_utils import log_rerun_data
 from dataclasses import field
+from scripts.core.policy_config_utils import (
+    build_policy_config,
+    load_policy_yaml,
+    resolve_policy_config_path,
+    self_test_policy_config_loader,
+)
 
 import logging
 
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
+
+RUN_MIX_MOVEMENT_EPS = 1e-4
+RUN_MIX_CHANGE_EPS = 5e-3
+RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS = 0.1
+SUCCESS_ANNOTATION_TRUE = {
+    "y",
+    "yes",
+    "1",
+    "true",
+    "success",
+    "succeeded",
+    "done",
+    "complete",
+    "completed",
+}
+SUCCESS_ANNOTATION_FALSE = {
+    "n",
+    "no",
+    "0",
+    "false",
+    "fail",
+    "failed",
+    "failure",
+    "aborted",
+    "incomplete",
+}
+SUCCESS_POLICY_NONE = "none"
+SUCCESS_POLICY_EXPLICIT = "explicit"
+SUCCESS_POLICY_RECORDED_IS_SUCCESS = "recorded_is_success"
+SUCCESS_POLICY_ALLOW_MISSING_FOR_SMOKE = "allow_missing_for_smoke"
+VALID_RECORD_SUCCESS_POLICIES = {
+    SUCCESS_POLICY_NONE,
+    SUCCESS_POLICY_EXPLICIT,
+    SUCCESS_POLICY_RECORDED_IS_SUCCESS,
+    SUCCESS_POLICY_ALLOW_MISSING_FOR_SMOKE,
+}
+RUN_MODE_RECORD = "run_record"
+RUN_MODE_POLICY = "run_policy"
+RUN_MODE_MIX = "run_mix"
+POLICY_RUN_MODES = {RUN_MODE_POLICY, RUN_MODE_MIX}
+VALID_RUN_MODES = {RUN_MODE_RECORD, RUN_MODE_POLICY, RUN_MODE_MIX}
+GRIPPER_COMMAND_KEY_CANDIDATES = {
+    "left": ("left_gripper_cmd", "left_gripper_cmd_bin"),
+    "right": ("right_gripper_cmd", "right_gripper_cmd_bin"),
+}
+FRANKA_EXTRA_ROBOT_CONFIG_KEYS = (
+    "schema_mode",
+    "rpc_timeout_sec",
+    "open_grippers_on_connect",
+    "reset_opens_grippers",
+    "reset_go_home",
+    "go_home_duration_sec",
+    "go_home_rate_hz",
+    "max_cartesian_delta",
+    "max_rotation_delta",
+)
+
+def _default_scripts_dir() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_project_root() -> Path:
+    return _default_scripts_dir().parent
+
+
+def _default_record_cfg_path() -> Path:
+    return _default_scripts_dir() / "config" / "record_cfg.yaml"
+
+
+ROBOT_DETAIL_CONFIG_FILES = {
+    "franka": "franka_config.yaml",
+    "franka_dual_arm": "franka_config.yaml",
+    "nero_dual_arm": "nero_cofig.yaml",
+}
+
+ROBOT_DETAIL_CONFIG_KEYS = ("teleop", "robot", "cameras")
+
+
+def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _resolve_das_config_path(
+    robot_type: str,
+    scripts_dir: Path,
+    project_root: Path,
+    explicit_path: str | Path | None = None,
+) -> Path:
+    if explicit_path:
+        path = Path(explicit_path).expanduser()
+        if path.is_absolute():
+            return path
+        candidates = (
+            project_root / path,
+            scripts_dir / path,
+            scripts_dir / "DAS_config" / path,
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        return candidates[0]
+
+    config_name = ROBOT_DETAIL_CONFIG_FILES.get(robot_type)
+    if config_name is None:
+        raise ValueError(
+            "No DAS_config mapping is defined for robot_type="
+            f"{robot_type!r}. Add record.das_config_path or extend "
+            "ROBOT_DETAIL_CONFIG_FILES."
+        )
+    return scripts_dir / "DAS_config" / config_name
+
+
+def _load_robot_detail_cfg(
+    robot_type: str,
+    scripts_dir: Path,
+    project_root: Path,
+    explicit_path: str | Path | None = None,
+) -> Dict[str, Any]:
+    das_config_path = _resolve_das_config_path(
+        robot_type,
+        scripts_dir=scripts_dir,
+        project_root=project_root,
+        explicit_path=explicit_path,
+    )
+    with open(das_config_path, "r") as f:
+        loaded = yaml.safe_load(f)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"DAS config must be a mapping: {das_config_path}")
+    detail_cfg = loaded.get("record", loaded)
+    if not isinstance(detail_cfg, dict):
+        raise ValueError(f"DAS config `record` section must be a mapping: {das_config_path}")
+
+    missing = [key for key in ROBOT_DETAIL_CONFIG_KEYS if key not in detail_cfg]
+    if missing:
+        raise ValueError(
+            f"DAS config is missing required section(s) {missing}: {das_config_path}"
+        )
+    return {key: copy.deepcopy(detail_cfg[key]) for key in ROBOT_DETAIL_CONFIG_KEYS}
+
+
+def _hydrate_record_robot_details(
+    cfg: Dict[str, Any],
+    scripts_dir: Path,
+    project_root: Path,
+) -> Dict[str, Any]:
+    hydrated = copy.deepcopy(cfg)
+    robot_type = hydrated.get("robot_type", "dobot_dual_arm")
+    explicit_path = hydrated.get("das_config_path") or hydrated.get("robot_config_path")
+    needs_robot_details = any(key not in hydrated for key in ROBOT_DETAIL_CONFIG_KEYS)
+    if not needs_robot_details and explicit_path is None and robot_type not in ROBOT_DETAIL_CONFIG_FILES:
+        return hydrated
+
+    detail_cfg = _load_robot_detail_cfg(
+        robot_type,
+        scripts_dir=scripts_dir,
+        project_root=project_root,
+        explicit_path=explicit_path,
+    )
+    for key in ROBOT_DETAIL_CONFIG_KEYS:
+        if isinstance(hydrated.get(key), dict):
+            hydrated[key] = _deep_merge_dicts(detail_cfg[key], hydrated[key])
+        else:
+            hydrated[key] = detail_cfg[key]
+    return hydrated
+
+
+def _validate_local_pretrained_path(pretrained_path: str | Path | None) -> None:
+    """Fail early when an absolute/local checkpoint path is misspelled."""
+    if not pretrained_path:
+        return
+
+    raw_path = str(pretrained_path)
+    path = Path(raw_path).expanduser()
+    is_local_reference = path.is_absolute() or raw_path.startswith(("~", ".")) or path.exists()
+    if not is_local_reference:
+        return
+
+    if not path.is_dir():
+        raise FileNotFoundError(
+            "Local pretrained_path does not exist or is not a directory: "
+            f"{path}\n"
+            "Expected a checkpoint directory containing config.json and model.safetensors. "
+            "For example: .../checkpoints/010000/pretrained_model"
+        )
+
+    missing = [name for name in ("config.json", "model.safetensors") if not (path / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Local pretrained_path is missing required file(s): {missing}\n"
+            f"Path: {path}"
+        )
+
+
+def _normalize_record_success_policy(task_cfg: Dict[str, Any]) -> str:
+    success_policy = task_cfg.get("success_policy")
+    if success_policy is None:
+        return (
+            SUCCESS_POLICY_EXPLICIT
+            if bool(task_cfg.get("annotate_success", False))
+            else SUCCESS_POLICY_NONE
+        )
+
+    success_policy = str(success_policy).strip().lower()
+    if success_policy not in VALID_RECORD_SUCCESS_POLICIES:
+        raise ValueError(
+            "`record.task.success_policy` must be one of "
+            f"{sorted(VALID_RECORD_SUCCESS_POLICIES)}. Got: {success_policy!r}"
+        )
+    return success_policy
 
 
 class RecordConfig:
     """Configuration class for recording sessions."""
     
-    def __init__(self, cfg: Dict[str, Any]):
+    def __init__(
+        self,
+        cfg: Dict[str, Any],
+        scripts_dir: Path | None = None,
+        project_root: Path | None = None,
+        config_source_name: str = "record_cfg.yaml",
+        force_policy_config: bool = False,
+    ):
+        self.scripts_dir = Path(scripts_dir) if scripts_dir is not None else _default_scripts_dir()
+        self.project_root = (
+            Path(project_root) if project_root is not None else self.scripts_dir.parent
+        )
+        self.config_source_name = config_source_name
+        cfg = _hydrate_record_robot_details(
+            cfg,
+            scripts_dir=self.scripts_dir,
+            project_root=self.project_root,
+        )
         storage = cfg["storage"]
         task = cfg["task"]
         time = cfg["time"]
         cam = cfg["cameras"]
         robot = cfg["robot"]
-        policy = cfg["policy"]
+        policy = cfg.get("policy")
         teleop = cfg["teleop"]
+        debug_cfg = cfg.get("debug", {})
+        debug_options = debug_cfg if isinstance(debug_cfg, dict) else {}
         
         # Global config
         self.repo_id: str = cfg["repo_id"]
-        self.debug: bool = cfg.get("debug", True)
+        self.debug: bool = bool(
+            debug_options.get("robot_debug", cfg.get("robot_debug", False))
+            if isinstance(debug_cfg, dict)
+            else cfg.get("debug", True)
+        )
         self.fps: str = cfg.get("fps", 15)
-        self.dataset_path: str = HF_LEROBOT_HOME / self.repo_id
+        self.dataset_path: Path = Path(cfg.get("dataset_path", HF_LEROBOT_HOME / self.repo_id))
+        self.dataset_name: str | None = cfg.get("dataset_name")
+        self.dataset_root: Path | None = (
+            Path(cfg["dataset_root"]) if cfg.get("dataset_root") is not None else None
+        )
         self.user_info: str = cfg.get("user_notes", None)
-        self.run_mode: str = cfg.get("run_mode", "run_record")
+        self.run_mode: str = str(cfg.get("run_mode", RUN_MODE_RECORD)).strip().lower()
+        if self.run_mode not in VALID_RUN_MODES:
+            raise ValueError(
+                f"Unsupported `record.run_mode`: {self.run_mode!r}. "
+                f"Supported: {sorted(VALID_RUN_MODES)}"
+            )
         self.rename_map: dict[str, str] = field(default_factory=dict)
+        # Finish behavior: by default reset to home and keep connection to avoid server stop on close.
+        self.reset_on_finish: bool = cfg.get("reset_on_finish", True)
+        self.disconnect_on_finish: bool = cfg.get("disconnect_on_finish", False)
         # Finish behavior: by default reset to home and keep connection to avoid server stop on close.
         self.reset_on_finish: bool = cfg.get("reset_on_finish", True)
         self.disconnect_on_finish: bool = cfg.get("disconnect_on_finish", False)
@@ -70,9 +336,25 @@ class RecordConfig:
         self.dual_arm = teleop.get("dual_arm", True)
         self._parse_teleop_config(teleop)
         
-        # Policy config - load from policy_cfg file if specified
-        policy_cfg_path = cfg.get("policy_cfg")
-        self._parse_policy_config(policy, policy_cfg_path)
+        # Policy config is only required when the run mode actually executes a policy.
+        self.policy_type: str | None = None
+        self.policy_config_path: Path | None = None
+        self.policy = None
+        needs_policy = force_policy_config or self.run_mode in POLICY_RUN_MODES
+        if needs_policy:
+            if policy is None:
+                raise ValueError(
+                    "`record.policy` must be a mapping with at least `type` and "
+                    "`config_path` when `record.run_mode` is run_policy/run_mix "
+                    "or when policy dry-run is requested. "
+                    f"Current run_mode: {self.run_mode!r}"
+                )
+            self._parse_policy_config(policy)
+        elif policy is None:
+            logging.info(
+                "`record.policy` is empty; skipping policy config for run_mode=%s",
+                self.run_mode,
+            )
         
         # Robot config
         self.robot_ip: str = robot.get("robot_ip", "localhost")
@@ -83,11 +365,11 @@ class RecordConfig:
         self.gripper_max_open: float = robot.get("gripper_max_open", 0.085)
         self.gripper_force: float = robot.get("gripper_force", 10.0)
         self.gripper_speed: float = robot.get("gripper_speed", 0.1)
-        self.reset_go_home: bool = robot.get("reset_go_home", True)
-        self.go_home_duration_sec: float | None = robot.get("go_home_duration_sec", None)
-        self.go_home_rate_hz: float | None = robot.get("go_home_rate_hz", None)
-        self.max_cartesian_delta: float | None = robot.get("max_cartesian_delta", None)
-        self.max_rotation_delta: float | None = robot.get("max_rotation_delta", None)
+        self.robot_extra_config: dict[str, Any] = {
+            key: robot[key]
+            for key in FRANKA_EXTRA_ROBOT_CONFIG_KEYS
+            if key in robot and robot[key] is not None
+        }
         
         # Task config
         self.num_episodes: int = task.get("num_episodes", 1)
@@ -95,6 +377,14 @@ class RecordConfig:
         self.task_description: str = task.get("description", "default task")
         self.resume: bool = task.get("resume", False)
         self.resume_dataset: str = task.get("resume_dataset", "")
+        self.success_policy: str = _normalize_record_success_policy(task)
+        self.annotate_success: bool = bool(task.get("annotate_success", False))
+        self.default_success: bool = bool(task.get("default_success", False))
+        self.success_prompt: str = task.get(
+            "success_prompt",
+            "====== [ANNOTATE] Was this episode successful and suitable "
+            "for full-episode training?",
+        )
         
         # Time config
         self.episode_time_sec: int = time.get("episode_time_sec", 60)
@@ -112,8 +402,6 @@ class RecordConfig:
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
-        # Debugging: verbose action logging (prints raw, postprocessed and robot action values)
-        self.verbose_action_debug: bool = cfg.get("verbose_action_debug", False)
     
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
@@ -124,12 +412,7 @@ class RecordConfig:
             self.pose_scaler = oculus_cfg.get("pose_scaler", [1.0, 1.0])
             self.channel_signs = oculus_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
             self.visualize_placo = oculus_cfg.get("visualize_placo", False)
-            self.action_smoothing_method = oculus_cfg.get("action_smoothing_method", "one_euro")
             self.action_smoothing_alpha = oculus_cfg.get("action_smoothing_alpha", 0.35)
-            self.action_smoothing_freq = oculus_cfg.get("action_smoothing_freq", 30.0)
-            self.action_smoothing_min_cutoff = oculus_cfg.get("action_smoothing_min_cutoff", 1.2)
-            self.action_smoothing_beta = oculus_cfg.get("action_smoothing_beta", 0.4)
-            self.action_smoothing_d_cutoff = oculus_cfg.get("action_smoothing_d_cutoff", 1.0)
             self.mirror_teleop = oculus_cfg.get("mirror_teleop", False)
             if self.dual_arm:
                 self.left_pose_scaler = oculus_cfg.get("left_pose_scaler", self.pose_scaler)
@@ -140,188 +423,32 @@ class RecordConfig:
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
     
-    def _parse_policy_config(self, policy: Dict[str, Any], policy_cfg_path: str = None) -> None:
+    def _parse_policy_config(self, policy: Dict[str, Any]) -> None:
         """Parse policy configuration."""
-        pretrained_path = policy.get("pretrained_path")
-        if pretrained_path:
-            project_root = Path(__file__).resolve().parent.parent.parent
-            pretrained_path_text = str(pretrained_path)
-            pretrained_local_path = Path(pretrained_path_text).expanduser()
-            looks_like_local_path = (
-                pretrained_local_path.is_absolute()
-                or pretrained_path_text.startswith((".", "~"))
-                or len(pretrained_local_path.parts) > 2
-            )
-            if looks_like_local_path:
-                if not pretrained_local_path.is_absolute():
-                    pretrained_local_path = project_root / pretrained_local_path
-                pretrained_local_path = pretrained_local_path.resolve()
-                if not pretrained_local_path.exists():
-                    raise FileNotFoundError(
-                        "[POLICY] pretrained_path does not exist:\n"
-                        f"  {pretrained_local_path}\n"
-                        "Train that checkpoint first, or point `record.policy.pretrained_path` "
-                        "to an existing model directory."
-                    )
-                pretrained_path = str(pretrained_local_path)
-
-            try:
-                self.policy = PreTrainedConfig.from_pretrained(pretrained_path)
-                self.policy.pretrained_path = pretrained_path
-                if policy.get("device"):
-                    self.policy.device = policy["device"]
-                if "push_to_hub" in policy:
-                    self.policy.push_to_hub = policy["push_to_hub"]
-                logging.info(f"[POLICY] Loaded pretrained policy config from: {pretrained_path}")
-                logging.info(
-                    "[POLICY] Effective config: type=%s chunk_size=%s n_action_steps=%s "
-                    "temporal_ensemble_coeff=%s optimizer_lr=%s kl_weight=%s",
-                    getattr(self.policy, "type", None),
-                    getattr(self.policy, "chunk_size", None),
-                    getattr(self.policy, "n_action_steps", None),
-                    getattr(self.policy, "temporal_ensemble_coeff", None),
-                    getattr(self.policy, "optimizer_lr", None),
-                    getattr(self.policy, "kl_weight", None),
-                )
-                return
-            except Exception as exc:  # noqa: BLE001
-                raise RuntimeError(
-                    "[POLICY] Failed to load pretrained policy config from "
-                    f"{pretrained_path}. Check that the directory contains config.json."
-                ) from exc
-
-        # 加载策略配置文件（如果指定）
-        policy_defaults = {}
-        if policy_cfg_path:
-            # 支持相对路径：相对于项目根目录
-            project_root = Path(__file__).resolve().parent.parent.parent
-            cfg_path = Path(policy_cfg_path)
-            if not cfg_path.is_absolute():
-                cfg_path = project_root / cfg_path
-            
-            if cfg_path.exists():
-                with open(cfg_path, 'r') as f:
-                    policy_defaults = yaml.safe_load(f).get("policy", {})
-                logging.info(f"[POLICY] Loaded policy config from: {cfg_path}")
-            else:
-                logging.warning(f"[POLICY] Policy config file not found: {cfg_path}")
-        
-        # 合并配置：policy 中的值优先于 policy_cfg 文件
-        def get_policy_param(key, default=None):
-            return policy.get(key, policy_defaults.get(key, default))
-        
-        def normalize_temporal_ensemble_coeff(value: Any) -> float | None:
-            """Treat non-positive and None-like values as disabled temporal ensembling."""
-            if value is None:
-                return None
-
-            if isinstance(value, str):
-                text = value.strip().lower()
-                if text in {"", "none", "null", "~"}:
-                    return None
-                try:
-                    value = float(text)
-                except ValueError as exc:
-                    raise ValueError(
-                        "`policy.temporal_ensemble_coeff` must be a number, null, or None-like string. "
-                        f"Got: {value!r}"
-                    ) from exc
-
-            if isinstance(value, (int, float)):
-                return float(value) if value > 0 else None
-
+        if not isinstance(policy, dict):
             raise ValueError(
-                "`policy.temporal_ensemble_coeff` must be numeric or null-like. "
-                f"Got type: {type(value).__name__}"
+                "`record.policy` must be a mapping with at least `type` and "
+                f"`config_path`. Got: {type(policy).__name__}"
             )
-
-        policy_type = get_policy_param("type")
-        if policy_type == "act":
-            from lerobot.policies import ACTConfig
-
-            temporal_ensemble_coeff = normalize_temporal_ensemble_coeff(
-                get_policy_param("temporal_ensemble_coeff")
-            )
-            self.policy = ACTConfig(
-                device=get_policy_param("device", "cuda"),
-                push_to_hub=get_policy_param("push_to_hub", False),
-                temporal_ensemble_coeff=temporal_ensemble_coeff,
-                # 输入/输出结构
-                n_obs_steps=get_policy_param("n_obs_steps", 1),
-                chunk_size=get_policy_param("chunk_size", 100),
-                n_action_steps=get_policy_param("n_action_steps", 100),
-                # Transformer 架构
-                dim_model=get_policy_param("dim_model", 512),
-                n_heads=get_policy_param("n_heads", 8),
-                n_encoder_layers=get_policy_param("n_encoder_layers", 4),
-                n_decoder_layers=get_policy_param("n_decoder_layers", 1),
-                dim_feedforward=get_policy_param("dim_feedforward", 3200),
-                feedforward_activation=get_policy_param("feedforward_activation", "relu"),
-                pre_norm=get_policy_param("pre_norm", False),
-                dropout=get_policy_param("dropout", 0.1),
-                # VAE 相关
-                use_vae=get_policy_param("use_vae", True),
-                latent_dim=get_policy_param("latent_dim", 32),
-                n_vae_encoder_layers=get_policy_param("n_vae_encoder_layers", 4),
-                kl_weight=get_policy_param("kl_weight", 10.0),
-                # 视觉骨干网络
-                vision_backbone=get_policy_param("vision_backbone", "resnet18"),
-                pretrained_backbone_weights=get_policy_param("pretrained_backbone_weights", "ResNet18_Weights.IMAGENET1K_V1"),
-                replace_final_stride_with_dilation=get_policy_param("replace_final_stride_with_dilation", False),
-                # 优化器
-                optimizer_lr=get_policy_param("optimizer_lr", 1e-5),
-                optimizer_weight_decay=get_policy_param("optimizer_weight_decay", 1e-4),
-                optimizer_lr_backbone=get_policy_param("optimizer_lr_backbone", 1e-5),
-            )
-        elif policy_type == "diffusion":
-            from lerobot.policies import DiffusionConfig
-            self.policy = DiffusionConfig(
-                device=get_policy_param("device", "cuda"),
-                push_to_hub=get_policy_param("push_to_hub", False),
-                # 输入/输出结构
-                n_obs_steps=get_policy_param("n_obs_steps", 2),
-                horizon=get_policy_param("horizon", 16),
-                n_action_steps=get_policy_param("n_action_steps", 8),
-                # 视觉骨干网络
-                vision_backbone=get_policy_param("vision_backbone", "resnet18"),
-                crop_shape=tuple(get_policy_param("crop_shape", [84, 84])) if get_policy_param("crop_shape") else None,
-                crop_is_random=get_policy_param("crop_is_random", True),
-                pretrained_backbone_weights=get_policy_param("pretrained_backbone_weights", None),
-                use_group_norm=get_policy_param("use_group_norm", True),
-                spatial_softmax_num_keypoints=get_policy_param("spatial_softmax_num_keypoints", 32),
-                use_separate_rgb_encoder_per_camera=get_policy_param("use_separate_rgb_encoder_per_camera", False),
-                # U-Net 架构
-                down_dims=tuple(get_policy_param("down_dims", [512, 1024, 2048])),
-                kernel_size=get_policy_param("kernel_size", 5),
-                n_groups=get_policy_param("n_groups", 8),
-                diffusion_step_embed_dim=get_policy_param("diffusion_step_embed_dim", 128),
-                use_film_scale_modulation=get_policy_param("use_film_scale_modulation", True),
-                # 噪声调度器
-                noise_scheduler_type=get_policy_param("noise_scheduler_type", "DDPM"),
-                num_train_timesteps=get_policy_param("num_train_timesteps", 100),
-                beta_schedule=get_policy_param("beta_schedule", "squaredcos_cap_v2"),
-                beta_start=get_policy_param("beta_start", 0.0001),
-                beta_end=get_policy_param("beta_end", 0.02),
-                prediction_type=get_policy_param("prediction_type", "epsilon"),
-                clip_sample=get_policy_param("clip_sample", True),
-                clip_sample_range=get_policy_param("clip_sample_range", 1.0),
-                num_inference_steps=get_policy_param("num_inference_steps", None),
-                # 损失计算
-                do_mask_loss_for_padding=get_policy_param("do_mask_loss_for_padding", False),
-                # 优化器
-                optimizer_lr=get_policy_param("optimizer_lr", 1e-4),
-                optimizer_betas=tuple(get_policy_param("optimizer_betas", [0.95, 0.999])),
-                optimizer_eps=get_policy_param("optimizer_eps", 1e-8),
-                optimizer_weight_decay=get_policy_param("optimizer_weight_decay", 1e-6),
-                # 学习率调度器
-                scheduler_name=get_policy_param("scheduler_name", "cosine"),
-                scheduler_warmup_steps=get_policy_param("scheduler_warmup_steps", 500),
-            )
-        else:
-            raise ValueError(f"No config for policy type: {policy_type}")
-        
-        if policy.get("pretrained_path"):
-            self.policy.pretrained_path = policy["pretrained_path"]
+        if not policy.get("type"):
+            raise ValueError("`record.policy.type` is required when policy config is enabled.")
+        self.policy_type = str(policy["type"]).strip().lower()
+        self.policy_config_path = resolve_policy_config_path(
+            policy,
+            scripts_dir=self.scripts_dir,
+            project_root=self.project_root,
+            mode="reason",
+        )
+        policy_yaml = load_policy_yaml(self.policy_config_path)
+        self.policy = build_policy_config(
+            self.policy_type,
+            policy_yaml,
+            legacy_policy_dict=policy,
+            legacy_source_name=self.config_source_name,
+            config_path=self.policy_config_path,
+            mode="reason",
+        )
+        _validate_local_pretrained_path(self.policy.pretrained_path)
     
     def create_teleop_config(self):
         """Create teleoperation configuration object."""
@@ -335,11 +462,6 @@ class RecordConfig:
                     left_channel_signs=self.left_channel_signs,
                     right_channel_signs=self.right_channel_signs,
                     action_smoothing_alpha=self.action_smoothing_alpha,
-                    action_smoothing_method=self.action_smoothing_method,
-                    action_smoothing_freq=self.action_smoothing_freq,
-                    action_smoothing_min_cutoff=self.action_smoothing_min_cutoff,
-                    action_smoothing_beta=self.action_smoothing_beta,
-                    action_smoothing_d_cutoff=self.action_smoothing_d_cutoff,
                     mirror_teleop=self.mirror_teleop,
                     visualize_placo=self.visualize_placo,
                 )
@@ -361,15 +483,794 @@ def handle_incomplete_dataset(dataset_path):
         if ans == "y":
             print(f"====== [DELETE] Removing folder: {dataset_path} ======")
             # Send to trash
-            send2trash(dataset_path)
+            # send2trash(dataset_path)
+            shutil.rmtree(dataset_path)
             print("====== [DONE] Incomplete dataset folder deleted successfully. ======")
         else:
             print("====== [KEEP] Incomplete dataset folder retained, please check manually. ======")
 
+
+def _resolve_record_dataset_root(
+    dataset_name: str,
+    run_mode: str,
+    dataset_root: Path | None = None,
+) -> Path:
+    if dataset_root is not None:
+        return dataset_root
+    base = Path(HF_LEROBOT_HOME) / dataset_name
+    return base
+
+
+def _clone_action_feature(action_feature: dict[str, Any]) -> dict[str, Any]:
+    names = action_feature.get("names")
+    return {
+        "dtype": action_feature["dtype"],
+        "shape": tuple(action_feature["shape"]),
+        "names": list(names) if isinstance(names, list) else names,
+    }
+
+
+def _action_names_from_dataset(dataset: LeRobotDataset | None) -> list[str]:
+    if dataset is None:
+        return []
+    action_feature = dataset.features.get(ACTION)
+    if action_feature is None:
+        return []
+    names = action_feature.get("names")
+    return list(names) if names is not None else []
+
+
+def _complete_action_dict(
+    action: dict[str, Any],
+    action_names: list[str],
+    fallback_action: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    fallback_action = fallback_action or {}
+    completed = dict(action)
+    for name in action_names:
+        if name not in completed:
+            completed[name] = fallback_action.get(name, 0.0)
+    return completed
+
+
+def _missing_or_invalid_action_names(
+    action: dict[str, Any],
+    action_names: list[str],
+) -> list[str]:
+    missing: list[str] = []
+    for name in action_names:
+        if name not in action or action[name] is None:
+            missing.append(name)
+            continue
+        try:
+            value = float(action[name])
+        except (TypeError, ValueError):
+            missing.append(name)
+            continue
+        if not np.isfinite(value):
+            missing.append(name)
+    return missing
+
+
+def _is_arm_override_active(
+    teleop_raw_action: dict[str, Any],
+    movement_eps: float = RUN_MIX_MOVEMENT_EPS,
+) -> tuple[bool, str]:
+    """Detect if teleop currently provides an arm/body override signal."""
+
+    if bool(teleop_raw_action.get("reset_requested", False)):
+        return True, "reset_requested"
+
+    if bool(teleop_raw_action.get("left_grip_pressed", False)):
+        return True, "left_grip_pressed"
+    if bool(teleop_raw_action.get("right_grip_pressed", False)):
+        return True, "right_grip_pressed"
+    if bool(teleop_raw_action.get("is_expert_override", False)):
+        return True, "is_expert_override"
+
+    for key, value in teleop_raw_action.items():
+        if key == "reset_requested":
+            continue
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        lower_key = key.lower()
+        if "delta" in lower_key or "pose" in lower_key:
+            if abs(num) > movement_eps:
+                return True, f"{key} motion={num:.4f}"
+
+    return False, "no_arm_override_signal"
+
+
+def _float_or_none(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _clip_gripper_cmd(value: float) -> float:
+    return min(1.0, max(0.0, value))
+
+
+def _flatten_feature_names(names: Any) -> list[str]:
+    if names is None:
+        return []
+    if isinstance(names, str):
+        return [names]
+    if isinstance(names, dict):
+        flattened: list[str] = []
+        for value in names.values():
+            flattened.extend(_flatten_feature_names(value))
+        return flattened
+    if isinstance(names, (list, tuple)):
+        flattened = []
+        for value in names:
+            flattened.extend(_flatten_feature_names(value))
+        return flattened
+    return [str(names)]
+
+
+def _action_names_from_features_or_names(features_or_names: Any) -> list[str]:
+    if features_or_names is None:
+        return []
+    if isinstance(features_or_names, (list, tuple)):
+        return [str(name) for name in features_or_names]
+    if isinstance(features_or_names, dict):
+        action_feature = features_or_names.get(ACTION)
+        if isinstance(action_feature, dict):
+            return _flatten_feature_names(action_feature.get("names"))
+        if "names" in features_or_names:
+            return _flatten_feature_names(features_or_names.get("names"))
+        return [str(name) for name in features_or_names.keys()]
+    return []
+
+
+def resolve_gripper_command_keys(features_or_names: Any) -> dict[str, str]:
+    """Resolve public gripper command keys from a robot/dataset action schema."""
+
+    action_names = _action_names_from_features_or_names(features_or_names)
+    action_name_set = set(action_names)
+    resolved: dict[str, str] = {}
+    for arm, candidates in GRIPPER_COMMAND_KEY_CANDIDATES.items():
+        for key in candidates:
+            if key in action_name_set:
+                resolved[arm] = key
+                break
+    return resolved
+
+
+def get_gripper_action_keys(robot) -> dict[str, str]:
+    return resolve_gripper_command_keys(getattr(robot, "action_features", {}))
+
+
+def _candidate_gripper_keys(arm: str, gripper_keys: dict[str, str]) -> list[str]:
+    preferred = gripper_keys.get(arm)
+    keys = [preferred] if preferred else []
+    keys.extend(GRIPPER_COMMAND_KEY_CANDIDATES.get(arm, ()))
+    seen: set[str] = set()
+    result: list[str] = []
+    for key in keys:
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def _gripper_command_value(
+    arm: str,
+    source: dict[str, Any] | None,
+    gripper_keys: dict[str, str],
+) -> float | None:
+    if source is None:
+        return None
+    for key in _candidate_gripper_keys(arm, gripper_keys):
+        if key not in source:
+            continue
+        value = _float_or_none(source.get(key))
+        if value is not None:
+            return _clip_gripper_cmd(value)
+    return None
+
+
+def normalize_gripper_command_keys(
+    action: dict[str, Any],
+    gripper_keys: dict[str, str],
+) -> dict[str, Any]:
+    """Copy known gripper aliases into the schema-selected action key."""
+
+    normalized = dict(action)
+    for arm, expected_key in gripper_keys.items():
+        if expected_key in normalized:
+            continue
+        for candidate in _candidate_gripper_keys(arm, gripper_keys):
+            if candidate in normalized:
+                normalized[expected_key] = normalized[candidate]
+                break
+    return normalized
+
+
+def _reset_gripper_soft_takeover(state: dict[str, dict[str, Any]]) -> None:
+    for arm_state in state.values():
+        arm_state["active"] = False
+        arm_state["hold"] = None
+        arm_state["manual"] = False
+        arm_state["ignore_until_released"] = False
+        arm_state["released_to_policy"] = False
+        arm_state["waiting_logged"] = False
+
+
+def _current_gripper_cmd(
+    arm: str,
+    raw_obs: dict[str, Any],
+    last_exec_action: dict[str, Any] | None,
+    fallback_action: dict[str, Any],
+    gripper_keys: dict[str, str],
+) -> float | None:
+    for source in (last_exec_action, raw_obs, fallback_action):
+        value = _gripper_command_value(arm, source, gripper_keys)
+        if value is not None:
+            return value
+    return None
+
+
+def _gripper_request_reason(
+    arm: str,
+    teleop_raw_action: dict[str, Any],
+    last_teleop_raw_action: dict[str, Any] | None,
+    state: dict[str, dict[str, Any]],
+    gripper_keys: dict[str, str],
+    change_eps: float = RUN_MIX_CHANGE_EPS,
+) -> str | None:
+    arm_state = state[arm]
+    if bool(teleop_raw_action.get(f"{arm}_gripper_release_requested", False)):
+        should_log_release = (
+            arm_state["active"]
+            or arm_state["manual"]
+            or not arm_state.get("released_to_policy", False)
+            or not arm_state.get("ignore_until_released", False)
+        )
+        arm_state["active"] = False
+        arm_state["hold"] = None
+        arm_state["manual"] = False
+        arm_state["ignore_until_released"] = True
+        arm_state["released_to_policy"] = True
+        arm_state["waiting_logged"] = False
+        if should_log_release:
+            logging.info(
+                "[run_mix] %s gripper released to policy. waiting for trigger release before reacquire.",
+                arm,
+            )
+        return None
+
+    if arm_state.get("ignore_until_released", False):
+        if bool(teleop_raw_action.get(f"{arm}_trigger_pressed", False)):
+            return None
+        arm_state["ignore_until_released"] = False
+        return None
+
+    if bool(teleop_raw_action.get(f"{arm}_trigger_pressed", False)):
+        return f"{arm}_trigger_pressed"
+
+    if last_teleop_raw_action is None:
+        return None
+
+    current = _gripper_command_value(arm, teleop_raw_action, gripper_keys)
+    previous = _gripper_command_value(arm, last_teleop_raw_action, gripper_keys)
+    if current is None or previous is None:
+        return None
+
+    delta = current - previous
+    if abs(delta) > change_eps:
+        return f"{arm}_gripper_trigger_changed"
+    return None
+
+
+def _copy_arm_channels(target_action: dict[str, Any], expert_action: dict[str, Any]) -> set[str]:
+    copied: set[str] = set()
+    for arm in ("left", "right"):
+        for axis in ("x", "y", "z", "rx", "ry", "rz"):
+            key = f"{arm}_delta_ee_pose.{axis}"
+            if key in expert_action:
+                target_action[key] = expert_action[key]
+                copied.add(key)
+
+    if expert_action.get("reset_requested", False):
+        target_action["reset_requested"] = True
+
+    return copied
+
+
+def _clip_gripper_channels(action: dict[str, Any], gripper_keys: dict[str, str]) -> None:
+    for arm in ("left", "right"):
+        key = gripper_keys.get(arm)
+        if key is None:
+            continue
+        value = _float_or_none(action.get(key))
+        if value is not None:
+            action[key] = _clip_gripper_cmd(value)
+
+
+def _apply_gripper_channel_control(
+    arm: str,
+    target_action: dict[str, Any],
+    expert_action: dict[str, Any],
+    raw_obs: dict[str, Any],
+    last_exec_action: dict[str, Any] | None,
+    last_teleop_raw_action: dict[str, Any] | None,
+    fallback_action: dict[str, Any],
+    state: dict[str, dict[str, Any]],
+    gripper_request_reason: str | None,
+    hold_without_manual: bool,
+    gripper_keys: dict[str, str],
+) -> tuple[bool, str | None]:
+    """Apply per-gripper teleop control without letting policy fight that gripper."""
+    key = gripper_keys.get(arm)
+    if key is None:
+        return False, None
+    if key not in target_action or key not in expert_action:
+        return False, None
+
+    arm_state = state[arm]
+    if gripper_request_reason is not None:
+        arm_state["manual"] = True
+        arm_state["released_to_policy"] = False
+
+    if not arm_state["manual"]:
+        if arm_state.get("released_to_policy", False):
+            # The user explicitly handed this gripper back to the policy (B for
+            # right, Y for left). Do not let the arm-override hold logic below
+            # freeze the gripper while the human keeps moving the arm.
+            arm_state["hold"] = None
+            arm_state["active"] = False
+            arm_state["waiting_logged"] = False
+            return False, None
+
+        if hold_without_manual:
+            hold = _current_gripper_cmd(
+                arm,
+                raw_obs,
+                last_exec_action,
+                fallback_action,
+                gripper_keys,
+            )
+            if hold is not None:
+                target_action[key] = hold
+            return False, None
+
+        arm_state["hold"] = None
+        arm_state["active"] = False
+        arm_state["waiting_logged"] = False
+        return False, None
+
+    teleop_cmd = _float_or_none(expert_action[key])
+    if teleop_cmd is None:
+        return False, None
+    teleop_cmd = _clip_gripper_cmd(teleop_cmd)
+
+    if arm_state["hold"] is None:
+        hold = _current_gripper_cmd(
+            arm,
+            raw_obs,
+            last_exec_action,
+            fallback_action,
+            gripper_keys,
+        )
+        arm_state["hold"] = teleop_cmd if hold is None else hold
+
+    hold = arm_state["hold"]
+    if not arm_state["active"]:
+        previous_teleop_cmd = None
+        if last_teleop_raw_action is not None:
+            previous_teleop_cmd = _gripper_command_value(arm, last_teleop_raw_action, gripper_keys)
+
+        takeover_matched = abs(teleop_cmd - hold) <= RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS
+        if previous_teleop_cmd is not None:
+            takeover_matched = takeover_matched or (
+                abs(previous_teleop_cmd - hold) <= RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS
+            )
+
+        if takeover_matched:
+            arm_state["active"] = True
+            if arm_state["waiting_logged"]:
+                logging.info(
+                    "[run_mix] %s gripper soft takeover acquired. hold=%.3f teleop=%.3f",
+                    arm,
+                    hold,
+                    teleop_cmd,
+                )
+        else:
+            target_action[key] = hold
+            if not arm_state["waiting_logged"]:
+                logging.info(
+                    "[run_mix] %s gripper soft takeover waiting. hold=%.3f teleop=%.3f",
+                    arm,
+                    hold,
+                    teleop_cmd,
+                )
+                arm_state["waiting_logged"] = True
+            return True, f"{arm}_gripper_waiting"
+
+    target_action[key] = teleop_cmd
+    return True, gripper_request_reason or f"{arm}_gripper_active"
+
+
+def run_mix_record_loop(
+    robot,
+    teleop,
+    policy,
+    preprocessor,
+    postprocessor,
+    dataset: LeRobotDataset | None,
+    teleop_action_processor,
+    robot_action_processor,
+    robot_observation_processor,
+    events: dict,
+    fps: int,
+    control_time_s: int | float,
+    single_task: str,
+    display_data: bool,
+    success_policy: str = SUCCESS_POLICY_NONE,
+) -> dict[str, Any]:
+    policy.reset()
+    preprocessor.reset()
+    postprocessor.reset()
+
+    start_episode_t = time.perf_counter()
+    timestamp_s = 0.0
+    last_teleop_raw_action: dict[str, Any] | None = None
+
+    expert_exec_steps = 0
+    policy_exec_steps = 0
+    saved_steps = 0
+    intervention_count = 0
+    complete_expert_label_steps = 0
+
+    last_action_source = "policy"
+    last_exec_action: dict[str, Any] | None = None
+    action_names = _action_names_from_dataset(dataset)
+    gripper_action_keys = resolve_gripper_command_keys(action_names)
+    if gripper_action_keys:
+        logging.info("[run_mix] gripper action keys: %s", gripper_action_keys)
+    missing_gripper_warning_keys: set[str] = set()
+    intervention_segment_id = -1
+    intervention_active = False
+    gripper_soft_takeover = {
+        "left": {
+            "active": False,
+            "hold": None,
+            "manual": False,
+            "ignore_until_released": False,
+            "released_to_policy": False,
+            "waiting_logged": False,
+        },
+        "right": {
+            "active": False,
+            "hold": None,
+            "manual": False,
+            "ignore_until_released": False,
+            "released_to_policy": False,
+            "waiting_logged": False,
+        },
+    }
+    while timestamp_s < control_time_s:
+        loop_start_t = time.perf_counter()
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        raw_obs = robot.get_observation()
+        obs_processed = robot_observation_processor(raw_obs)
+        observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+
+        # (1) Policy inference.
+        policy_action = predict_action(
+            observation=observation_frame,
+            policy=policy,
+            device=get_safe_torch_device(policy.config.device),
+            preprocessor=preprocessor,
+            postprocessor=postprocessor,
+            use_amp=policy.config.use_amp,
+            task=single_task,
+            robot_type=robot.robot_type,
+        )
+        policy_action_processed = make_robot_action(policy_action, dataset.features)
+        policy_action_processed = _complete_action_dict(policy_action_processed, action_names)
+        policy_action_processed = normalize_gripper_command_keys(policy_action_processed, gripper_action_keys)
+
+        # (2) Default execute policy action. Teleop may override selected channels below.
+        exec_action = dict(policy_action_processed)
+        action_source = "policy"
+        is_expert = False
+        frame_role = "policy"
+        frame_segment_id = -1
+
+        # (3) Expert override is split by channel: arm/body and grippers are independent.
+        teleop_raw_action = teleop.get_action()
+        expert_action_raw = normalize_gripper_command_keys(
+            dict(teleop_action_processor((teleop_raw_action, raw_obs))),
+            gripper_action_keys,
+        )
+        for arm, key in gripper_action_keys.items():
+            if key in expert_action_raw or key in missing_gripper_warning_keys:
+                continue
+            logging.warning(
+                "[run_mix] expert action is missing expected %s gripper key `%s`; "
+                "known aliases are %s. This frame will not be a complete expert label.",
+                arm,
+                key,
+                list(GRIPPER_COMMAND_KEY_CANDIDATES[arm]),
+            )
+            missing_gripper_warning_keys.add(key)
+        expert_action_missing_names = _missing_or_invalid_action_names(expert_action_raw, action_names)
+        expert_action = dict(expert_action_raw)
+        is_arm_override, arm_override_reason = _is_arm_override_active(teleop_raw_action)
+        gripper_request_reasons = {
+            arm: _gripper_request_reason(
+                arm,
+                teleop_raw_action,
+                last_teleop_raw_action,
+                gripper_soft_takeover,
+                gripper_action_keys,
+            )
+            for arm in ("left", "right")
+        }
+
+        override_reasons: list[str] = []
+        overridden_action_names: set[str] = set()
+
+        if is_arm_override:
+            overridden_action_names.update(_copy_arm_channels(exec_action, expert_action))
+            override_reasons.append(arm_override_reason)
+            # Flush policy temporal state only for arm/body interventions. Gripper-only
+            # control should not disturb policy arm motion.
+            policy.reset()
+
+        for arm, gripper_reason in gripper_request_reasons.items():
+            gripper_overridden, gripper_override_reason = _apply_gripper_channel_control(
+                arm=arm,
+                target_action=exec_action,
+                expert_action=expert_action,
+                raw_obs=raw_obs,
+                last_exec_action=last_exec_action,
+                last_teleop_raw_action=last_teleop_raw_action,
+                fallback_action=policy_action_processed,
+                state=gripper_soft_takeover,
+                gripper_request_reason=gripper_reason,
+                hold_without_manual=is_arm_override,
+                gripper_keys=gripper_action_keys,
+            )
+            if gripper_overridden and gripper_override_reason is not None:
+                gripper_key = gripper_action_keys.get(arm)
+                if gripper_key is not None:
+                    overridden_action_names.add(gripper_key)
+                override_reasons.append(gripper_override_reason)
+
+        if override_reasons:
+            action_source = (
+                "expert"
+                if action_names and overridden_action_names.issuperset(set(action_names))
+                else "mixed"
+            )
+            is_expert = True
+            if last_action_source == "policy":
+                logging.info(
+                    "[run_mix] source->%s (teleop override). reason=%s",
+                    action_source,
+                    ", ".join(override_reasons),
+                )
+        elif last_action_source in {"expert", "mixed"}:
+            logging.info(
+                "[run_mix] source->policy (no expert override detected). last_reason=%s",
+                "no_channel_override_signal",
+            )
+            _reset_gripper_soft_takeover(gripper_soft_takeover)
+        else:
+            pass
+
+        _clip_gripper_channels(exec_action, gripper_action_keys)
+        # Keep the expert label independent from policy/sent action. Missing
+        # dimensions are zero-filled only so the raw LeRobot schema can be
+        # written; export drops these rows via expert_label_complete=False.
+        released_to_policy_action_names = [
+            name
+            for arm in ("left", "right")
+            if gripper_soft_takeover[arm].get("released_to_policy", False)
+            for name in [gripper_action_keys.get(arm)]
+            if name is not None
+        ]
+        expert_action_missing_names = sorted(
+            set(expert_action_missing_names) | set(released_to_policy_action_names)
+        )
+        expert_action = _complete_action_dict(expert_action_raw, action_names, fallback_action={})
+        last_action_source = action_source
+
+        reset_requested = bool(teleop_raw_action.get("reset_requested", False))
+        waiting_only = bool(override_reasons) and all("waiting" in reason for reason in override_reasons)
+        expert_label_complete = (
+            bool(is_expert)
+            and not waiting_only
+            and not reset_requested
+            and len(expert_action_missing_names) == 0
+        )
+        if is_expert and not waiting_only:
+            if not intervention_active:
+                intervention_segment_id += 1
+                intervention_count += 1
+                frame_role = "takeover_start"
+            else:
+                frame_role = "recovery"
+            if reset_requested:
+                frame_role = "reset"
+            frame_segment_id = intervention_segment_id
+            intervention_active = True
+        elif waiting_only:
+            frame_role = "ignore"
+            frame_segment_id = -1
+            intervention_active = False
+        else:
+            frame_role = "policy"
+            frame_segment_id = -1
+            intervention_active = False
+
+        logging.debug(
+            "[run_mix] action_source=%s frame_role=%s segment=%s reason=%s"
+            " left_grip=%s right_grip=%s reset=%s",
+            action_source,
+            frame_role,
+            frame_segment_id,
+            ",".join(override_reasons) if override_reasons else "no_channel_override_signal",
+            teleop_raw_action.get("left_grip_pressed", False),
+            teleop_raw_action.get("right_grip_pressed", False),
+            teleop_raw_action.get("reset_requested", False),
+        )
+
+        last_teleop_raw_action = teleop_raw_action
+
+        # (4) Execute action.
+        robot_action_to_send = robot_action_processor((exec_action, raw_obs))
+        sent_action = normalize_gripper_command_keys(
+            _complete_action_dict(dict(robot_action_to_send), action_names, fallback_action=exec_action),
+            gripper_action_keys,
+        )
+        sent_action_raw = robot.send_action(sent_action)
+        sent_action = normalize_gripper_command_keys(
+            _complete_action_dict(
+                dict(sent_action_raw or sent_action),
+                action_names,
+                fallback_action=exec_action,
+            ),
+            gripper_action_keys,
+        )
+        last_exec_action = dict(sent_action)
+
+        if action_source in {"expert", "mixed"}:
+            expert_exec_steps += 1
+        else:
+            policy_exec_steps += 1
+        if expert_label_complete:
+            complete_expert_label_steps += 1
+
+        # Raw run_mix logs intentionally keep the full timeline. `action` remains
+        # the actual mixed command sent to the robot; export later rewrites
+        # `action = expert_action` only when expert_label_complete=True.
+        if dataset is not None:
+            action_frame = build_dataset_frame(dataset.features, sent_action, prefix=ACTION)
+            policy_action_frame = build_dataset_frame(
+                dataset.features,
+                policy_action_processed,
+                prefix="policy_action",
+            )
+            expert_action_frame = build_dataset_frame(
+                dataset.features,
+                expert_action,
+                prefix="expert_action",
+            )
+            sent_action_frame = build_dataset_frame(dataset.features, sent_action, prefix="sent_action")
+            frame = {
+                **observation_frame,
+                **action_frame,
+                **policy_action_frame,
+                **expert_action_frame,
+                **sent_action_frame,
+                "action_source": action_source,
+                "is_expert": np.array([is_expert], dtype=np.bool_),
+                "intervention_segment_id": np.array([frame_segment_id], dtype=np.int64),
+                "frame_role": frame_role,
+                "expert_label_complete": np.array([expert_label_complete], dtype=np.bool_),
+                "expert_action_missing": ",".join(expert_action_missing_names),
+                "task": single_task,
+            }
+            if "success" in dataset.features:
+                frame["success"] = np.array([False], dtype=np.bool_)
+            if "success_policy" in dataset.features:
+                frame["success_policy"] = success_policy
+            if "success_inferred_from_recorded_episode" in dataset.features:
+                frame["success_inferred_from_recorded_episode"] = np.array([False], dtype=np.bool_)
+            dataset.add_frame(frame)
+            saved_steps += 1
+
+        if display_data:
+            log_rerun_data(observation=obs_processed, action=sent_action)
+
+        dt_s = time.perf_counter() - loop_start_t
+        busy_wait(1 / fps - dt_s)
+        timestamp_s = time.perf_counter() - start_episode_t
+
+    return {
+        "expert_exec_steps": expert_exec_steps,
+        "policy_exec_steps": policy_exec_steps,
+        "saved_steps": saved_steps,
+        "expert_frame_ratio": expert_exec_steps / max(1, expert_exec_steps + policy_exec_steps),
+        "intervention_count": intervention_count,
+        "complete_expert_label_steps": complete_expert_label_steps,
+    }
+
+
+def _prompt_episode_success(prompt: str, default: bool = False) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    prompt_text = prompt if "[y/n]" in prompt.lower() else f"{prompt} [{suffix}]: "
+    while True:
+        try:
+            answer = input(prompt_text).strip().lower()
+        except EOFError:
+            logging.warning(
+                "[run_mix] no stdin available for success annotation; using default=%s",
+                default,
+            )
+            return bool(default)
+        if not answer:
+            return bool(default)
+        if answer in SUCCESS_ANNOTATION_TRUE:
+            return True
+        if answer in SUCCESS_ANNOTATION_FALSE:
+            return False
+        logging.info("====== [WARNING] Please answer y/yes or n/no. ======")
+
+
+def _set_episode_success_annotation(
+    dataset: LeRobotDataset,
+    *,
+    success: bool | None,
+    success_policy: str,
+    inferred_from_recorded_episode: bool,
+) -> None:
+    if dataset.episode_buffer is None:
+        return
+    size = int(dataset.episode_buffer.get("size", 0) or 0)
+    if "success" in dataset.episode_buffer and success is not None:
+        dataset.episode_buffer["success"] = [
+            np.array([success], dtype=np.bool_)
+            for _ in range(size)
+        ]
+    if "success_policy" in dataset.episode_buffer:
+        dataset.episode_buffer["success_policy"] = [success_policy for _ in range(size)]
+    if "success_inferred_from_recorded_episode" in dataset.episode_buffer:
+        dataset.episode_buffer["success_inferred_from_recorded_episode"] = [
+            np.array([inferred_from_recorded_episode], dtype=np.bool_)
+            for _ in range(size)
+        ]
+
+
 def run_record(record_cfg: RecordConfig):
     print("====== [START] Starting recording ======")
+    dataset_name = None
+    dataset_root = None
     try:
-        dataset_name, data_version = generate_dataset_name(record_cfg)
+        if record_cfg.dataset_name is not None:
+            dataset_name = record_cfg.dataset_name
+            data_version = "manual"
+        else:
+            dataset_name, data_version = generate_dataset_name(record_cfg)
+        dataset_root = _resolve_record_dataset_root(
+            dataset_name,
+            record_cfg.run_mode,
+            dataset_root=record_cfg.dataset_root,
+        )
 
         # Check joint offsets
         # if not record_cfg.debug:
@@ -414,44 +1315,114 @@ def run_record(record_cfg: RecordConfig):
         teleop_config = record_cfg.create_teleop_config()
         
         # Create robot configuration dynamically based on robot_type
-        robot_kwargs = dict(
-            robot_ip=record_cfg.robot_ip,
-            robot_port=record_cfg.robot_port,
-            cameras=camera_config,
-            debug=record_cfg.debug,
-            use_gripper=record_cfg.use_gripper,
-            gripper_max_open=record_cfg.gripper_max_open,
-            gripper_force=record_cfg.gripper_force,
-            gripper_speed=record_cfg.gripper_speed,
-            close_threshold=record_cfg.close_threshold,
-            gripper_reverse=record_cfg.gripper_reverse,
-            control_mode=record_cfg.control_mode,
+        robot_config_kwargs = {
+            "robot_ip": record_cfg.robot_ip,
+            "robot_port": record_cfg.robot_port,
+            "cameras": camera_config,
+            "debug": record_cfg.debug,
+            "use_gripper": record_cfg.use_gripper,
+            "gripper_max_open": record_cfg.gripper_max_open,
+            "gripper_force": record_cfg.gripper_force,
+            "gripper_speed": record_cfg.gripper_speed,
+            "close_threshold": record_cfg.close_threshold,
+            "gripper_reverse": record_cfg.gripper_reverse,
+            "control_mode": record_cfg.control_mode,
+            **record_cfg.robot_extra_config,
+        }
+        robot_config = create_robot_config(
+            record_cfg.robot_type,
+            **robot_config_kwargs,
         )
-        if record_cfg.robot_type == "franka_dual_arm":
-            robot_kwargs.update(
-                reset_go_home=record_cfg.reset_go_home,
-                go_home_duration_sec=record_cfg.go_home_duration_sec,
-                go_home_rate_hz=record_cfg.go_home_rate_hz,
-            )
-            if record_cfg.max_cartesian_delta is not None:
-                robot_kwargs["max_cartesian_delta"] = record_cfg.max_cartesian_delta
-            if record_cfg.max_rotation_delta is not None:
-                robot_kwargs["max_rotation_delta"] = record_cfg.max_rotation_delta
-        robot_config = create_robot_config(record_cfg.robot_type, **robot_kwargs)
         
         # Initialize the robot dynamically based on robot_type
         robot = create_robot(record_cfg.robot_type, robot_config)
-        if record_cfg.verbose_action_debug and hasattr(robot, "set_action_debug"):
-            robot.set_action_debug(True)
 
         # Configure the dataset features
         action_features = hw_to_dataset_features(robot.action_features, "action")
         obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)
         dataset_features = {**action_features, **obs_features}
+        if record_cfg.run_mode == RUN_MODE_MIX:
+            # Extend dataset schema for DAgger mixed collection metadata.
+            action_feature = dataset_features[ACTION]
+            dataset_features["policy_action"] = _clone_action_feature(action_feature)
+            dataset_features["expert_action"] = _clone_action_feature(action_feature)
+            dataset_features["sent_action"] = _clone_action_feature(action_feature)
+            dataset_features["action_source"] = {"dtype": "string", "shape": (1,), "names": None}
+            dataset_features["is_expert"] = {"dtype": "bool", "shape": (1,), "names": None}
+            dataset_features["intervention_segment_id"] = {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": None,
+            }
+            dataset_features["frame_role"] = {"dtype": "string", "shape": (1,), "names": None}
+            dataset_features["expert_label_complete"] = {
+                "dtype": "bool",
+                "shape": (1,),
+                "names": None,
+            }
+            dataset_features["expert_action_missing"] = {
+                "dtype": "string",
+                "shape": (1,),
+                "names": None,
+            }
+            if (
+                record_cfg.annotate_success
+                or record_cfg.success_policy == SUCCESS_POLICY_RECORDED_IS_SUCCESS
+            ):
+                dataset_features["success"] = {
+                    "dtype": "bool",
+                    "shape": (1,),
+                    "names": None,
+                }
+            if record_cfg.success_policy != SUCCESS_POLICY_NONE:
+                dataset_features["success_policy"] = {"dtype": "string", "shape": (1,), "names": None}
+                dataset_features["success_inferred_from_recorded_episode"] = {
+                    "dtype": "bool",
+                    "shape": (1,),
+                    "names": None,
+                }
+
+        if record_cfg.run_mode == RUN_MODE_MIX:
+            logging.info("====== [RUN_MIX] Mix mode config ======")
+            logging.info(
+                "[run_mix] robot_type=%s control_mode=%s fps=%s episode_time=%s reset_time=%s",
+                record_cfg.robot_type,
+                record_cfg.control_mode,
+                record_cfg.fps,
+                record_cfg.episode_time_sec,
+                record_cfg.reset_time_sec,
+            )
+            logging.info(
+                "[run_mix] policy=%s policy_device=%s pretrained_path=%s",
+                type(record_cfg.policy).__name__,
+                record_cfg.policy.device,
+                record_cfg.policy.pretrained_path,
+            )
+            logging.info(
+                "[run_mix] teleop dual_arm=%s oculus_ip=%s left_scaler=%s left_signs=%s right_scaler=%s right_signs=%s",
+                record_cfg.dual_arm,
+                getattr(record_cfg, "oculus_ip", "n/a"),
+                getattr(record_cfg, "left_pose_scaler", None),
+                getattr(record_cfg, "left_channel_signs", None),
+                getattr(record_cfg, "right_pose_scaler", None),
+                getattr(record_cfg, "right_channel_signs", None),
+            )
+            logging.info(
+                "[run_mix] override detection: movement_eps=%.4f change_eps=%.4f gripper_soft_takeover_eps=%.4f",
+                RUN_MIX_MOVEMENT_EPS,
+                RUN_MIX_CHANGE_EPS,
+                RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS,
+            )
+            logging.info(
+                "[run_mix] success_policy=%s annotate_success=%s",
+                record_cfg.success_policy,
+                record_cfg.annotate_success,
+            )
 
         if record_cfg.resume:
             dataset = LeRobotDataset(
                 dataset_name,
+                root=dataset_root,
             )
 
             if hasattr(robot, "cameras") and len(robot.cameras) > 0:
@@ -464,12 +1435,16 @@ def run_record(record_cfg: RecordConfig):
                 fps=record_cfg.fps,
                 features=dataset_features,
                 robot_type=robot.name,
+                root=dataset_root,
                 use_videos=True,
                 image_writer_threads=4,
             )
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
 
+        # Initialize keyboard listener.
+        # Rerun visualization can introduce periodic stalls when transport is unstable,
+        # so only initialize it when display is explicitly enabled.
         # Initialize keyboard listener.
         # Rerun visualization can introduce periodic stalls when transport is unstable,
         # so only initialize it when display is explicitly enabled.
@@ -483,18 +1458,23 @@ def run_record(record_cfg: RecordConfig):
         postprocessor = None
 
         # configure the teleop and policy
-        if record_cfg.run_mode == "run_record":
+        if record_cfg.run_mode == RUN_MODE_RECORD:
             logging.info("====== [INFO] Running in teleoperation mode ======")
             teleop = OculusTeleop(teleop_config)
             policy = None
-        elif record_cfg.run_mode == "run_policy":
+        elif record_cfg.run_mode == RUN_MODE_POLICY:
             logging.info("====== [INFO] Running in policy mode ======")
             policy = make_policy(record_cfg.policy, ds_meta=dataset.meta)
             teleop = None
-        elif record_cfg.run_mode == "run_mix":
+        elif record_cfg.run_mode == RUN_MODE_MIX:
             logging.info("====== [INFO] Running in mixed mode ======")
             policy = make_policy(record_cfg.policy, ds_meta=dataset.meta)
             teleop = OculusTeleop(teleop_config)
+        else:
+            raise ValueError(
+                f"Unsupported run_mode: {record_cfg.run_mode}. "
+                f"Supported: {RUN_MODE_RECORD} | {RUN_MODE_POLICY} | {RUN_MODE_MIX}"
+            )
         
         if policy is not None:
             preprocessor, postprocessor = make_pre_post_processors(
@@ -512,37 +1492,122 @@ def run_record(record_cfg: RecordConfig):
             teleop.connect()
 
         episode_idx = 0
+        run_mix_episode_stats: list[dict[str, Any]] = []
 
         while episode_idx < record_cfg.num_episodes and not events["stop_recording"]:
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
-            record_loop(
-                robot=robot,
-                events=events,
-                fps=record_cfg.fps,
-                teleop=teleop,
-                policy=policy,
-                preprocessor=preprocessor,
-                postprocessor=postprocessor,
-                teleop_action_processor=teleop_action_processor,
-                robot_action_processor=robot_action_processor,
-                robot_observation_processor=robot_observation_processor,
-                dataset=dataset,
-                control_time_s=record_cfg.episode_time_sec,
-                single_task=record_cfg.task_description,
-                display_data=record_cfg.display,
-            )
+            if record_cfg.run_mode == RUN_MODE_MIX:
+                mix_stats = run_mix_record_loop(
+                    robot=robot,
+                    teleop=teleop,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    dataset=dataset,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=robot_observation_processor,
+                    events=events,
+                    fps=record_cfg.fps,
+                    control_time_s=record_cfg.episode_time_sec,
+                    single_task=record_cfg.task_description,
+                    display_data=record_cfg.display,
+                    success_policy=record_cfg.success_policy,
+                )
+                mix_stats["episode_index"] = episode_idx
+                run_mix_episode_stats.append(mix_stats)
+                logging.info(
+                    "[run_mix] policy_exec_steps=%d expert_exec_steps=%d saved_steps=%d "
+                    "expert_frame_ratio=%.4f interventions=%d complete_expert_labels=%d",
+                    mix_stats["policy_exec_steps"],
+                    mix_stats["expert_exec_steps"],
+                    mix_stats["saved_steps"],
+                    mix_stats["expert_frame_ratio"],
+                    mix_stats["intervention_count"],
+                    mix_stats["complete_expert_label_steps"],
+                )
+            else:
+                record_loop(
+                    robot=robot,
+                    events=events,
+                    fps=record_cfg.fps,
+                    teleop=teleop,
+                    policy=policy,
+                    preprocessor=preprocessor,
+                    postprocessor=postprocessor,
+                    teleop_action_processor=teleop_action_processor,
+                    robot_action_processor=robot_action_processor,
+                    robot_observation_processor=robot_observation_processor,
+                    dataset=dataset,
+                    control_time_s=record_cfg.episode_time_sec,
+                    single_task=record_cfg.task_description,
+                    display_data=record_cfg.display,
+                )
 
-            if events["rerecord_episode"]:
-                logging.info("Re-recording episode")
+            rerecord_requested = bool(events["rerecord_episode"])
+            if rerecord_requested:
+                logging.info("Re-recording episode requested: discard current episode and enter reset state.")
                 events["rerecord_episode"] = False
+                # Left arrow also sets exit_early=True. Clear it here so reset phase does not exit immediately.
                 events["exit_early"] = False
-                dataset.clear_episode_buffer()
-                continue
+                if dataset.episode_buffer is not None:
+                    dataset.clear_episode_buffer()
+            elif record_cfg.run_mode == RUN_MODE_MIX:
+                has_recorded_frames = (
+                    dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0
+                )
+                if has_recorded_frames:
+                    if (
+                        record_cfg.success_policy == SUCCESS_POLICY_EXPLICIT
+                        and record_cfg.annotate_success
+                    ):
+                        success = _prompt_episode_success(
+                            record_cfg.success_prompt,
+                            default=record_cfg.default_success,
+                        )
+                        _set_episode_success_annotation(
+                            dataset,
+                            success=success,
+                            success_policy=record_cfg.success_policy,
+                            inferred_from_recorded_episode=False,
+                        )
+                        mix_stats["success"] = success
+                        mix_stats["success_policy"] = record_cfg.success_policy
+                        mix_stats["success_inferred_from_recorded_episode"] = False
+                        logging.info("[run_mix] episode %d success=%s", episode_idx + 1, success)
+                    elif record_cfg.success_policy == SUCCESS_POLICY_RECORDED_IS_SUCCESS:
+                        _set_episode_success_annotation(
+                            dataset,
+                            success=True,
+                            success_policy=record_cfg.success_policy,
+                            inferred_from_recorded_episode=True,
+                        )
+                        mix_stats["success"] = True
+                        mix_stats["success_policy"] = record_cfg.success_policy
+                        mix_stats["success_inferred_from_recorded_episode"] = True
+                        logging.info(
+                            "[run_mix] episode %d success=True inferred from saved recorded episode",
+                            episode_idx + 1,
+                        )
+                    elif record_cfg.success_policy == SUCCESS_POLICY_ALLOW_MISSING_FOR_SMOKE:
+                        _set_episode_success_annotation(
+                            dataset,
+                            success=None,
+                            success_policy=record_cfg.success_policy,
+                            inferred_from_recorded_episode=False,
+                        )
+                        mix_stats["success_policy"] = record_cfg.success_policy
+                    dataset.save_episode()
+                else:
+                    logging.warning(
+                        "[run_mix] episode %d has no recorded frames; skip saving this episode.",
+                        episode_idx + 1,
+                    )
+            else:
+                dataset.save_episode()
 
-            dataset.save_episode()
-
-            # Reset the environment if not stopping or re-recording
-            if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or events["rerecord_episode"]):
+            # Reset the environment between episodes, and also before a re-record attempt.
+            if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or rerecord_requested):
                 while True:
                     termios.tcflush(sys.stdin, termios.TCIFLUSH)
                     user_input = input("====== [WAIT] Press Enter to reset the environment ======")
@@ -564,6 +1629,9 @@ def run_record(record_cfg: RecordConfig):
                     single_task=record_cfg.task_description,
                     display_data=record_cfg.display,
                 )
+
+            if rerecord_requested:
+                continue
 
             episode_idx += 1
 
@@ -591,26 +1659,108 @@ def run_record(record_cfg: RecordConfig):
         if record_cfg.push_to_hub:
             dataset.push_to_hub()
 
+        result = {
+            "dataset_name": dataset_name,
+            "dataset_root": str(dataset_root),
+            "data_version": data_version,
+        }
+        if record_cfg.run_mode == RUN_MODE_MIX:
+            total_expert = sum(s["expert_exec_steps"] for s in run_mix_episode_stats)
+            total_policy = sum(s["policy_exec_steps"] for s in run_mix_episode_stats)
+            result["run_mix_stats"] = {
+                "episodes": run_mix_episode_stats,
+                "expert_frame_ratio": total_expert / max(1, total_expert + total_policy),
+                "expert_episode_count": sum(
+                    1 for s in run_mix_episode_stats if s["intervention_count"] > 0
+                ),
+                "intervention_count": sum(s["intervention_count"] for s in run_mix_episode_stats),
+                "saved_steps": sum(s["saved_steps"] for s in run_mix_episode_stats),
+                "complete_expert_label_steps": sum(
+                    s["complete_expert_label_steps"] for s in run_mix_episode_stats
+                ),
+            }
+        return result
+
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
-        dataset_path = Path(HF_LEROBOT_HOME) / dataset_name
+        dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
-        dataset_path = Path(HF_LEROBOT_HOME) / dataset_name
+        dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
 
-def main():
-    parent_path = Path(__file__).resolve().parent
-    cfg_path = parent_path.parent / "config" / "record_cfg.yaml"
-    with open(cfg_path, 'r') as f:
+def _load_record_cfg_yaml(cfg_path: Path) -> Dict[str, Any]:
+    with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict) or "record" not in cfg:
+        raise ValueError(f"Record config must contain a top-level `record` mapping: {cfg_path}")
+    return cfg
 
-    record_cfg = RecordConfig(cfg["record"])
+
+def dry_run_policy_config(cfg_path: Path) -> RecordConfig:
+    scripts_dir = _default_scripts_dir()
+    project_root = _default_project_root()
+    cfg = _load_record_cfg_yaml(cfg_path)
+    record_cfg = RecordConfig(
+        cfg["record"],
+        scripts_dir=scripts_dir,
+        project_root=project_root,
+        config_source_name=str(cfg_path),
+        force_policy_config=True,
+    )
+    logging.info("====== [POLICY CONFIG DRY-RUN] OK ======")
+    logging.info("policy.type: %s", record_cfg.policy_type)
+    logging.info("policy.config_path: %s", record_cfg.policy_config_path)
+    logging.info("policy.config_class: %s", type(record_cfg.policy).__name__)
+    logging.info("policy.device: %s", record_cfg.policy.device)
+    logging.info("policy.pretrained_path: %s", record_cfg.policy.pretrained_path)
+    return record_cfg
+
+
+def main(argv: list[str] | None = None):
+    parser = argparse.ArgumentParser(description="Record LeRobot dual-arm data.")
+    parser.add_argument(
+        "--config",
+        "--config-path",
+        dest="config_path",
+        type=Path,
+        default=_default_record_cfg_path(),
+        help="Path to record_cfg.yaml.",
+    )
+    parser.add_argument(
+        "--dry-run-policy-config",
+        action="store_true",
+        help="Load record_cfg.yaml and the referenced policy yaml, build the policy config, then exit.",
+    )
+    parser.add_argument(
+        "--self-test-policy-config",
+        action="store_true",
+        help="Run minimal in-process checks for the policy config loader, then exit.",
+    )
+    args = parser.parse_args(argv)
+
+    if args.self_test_policy_config:
+        self_test_policy_config_loader()
+        return
+
+    if args.dry_run_policy_config:
+        dry_run_policy_config(args.config_path)
+        return
+
+    scripts_dir = _default_scripts_dir()
+    project_root = _default_project_root()
+    cfg = _load_record_cfg_yaml(args.config_path)
+    record_cfg = RecordConfig(
+        cfg["record"],
+        scripts_dir=scripts_dir,
+        project_root=project_root,
+        config_source_name=str(args.config_path),
+    )
     run_record(record_cfg)
 
 if __name__ == "__main__":

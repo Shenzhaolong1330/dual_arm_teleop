@@ -26,6 +26,35 @@ def _as_path_or_none(value: str | None) -> Path | None:
     return Path(value).expanduser() if value else None
 
 
+def _resolve_for_safety(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = _resolve_for_safety(left)
+    right = _resolve_for_safety(right)
+    return left == right or left in right.parents or right in left.parents
+
+
+def _assert_output_is_separate_from_source(source: LeRobotDataset, cfg: dict[str, Any]) -> None:
+    output_cfg = cfg["output"]
+    output_root = _as_path_or_none(output_cfg.get("root"))
+    if output_root is None:
+        if str(output_cfg.get("repo_id", "")).strip("/") == str(source.repo_id).strip("/"):
+            raise ValueError(
+                "Refusing to preprocess in place: output.repo_id is the same as source.repo_id "
+                "and output.root is not set. Choose a separate output.root/repo_id."
+            )
+        return
+
+    source_root = _resolve_for_safety(Path(source.root))
+    if _paths_overlap(output_root, source_root):
+        raise ValueError(
+            "Refusing to preprocess in place: output.root overlaps source.root. "
+            f"source.root={source_root} output.root={_resolve_for_safety(output_root)}"
+        )
+
+
 def _select_episodes(dataset: LeRobotDataset, cfg: dict[str, Any]) -> list[int]:
     episodes = cfg["source"].get("episodes")
     if episodes is None:
@@ -248,6 +277,7 @@ def _frame_from_source_item(
 
 
 def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRobotDataset:
+    _assert_output_is_separate_from_source(source, cfg)
     output_cfg = cfg["output"]
     output_root = _as_path_or_none(output_cfg.get("root"))
     if output_root is not None and output_root.exists():

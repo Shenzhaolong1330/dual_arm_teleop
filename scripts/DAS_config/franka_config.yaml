@@ -1,0 +1,40 @@
+# Franka hardware-side configuration loaded by scripts/core/run_record.py
+# when record.robot_type is franka_dual_arm or franka.
+teleop:
+  control_mode: "oculus"
+  dual_arm: true
+  oculus_config:
+    ip:
+    use_gripper: true
+    left_pose_scaler: [0.8, 0.8]
+    left_channel_signs: [1, 1, 1, -1, -1, 1]
+    right_pose_scaler: [0.8, 0.8]
+    right_channel_signs: [1, 1, 1, -1, -1, 1]
+    mirror_teleop: true
+    visualize_placo: false
+
+robot:
+  robot_ip: "172.16.0.1"
+  robot_port: 4242
+  rpc_timeout_sec: 30.0
+  schema_mode: "nero_compatible"
+  use_gripper: true
+  close_threshold: 0.7
+  gripper_reverse: false
+  gripper_max_open: 0.085
+  gripper_force: 10.0
+  gripper_speed: 0.1
+  open_grippers_on_connect: false
+  reset_opens_grippers: true
+  reset_go_home: true
+  go_home_duration_sec: 5.0
+  go_home_rate_hz: 50.0
+  max_cartesian_delta: 0.06
+  max_rotation_delta: 0.08
+
+cameras:
+  left_wrist_cam_serial: "347622074336"
+  right_wrist_cam_serial: "337322072568"
+  head_cam_serial: "348522072761"
+  width: 424
+  height: 240

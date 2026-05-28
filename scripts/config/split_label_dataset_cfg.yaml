@@ -1,13 +1,13 @@
 split_label_dataset:
   source:
-    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01"
-    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01"
+    repo_id: "franka_dual_arm/pick_4_and_seal_20260525_v01"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/pick_4_and seal_20260525_v01"
     episodes: null        # null means all episodes, or set e.g. [0, 1, 2]
     max_episodes: null    # optional quick-test limit
 
   output:
-    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes"
-    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes"
+    repo_id: "franka_dual_arm/pick_4_and_seal_20260525_v01_subepisodes"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/pick_4_and_seal_20260525_v01_subepisodes"
     overwrite: false
     write_dataset: true
     image_writer_threads: 4
@@ -21,7 +21,27 @@ split_label_dataset:
   label_only: false
   resume_cache: true
 
+  report:
+    print_segments: true
+    print_labels: true
+    print_variants: true
+
+  action_filter:
+    enabled: true
+    # Remove zero-action dead time after semantic/gripper segmentation.
+    # By default, gripper command channels are ignored so an open/closed gripper
+    # value does not make a stationary frame count as meaningful motion.
+    ignore_gripper: true
+    norm_threshold: 0.000001
+    trim_leading_trailing: true
+    keep_context_sec: 0.15
+    min_active_frames: 1
+    min_active_ratio: 0.0
+    min_segment_sec_after_trim: 0.2
+
   segmentation:
+    # Rule-based segmentation is now an auxiliary/fallback signal. The VLM semantic
+    # splitter below should decide the final subtask boundaries when enabled.
     prefer_action_gripper: true
     open_threshold: 0.75
     closed_threshold: 0.25
@@ -37,6 +57,26 @@ split_label_dataset:
     motion_translation_threshold: 0.001
     motion_rotation_threshold: 0.005
 
+  semantic_segmentation:
+    enabled: true
+    # Keep false for safe dry-runs: --dry-run will not upload images to OpenRouter.
+    run_on_dry_run: false
+    fallback_to_gripper: true
+    # Use the VLM's segment-level labels directly instead of making another API call per segment.
+    use_segment_labels: true
+    relabel_segments: false
+    camera_keys:
+      - "observation.images.head_image"
+    sample_interval_sec: 2.0
+    max_sample_frames: 18
+    max_segments: 12
+    min_segment_sec: 1.0
+    boundary_padding_sec: 0.5
+    jpeg_quality: 85
+    max_tokens: 1800
+    repair_invalid_json: true
+    repair_max_tokens: 1800
+
   keyframes:
     head_camera_key: "observation.images.head_image"
     left_wrist_camera_key: "observation.images.left_wrist_image"
@@ -46,6 +86,24 @@ split_label_dataset:
 
   labeling:
     min_confidence: 0.55
+    # The script keeps task sentences short while preserving structured slots.
+    # Examples:
+    #   Left arm: pick up the yellow cube and place it in the black basket.
+    #   Right arm: place the blue package in the black basket.
+    #   Both arms: seal the black basket.
+    #
+    # Required slots:
+    #   arm: left arm | right arm | both arms | unknown
+    #   approach_direction / target_direction:
+    #     front | back | left | right | front-left | front-right |
+    #     back-left | back-right | center | up | down | unknown
+    #   action:
+    #     grasp | pick up | hold | move | place | release | push | pull |
+    #     align | insert | remove | open | close | seal | unseal | handover | manipulate
+    #   object_color/object_size/object_name and target_color/target_size/target_name:
+    #     free text, use unknown when not visually clear.
+    #   placement_relation:
+    #     in | inside | on | onto | under | over | next to | near | against | through | at
 
   language_augmentation:
     num_variants: 3
@@ -53,7 +111,7 @@ split_label_dataset:
 
   openrouter:
     # Set true only when you are ready to upload keyframes to OpenRouter.
-    enabled: false
+    enabled: true
     # Optional. Prefer env var OPENROUTER_API_KEY for shared configs; if set here,
     # do not commit your real key.
     api_key: ""
@@ -62,7 +120,7 @@ split_label_dataset:
     timeout_sec: 60
     temperature: 0.2
     max_tokens: 500
-    cache_path: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_subepisodes/openrouter_label_cache.jsonl"
+    cache_path: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/pick_4_and_seal_20260525_v01_subepisodes/openrouter_label_cache.jsonl"
     referer: "dual_arm_teleop"
     title: "dual_arm_teleop_split_label_dataset"
 

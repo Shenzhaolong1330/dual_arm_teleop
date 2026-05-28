@@ -42,6 +42,9 @@ class FrankaDualArmConfig(RobotConfig):
     go_home_rate_hz: float | None = None
 
     control_mode: str = "oculus"
+    # Public LeRobot feature contract. `franka_native` keeps this adapter's
+    # existing fields; `nero_compatible` exposes the Nero ACT/DP/DAgger schema.
+    schema_mode: str = "franka_native"
     debug: bool = True
 
     num_joints_per_arm: int = 7

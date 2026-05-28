@@ -12,17 +12,11 @@ Mirror mode:
 """
 
 from typing import Dict, Optional, Sequence
-import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from .oculus_reader.oculus_reader import OculusReader
 from .robot import Robot
-
-try:
-    from OneEuroFilter import OneEuroFilter
-except ImportError:
-    OneEuroFilter = None
 
 
 class OculusDualArmRobot(Robot):
@@ -31,13 +25,11 @@ class OculusDualArmRobot(Robot):
     
     Controls:
     - LG (Left Grip): Must be pressed to enable left action recording
-    - LTr (Left Trigger):  Controls left gripper  (0.0 = open, 1.0 = closed)
+    - LTr (Left Trigger):  Controls left gripper  (1.0 = open, 0.0 = closed)
     - RG (Right Grip): Must be pressed to enable right action recording
-    - RTr (Right Trigger): Controls right gripper (0.0 = open, 1.0 = closed)
+    - RTr (Right Trigger): Controls right gripper (1.0 = open, 0.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
-    - mirror_teleop: Swap controller-to-arm assignment and convert motion back
-      to the canonical robot frame for opposite-side operation
     - A button: Request robot reset
     
     Coordinate Systems:
@@ -67,24 +59,8 @@ class OculusDualArmRobot(Robot):
         right_pose_scaler: Sequence[float] = [1.0, 1.0],
         right_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
         action_smoothing_alpha: float = 0.35,
-        action_smoothing_method: str = "one_euro",
-        action_smoothing_freq: float = 30.0,
-        action_smoothing_min_cutoff: float = 1.2,
-        action_smoothing_beta: float = 0.4,
-        action_smoothing_d_cutoff: float = 1.0,
         mirror_teleop: bool = False,
     ):
-        smoothing_method = str(action_smoothing_method).strip().lower()
-        if smoothing_method not in {"one_euro", "ema", "none", "off", "raw"}:
-            raise ValueError(
-                "action_smoothing_method must be one of: one_euro, ema, none/off/raw"
-            )
-        if smoothing_method == "one_euro" and OneEuroFilter is None:
-            raise ImportError(
-                "action_smoothing_method='one_euro' requires the OneEuroFilter package. "
-                "Install it with `pip install oneeurofilter` or reinstall this project."
-            )
-
         self._oculus_reader = OculusReader(ip_address=ip)
         self._use_gripper = use_gripper
         self._mirror_teleop = bool(mirror_teleop)
@@ -105,21 +81,21 @@ class OculusDualArmRobot(Robot):
         self._right_prev_transform = None
         self._right_last_gripper_position = 1.0  # Default: open
 
-        # Smoothing state (6D delta pose for each arm)
-        self._action_smoothing_method = smoothing_method
+        # EMA smoothing state (6D delta pose for each arm)
         self._action_smoothing_alpha = float(action_smoothing_alpha)
         self._left_smoothed_delta = None
         self._right_smoothed_delta = None
-        self._one_euro_freq = float(action_smoothing_freq)
-        self._one_euro_min_cutoff = float(action_smoothing_min_cutoff)
-        self._one_euro_beta = float(action_smoothing_beta)
-        self._one_euro_d_cutoff = float(action_smoothing_d_cutoff)
-        self._left_delta_filters = None
-        self._right_delta_filters = None
         
         # Reset request
         self._reset_requested = False
-        self._prev_a_pressed = False
+        self._left_grip_pressed = False
+        self._right_grip_pressed = False
+        self._left_trigger_value = 0.0
+        self._right_trigger_value = 0.0
+        self._left_trigger_pressed = False
+        self._right_trigger_pressed = False
+        self._left_gripper_release_requested = False
+        self._right_gripper_release_requested = False
 
     def _ema_smooth(self, current: np.ndarray, prev: Optional[np.ndarray]) -> np.ndarray:
         """Apply EMA smoothing to a 6D delta vector."""
@@ -128,70 +104,9 @@ class OculusDualArmRobot(Robot):
             return current.copy()
         return alpha * current + (1.0 - alpha) * prev
 
-    def _make_one_euro_filter(self):
-        if OneEuroFilter is None:
-            raise ImportError(
-                "action_smoothing_method='one_euro' requires the OneEuroFilter package. "
-                "Install it with `pip install oneeurofilter` or reinstall this project."
-            )
-        return OneEuroFilter(
-            freq=self._one_euro_freq,
-            mincutoff=self._one_euro_min_cutoff,
-            beta=self._one_euro_beta,
-            dcutoff=self._one_euro_d_cutoff,
-        )
-
-    def _make_one_euro_filter_bank(self):
-        return [self._make_one_euro_filter() for _ in range(6)]
-
-    def _one_euro_smooth(
-        self,
-        current: np.ndarray,
-        filter_attr: str,
-        timestamp: float,
-    ) -> np.ndarray:
-        filters = getattr(self, filter_attr)
-        if filters is None:
-            filters = self._make_one_euro_filter_bank()
-            setattr(self, filter_attr, filters)
-
-        filtered = np.empty(6, dtype=float)
-        for idx, value in enumerate(current):
-            filtered[idx] = float(filters[idx](float(value), timestamp))
-        return filtered
-
-    def _smooth_delta(self, current: np.ndarray, side: str, timestamp: float) -> np.ndarray:
-        """Smooth a 6D delta vector for one arm."""
-        if self._action_smoothing_method in {"none", "off", "raw"}:
-            return current.copy()
-
-        smoothed_attr = f"_{side}_smoothed_delta"
-        if self._action_smoothing_method == "ema":
-            smoothed = self._ema_smooth(current, getattr(self, smoothed_attr))
-            setattr(self, smoothed_attr, smoothed.copy())
-            return smoothed
-
-        filter_attr = f"_{side}_delta_filters"
-        return self._one_euro_smooth(current, filter_attr, timestamp)
-
-    def _reset_smoothing(self, side: str) -> None:
-        setattr(self, f"_{side}_smoothed_delta", None)
-        setattr(self, f"_{side}_delta_filters", None)
-
     def _mirror_pose_delta(self, delta_pose: np.ndarray) -> np.ndarray:
         """Convert opposite-side operator motion back to the canonical robot frame."""
         return np.asarray(delta_pose, dtype=float) * self.MIRROR_ACTION_SIGNS
-
-    def _get_trigger_value(self, buttons: Dict[str, object], analog_key: str, bool_key: str) -> float:
-        value = buttons.get(analog_key, None)
-        if value is None:
-            return 1.0 if buttons.get(bool_key, False) else 0.0
-        if isinstance(value, (tuple, list)) and len(value) > 0:
-            return float(value[0])
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return 1.0 if buttons.get(bool_key, False) else 0.0
 
     def num_dofs(self) -> int:
         # Each arm: 6 DOF pose + 1 gripper = 7, total = 14
@@ -272,20 +187,26 @@ class OculusDualArmRobot(Robot):
              right_dx, right_dy, right_dz, right_drx, right_dry, right_drz]
         """
         transforms, buttons = self._oculus_reader.get_transformations_and_buttons()
-        timestamp = time.monotonic()
         
         # Check grip buttons (both must be pressed for action)
         lg_pressed = buttons.get('LG', False)
         rg_pressed = buttons.get('RG', False)
-        a_pressed = bool(buttons.get('A', False))
+        a_pressed = buttons.get('A', False)
+        left_release_requested = bool(buttons.get('Y', False))
+        right_release_requested = bool(buttons.get('B', False))
         
-        self._reset_requested = a_pressed and not self._prev_a_pressed
-        self._prev_a_pressed = a_pressed
+        self._reset_requested = bool(a_pressed)
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
         left_delta_out = np.zeros(6)
         right_delta_out = np.zeros(6)
+        left_trigger_value = 0.0
+        right_trigger_value = 0.0
+        left_trigger_pressed = False
+        right_trigger_pressed = False
+        left_gripper = self._left_last_gripper_position
+        right_gripper = self._right_last_gripper_position
         
         # ========== Left arm (left controller) ==========
         if 'l' in transforms:
@@ -294,14 +215,16 @@ class OculusDualArmRobot(Robot):
             if lg_pressed:
                 delta_left = self._compute_delta_pose(left_transform, self._left_prev_transform)
                 scaled_left = self._apply_scaling(delta_left, self._left_pose_scaler, self._left_channel_signs)
-                left_delta_out = self._smooth_delta(scaled_left, "left", timestamp)
+                smoothed_left = self._ema_smooth(scaled_left, self._left_smoothed_delta)
+                self._left_smoothed_delta = smoothed_left.copy()
+                left_delta_out = smoothed_left
                 self._left_prev_transform = left_transform.copy()
             else:
                 self._left_prev_transform = None
-                self._reset_smoothing("left")
+                self._left_smoothed_delta = None
         else:
             self._left_prev_transform = None
-            self._reset_smoothing("left")
+            self._left_smoothed_delta = None
         
         # ========== Right arm (right controller) ==========
         if 'r' in transforms:
@@ -310,24 +233,38 @@ class OculusDualArmRobot(Robot):
             if rg_pressed:
                 delta_right = self._compute_delta_pose(right_transform, self._right_prev_transform)
                 scaled_right = self._apply_scaling(delta_right, self._right_pose_scaler, self._right_channel_signs)
-                right_delta_out = self._smooth_delta(scaled_right, "right", timestamp)
+                smoothed_right = self._ema_smooth(scaled_right, self._right_smoothed_delta)
+                self._right_smoothed_delta = smoothed_right.copy()
+                right_delta_out = smoothed_right
                 self._right_prev_transform = right_transform.copy()
             else:
                 self._right_prev_transform = None
-                self._reset_smoothing("right")
+                self._right_smoothed_delta = None
         else:
             self._right_prev_transform = None
-            self._reset_smoothing("right")
+            self._right_smoothed_delta = None
         
         # ========== Gripper control ==========
         if self._use_gripper:
             # Left gripper: Left Trigger
-            lt_value = self._get_trigger_value(buttons, 'leftTrig', 'LTr')
+            left_trigger = buttons.get('leftTrig', (0.0,))
+            if isinstance(left_trigger, tuple) and len(left_trigger) > 0:
+                lt_value = left_trigger[0]
+            else:
+                lt_value = 0.0
+            left_trigger_value = float(lt_value)
+            left_trigger_pressed = bool(buttons.get('LTr', False)) or left_trigger_value > 0.05
             left_gripper = 1.0 - lt_value  # Invert: trigger pressed = closed (0.0)
             self._left_last_gripper_position = left_gripper
             
             # Right gripper: Right Trigger
-            rt_value = self._get_trigger_value(buttons, 'rightTrig', 'RTr')
+            right_trigger = buttons.get('rightTrig', (0.0,))
+            if isinstance(right_trigger, tuple) and len(right_trigger) > 0:
+                rt_value = right_trigger[0]
+            else:
+                rt_value = 0.0
+            right_trigger_value = float(rt_value)
+            right_trigger_pressed = bool(buttons.get('RTr', False)) or right_trigger_value > 0.05
             right_gripper = 1.0 - rt_value  # Invert: trigger pressed = closed (0.0)
             self._right_last_gripper_position = right_gripper
 
@@ -336,16 +273,39 @@ class OculusDualArmRobot(Robot):
                 self._mirror_pose_delta(right_delta_out),
                 self._mirror_pose_delta(left_delta_out),
             )
+            self._left_grip_pressed = bool(rg_pressed)
+            self._right_grip_pressed = bool(lg_pressed)
+            left_release_requested, right_release_requested = (
+                right_release_requested,
+                left_release_requested,
+            )
             if self._use_gripper:
                 left_gripper, right_gripper = right_gripper, left_gripper
+                left_trigger_value, right_trigger_value = right_trigger_value, left_trigger_value
+                left_trigger_pressed, right_trigger_pressed = (
+                    right_trigger_pressed,
+                    left_trigger_pressed,
+                )
+        else:
+            self._left_grip_pressed = bool(lg_pressed)
+            self._right_grip_pressed = bool(rg_pressed)
 
         action[0:6] = left_delta_out
         right_offset = dof_per_arm
         action[right_offset:right_offset + 6] = right_delta_out
         if self._use_gripper:
+            self._left_trigger_value = float(left_trigger_value)
+            self._right_trigger_value = float(right_trigger_value)
+            self._left_trigger_pressed = bool(left_trigger_pressed)
+            self._right_trigger_pressed = bool(right_trigger_pressed)
+            self._left_gripper_release_requested = bool(left_release_requested)
+            self._right_gripper_release_requested = bool(right_release_requested)
             action[6] = left_gripper
             action[13] = right_gripper
-        
+        else:
+            self._left_gripper_release_requested = bool(left_release_requested)
+            self._right_gripper_release_requested = bool(right_release_requested)
+
         return action
 
     def is_reset_requested(self) -> bool:
@@ -359,8 +319,10 @@ class OculusDualArmRobot(Robot):
         Returns dict with keys:
             left_delta_ee_pose.{x,y,z,rx,ry,rz}
             right_delta_ee_pose.{x,y,z,rx,ry,rz}
-            left_gripper_cmd_bin
-            right_gripper_cmd_bin
+            left_gripper_cmd
+            right_gripper_cmd
+            left_gripper_cmd_bin (legacy alias)
+            right_gripper_cmd_bin (legacy alias)
             reset_requested
         """
         action_data = self.get_action()
@@ -381,11 +343,31 @@ class OculusDualArmRobot(Robot):
         
         # Gripper positions
         if self._use_gripper:
-            obs_dict["left_gripper_cmd_bin"] = float(action_data[6])
-            obs_dict["right_gripper_cmd_bin"] = float(action_data[13])
+            left_gripper = float(action_data[6])
+            right_gripper = float(action_data[13])
+            # Provide both key names so old and new pipelines keep working.
+            obs_dict["left_gripper_cmd"] = left_gripper
+            obs_dict["right_gripper_cmd"] = right_gripper
+            obs_dict["left_gripper_cmd_bin"] = left_gripper
+            obs_dict["right_gripper_cmd_bin"] = right_gripper
+
         else:
+            obs_dict["left_gripper_cmd"] = None
+            obs_dict["right_gripper_cmd"] = None
             obs_dict["left_gripper_cmd_bin"] = None
             obs_dict["right_gripper_cmd_bin"] = None
+
+        obs_dict["left_grip_pressed"] = bool(self._left_grip_pressed)
+        obs_dict["right_grip_pressed"] = bool(self._right_grip_pressed)
+        obs_dict["is_expert_override"] = bool(
+            self._left_grip_pressed or self._right_grip_pressed
+        )
+        obs_dict["left_trigger_value"] = float(self._left_trigger_value)
+        obs_dict["right_trigger_value"] = float(self._right_trigger_value)
+        obs_dict["left_trigger_pressed"] = bool(self._left_trigger_pressed)
+        obs_dict["right_trigger_pressed"] = bool(self._right_trigger_pressed)
+        obs_dict["left_gripper_release_requested"] = bool(self._left_gripper_release_requested)
+        obs_dict["right_gripper_release_requested"] = bool(self._right_gripper_release_requested)
         
         # Reset request flag
         obs_dict["reset_requested"] = self._reset_requested
@@ -404,7 +386,6 @@ if __name__ == "__main__":
         left_channel_signs=[1, 1, 1, 1, 1, 1],
         right_pose_scaler=[0.5, 0.5],
         right_channel_signs=[1, 1, 1, 1, 1, 1],
-        mirror_teleop=False,
     )
     
     print("===== Oculus Dual-Arm Robot Test =====")

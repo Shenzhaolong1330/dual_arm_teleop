@@ -25,7 +25,7 @@ preprocess_dataset:
 
   # 2) Smooth noisy Cartesian command labels before writing the new dataset.
   action_smoothing:
-    enabled: true
+    enabled: false
     method: "median"      # one of: median, ema, median_ema
     median_window: 3      # odd number recommended
     ema_alpha: 0.35       # used by ema / median_ema

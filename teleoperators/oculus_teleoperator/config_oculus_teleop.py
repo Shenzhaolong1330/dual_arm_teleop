@@ -45,6 +45,11 @@ class OculusTeleopConfig(TeleoperatorConfig):
     # action remains expressed in the same robot-frame convention as normal.
     mirror_teleop: bool = False
 
+    # Mirror mode for operating while standing opposite the robot.
+    # When enabled, controller-to-arm assignment is swapped and pose deltas are
+    # mirrored back into the normal robot-frame convention.
+    mirror_teleop: bool = False
+
     use_ik: bool = False
     servo_time: float = 0.017
     visualize_placo: bool = True

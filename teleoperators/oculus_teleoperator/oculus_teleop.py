@@ -28,8 +28,8 @@ class OculusTeleop(Teleoperator):
     Controls:
     - LG (Left Grip):    Must be pressed to enable left arm action recording
     - RG (Right Grip):   Must be pressed to enable right arm action recording
-    - LTr (Left Trigger):  Controls left gripper  (0.0 = open, 1.0 = closed)
-    - RTr (Right Trigger): Controls right gripper (0.0 = open, 1.0 = closed)
+    - LTr (Left Trigger):  Controls left gripper  (1.0 = open, 0.0 = closed)
+    - RTr (Right Trigger): Controls right gripper (1.0 = open, 0.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
     - A button: Request robot reset
@@ -63,8 +63,8 @@ class OculusTeleop(Teleoperator):
         
         # Gripper commands
         if self.cfg.use_gripper:
-            features["left_gripper_cmd_bin"] = float
-            features["right_gripper_cmd_bin"] = float
+            features["left_gripper_cmd"] = float
+            features["right_gripper_cmd"] = float
         
         return features
     
@@ -88,11 +88,6 @@ class OculusTeleop(Teleoperator):
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
-            action_smoothing_method=self.cfg.action_smoothing_method,
-            action_smoothing_freq=self.cfg.action_smoothing_freq,
-            action_smoothing_min_cutoff=self.cfg.action_smoothing_min_cutoff,
-            action_smoothing_beta=self.cfg.action_smoothing_beta,
-            action_smoothing_d_cutoff=self.cfg.action_smoothing_d_cutoff,
             mirror_teleop=self.cfg.mirror_teleop,
         )
         
@@ -138,11 +133,29 @@ class OculusTeleop(Teleoperator):
         
         # Gripper commands
         if self.cfg.use_gripper:
-            action["left_gripper_cmd_bin"] = float(obs.get("left_gripper_cmd_bin", 1.0))
-            action["right_gripper_cmd_bin"] = float(obs.get("right_gripper_cmd_bin", 1.0))
+            # Accept both new and legacy key names to avoid key-mismatch regressions.
+            action["left_gripper_cmd"] = float(
+                obs.get("left_gripper_cmd", obs.get("left_gripper_cmd_bin", 1.0))
+            )
+            action["right_gripper_cmd"] = float(
+                obs.get("right_gripper_cmd", obs.get("right_gripper_cmd_bin", 1.0))
+            )
         
         # Reset request flag (for external use)
         action["reset_requested"] = obs.get("reset_requested", False)
+        for key in [
+            "left_grip_pressed",
+            "right_grip_pressed",
+            "is_expert_override",
+            "left_trigger_value",
+            "right_trigger_value",
+            "left_trigger_pressed",
+            "right_trigger_pressed",
+            "left_gripper_release_requested",
+            "right_gripper_release_requested",
+        ]:
+            if key in obs:
+                action[key] = obs[key]
         
         return action
     
@@ -176,7 +189,6 @@ if __name__ == "__main__":
         left_channel_signs=[1, 1, 1, 1, 1, 1],
         right_pose_scaler=[0.5, 0.5],
         right_channel_signs=[1, 1, 1, 1, 1, 1],
-        mirror_teleop=False,
     )
     
     teleop = OculusTeleop(config)
@@ -198,9 +210,9 @@ if __name__ == "__main__":
             reset_flag = " [RESET]" if action.get("reset_requested", False) else ""
             
             print(f"\rL: X={action['left_delta_ee_pose.x']:+.4f} Y={action['left_delta_ee_pose.y']:+.4f} "
-                  f"Z={action['left_delta_ee_pose.z']:+.4f} G={action['left_gripper_cmd_bin']:.2f} | "
+                  f"Z={action['left_delta_ee_pose.z']:+.4f} G={action['left_gripper_cmd']:.2f} | "
                   f"R: X={action['right_delta_ee_pose.x']:+.4f} Y={action['right_delta_ee_pose.y']:+.4f} "
-                  f"Z={action['right_delta_ee_pose.z']:+.4f} G={action['right_gripper_cmd_bin']:.2f}"
+                  f"Z={action['right_delta_ee_pose.z']:+.4f} G={action['right_gripper_cmd']:.2f}"
                   f"{reset_flag}    ", end="")
             
             time.sleep(0.01)

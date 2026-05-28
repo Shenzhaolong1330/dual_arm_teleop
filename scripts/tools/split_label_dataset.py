@@ -8,7 +8,9 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -72,6 +74,7 @@ class RawSegment:
     close_frames: dict[str, int] = field(default_factory=dict)
     open_frames: dict[str, int] = field(default_factory=dict)
     source_segments: list[dict[str, Any]] = field(default_factory=list)
+    semantic_label: dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
@@ -89,6 +92,56 @@ class LabelResult:
     needs_review: bool
     source: str
     error: str | None = None
+    arm: str = "unknown"
+    approach_direction: str = "unknown"
+    object_color: str = "unknown"
+    object_size: str = "unknown"
+    object_name: str = "object"
+    object_description: str = "unknown object"
+    action: str = "manipulate"
+    target_direction: str = "unknown"
+    target_color: str = "unknown"
+    target_size: str = "unknown"
+    target_name: str = "target"
+    target_description: str = "unknown target"
+    placement_relation: str = "at"
+
+
+ARM_VALUES = ["left arm", "right arm", "both arms", "unknown"]
+DIRECTION_VALUES = [
+    "front",
+    "back",
+    "left",
+    "right",
+    "front-left",
+    "front-right",
+    "back-left",
+    "back-right",
+    "center",
+    "up",
+    "down",
+    "unknown",
+]
+ACTION_VALUES = [
+    "grasp",
+    "pick up",
+    "hold",
+    "move",
+    "place",
+    "release",
+    "push",
+    "pull",
+    "align",
+    "insert",
+    "remove",
+    "open",
+    "close",
+    "seal",
+    "unseal",
+    "handover",
+    "manipulate",
+]
+RELATION_VALUES = ["in", "inside", "on", "onto", "under", "over", "next to", "near", "against", "through", "at"]
 
 
 def _load_config(path: Path) -> dict[str, Any]:
@@ -101,6 +154,73 @@ def _load_config(path: Path) -> dict[str, Any]:
 
 def _as_path_or_none(value: str | None) -> Path | None:
     return Path(value).expanduser() if value else None
+
+
+def _resolve_for_safety(path: Path) -> Path:
+    return path.expanduser().resolve(strict=False)
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = _resolve_for_safety(left)
+    right = _resolve_for_safety(right)
+    return left == right or left in right.parents or right in left.parents
+
+
+def _path_inside(path: Path, root: Path) -> bool:
+    path = _resolve_for_safety(path)
+    root = _resolve_for_safety(root)
+    return path == root or root in path.parents
+
+
+def _assert_output_root_is_separate_from_source(source: Any, cfg: dict[str, Any]) -> None:
+    output_cfg = cfg.get("output", {}) or {}
+    output_root = _as_path_or_none(output_cfg.get("root"))
+    if output_root is None:
+        if str(output_cfg.get("repo_id", "")).strip("/") == str(source.repo_id).strip("/"):
+            raise ValueError(
+                "Refusing to split in place: output.repo_id is the same as source.repo_id "
+                "and output.root is not set. Choose a separate output.root/repo_id."
+            )
+        return
+
+    source_root = _resolve_for_safety(Path(source.root))
+    if _paths_overlap(output_root, source_root):
+        raise ValueError(
+            "Refusing to split in place: output.root overlaps source.root. "
+            f"source.root={source_root} output.root={_resolve_for_safety(output_root)}"
+        )
+
+
+def _assert_write_path_outside_source(source: Any, path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    source_root = _resolve_for_safety(Path(source.root))
+    if _path_inside(path, source_root):
+        raise ValueError(
+            f"Refusing to write {label} inside the source dataset. "
+            f"source.root={source_root} {label}={_resolve_for_safety(path)}"
+        )
+
+
+def _assert_no_source_writes(
+    source: Any,
+    cfg: dict[str, Any],
+    *,
+    write_dataset: bool,
+    dry_run: bool,
+    semantic_on_dry_run: bool,
+) -> None:
+    if write_dataset:
+        _assert_output_root_is_separate_from_source(source, cfg)
+
+    if not dry_run:
+        _assert_write_path_outside_source(source, _manifest_dir(cfg), "manifests.dir")
+        modality_path = _as_path_or_none((cfg.get("vla_export", {}) or {}).get("starvla_modality_path"))
+        _assert_write_path_outside_source(source, modality_path, "vla_export.starvla_modality_path")
+
+    if not dry_run or semantic_on_dry_run:
+        cache_path = _as_path_or_none((cfg.get("openrouter", {}) or {}).get("cache_path"))
+        _assert_write_path_outside_source(source, cache_path, "openrouter.cache_path")
 
 
 def _require_lerobot() -> None:
@@ -214,6 +334,118 @@ def _motion_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, An
     return (translation_norm >= float(split_cfg.get("motion_translation_threshold", 0.001))) | (
         rotation_norm >= float(split_cfg.get("motion_rotation_threshold", 0.005))
     )
+
+
+def _action_filter_indices(action_names: list[str], action_dim: int, cfg: dict[str, Any]) -> list[int]:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    configured = filter_cfg.get("indices")
+    if configured is not None:
+        indices = [int(idx) for idx in configured]
+        return [idx for idx in indices if 0 <= idx < action_dim]
+
+    indices = list(range(action_dim))
+    if filter_cfg.get("ignore_gripper", True) and action_names:
+        non_gripper = [idx for idx, name in enumerate(action_names[:action_dim]) if "gripper" not in name.lower()]
+        if non_gripper:
+            indices = non_gripper
+    return indices
+
+
+def _action_activity_mask(actions: np.ndarray | None, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray | None:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    if actions is None or actions.size == 0:
+        return None
+
+    actions = np.asarray(actions, dtype=np.float32)
+    if actions.ndim == 1:
+        actions = actions[:, None]
+    indices = _action_filter_indices(action_names, int(actions.shape[1]), cfg)
+    if not indices:
+        return None
+
+    selected = actions[:, indices]
+    norms = np.linalg.norm(selected, axis=1)
+    return norms > float(filter_cfg.get("norm_threshold", 1e-6))
+
+
+def _filter_segments_by_action(
+    segments: list[RawSegment],
+    actions: np.ndarray | None,
+    action_names: list[str],
+    cfg: dict[str, Any],
+) -> tuple[list[RawSegment], dict[str, int]]:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    stats = {
+        "before": len(segments),
+        "after": len(segments),
+        "dropped_zero_action": 0,
+        "trimmed": 0,
+    }
+    if not filter_cfg.get("enabled", True) or not segments:
+        return segments, stats
+
+    activity = _action_activity_mask(actions, action_names, cfg)
+    if activity is None:
+        return segments, stats
+
+    fps = float(cfg.get("_fps", 30))
+    keep_context = max(0, int(round(float(filter_cfg.get("keep_context_sec", 0.15)) * fps)))
+    min_active_frames = max(0, int(filter_cfg.get("min_active_frames", 1)))
+    min_active_ratio = float(filter_cfg.get("min_active_ratio", 0.0))
+    min_len = max(1, int(round(float(filter_cfg.get("min_segment_sec_after_trim", 0.2)) * fps)))
+    trim_edges = bool(filter_cfg.get("trim_leading_trailing", True))
+
+    filtered: list[RawSegment] = []
+    for segment in segments:
+        start = max(0, min(len(activity), int(segment.start)))
+        end = max(start, min(len(activity), int(segment.end)))
+        if end <= start:
+            stats["dropped_zero_action"] += 1
+            continue
+
+        local_active = activity[start:end]
+        active_indices = np.flatnonzero(local_active)
+        active_count = int(active_indices.size)
+        active_ratio = active_count / max(1, end - start)
+        if active_count < min_active_frames or active_ratio < min_active_ratio:
+            stats["dropped_zero_action"] += 1
+            continue
+
+        if trim_edges:
+            new_start = max(start, start + int(active_indices[0]) - keep_context)
+            new_end = min(end, start + int(active_indices[-1]) + 1 + keep_context)
+        else:
+            new_start, new_end = start, end
+
+        if new_end - new_start < min_len:
+            stats["dropped_zero_action"] += 1
+            continue
+
+        if new_start != segment.start or new_end != segment.end:
+            stats["trimmed"] += 1
+            segment.source_segments.append(
+                {
+                    "source": "action_filter",
+                    "original_start": int(segment.start),
+                    "original_end": int(segment.end),
+                    "trimmed_start": int(new_start),
+                    "trimmed_end": int(new_end),
+                    "active_frames": active_count,
+                    "active_ratio": active_ratio,
+                }
+            )
+            segment.start = int(new_start)
+            segment.end = int(new_end)
+            segment.core_start = max(segment.start, min(segment.end - 1, int(segment.core_start)))
+            segment.core_end = max(segment.core_start, min(segment.end - 1, int(segment.core_end)))
+        filtered.append(segment)
+
+    for idx, segment in enumerate(filtered):
+        segment.segment_id = idx
+        segment.stage_id = f"episode_{segment.parent_episode:06d}_stage_{idx:03d}"
+
+    stats["after"] = len(filtered)
+    return filtered, stats
 
 
 def _stable_state_events(
@@ -470,15 +702,15 @@ def _template_instruction(segment: RawSegment, parent_task: str, total_segments:
         "left": "left arm",
         "right": "right arm",
         "both": "both arms",
-        "motion": "robot",
+        "motion": "unknown",
     }.get(segment.active_arm, segment.active_arm)
     index_text = f"subtask {segment.segment_id + 1} of {max(total_segments, 1)}"
     parent_task = parent_task or "the long-horizon task"
-    canonical = f"Use the {arm_text} to complete {index_text} for: {parent_task}."
+    canonical = f"{_arm_prefix(arm_text)}: manipulate the object."
     variants = [
-        f"Perform {index_text} of the task: {parent_task}.",
-        f"Continue the manipulation with the {arm_text} for {index_text}.",
-        f"Execute this grasp-and-release step toward: {parent_task}.",
+        f"Use the {arm_text} to perform {index_text} for: {parent_task}.",
+        f"Use the {arm_text} to continue the manipulation step for: {parent_task}.",
+        f"Use the {arm_text} to complete this subtask toward: {parent_task}.",
     ]
     return LabelResult(
         canonical_instruction=canonical,
@@ -489,7 +721,169 @@ def _template_instruction(segment: RawSegment, parent_task: str, total_segments:
         variants=variants,
         needs_review=True,
         source="template",
+        arm=arm_text if arm_text in ARM_VALUES else "unknown",
     )
+
+
+def _field(raw: dict[str, Any], key: str, fallback: str = "unknown") -> str:
+    value = raw.get(key, fallback)
+    value = str(value).strip().lower()
+    return value or fallback
+
+
+def _enum_field(raw: dict[str, Any], key: str, allowed: list[str], fallback: str = "unknown") -> str:
+    value = _field(raw, key, fallback)
+    aliases = {
+        "left": "left arm",
+        "right": "right arm",
+        "both": "both arms",
+        "dual": "both arms",
+        "two arms": "both arms",
+        "centre": "center",
+        "middle": "center",
+        "pickup": "pick up",
+        "pick": "pick up",
+        "grab": "grasp",
+        "put": "place",
+    }
+    value = aliases.get(value, value)
+    return value if value in allowed else fallback
+
+
+def _description_from_parts(color: str, size: str, name: str, fallback: str) -> str:
+    parts = [part for part in [size, color, name] if part and part != "unknown"]
+    return " ".join(parts) if parts else fallback
+
+
+def _strip_articles(text: str) -> str:
+    text = re.sub(r"\s+", " ", str(text).strip().lower())
+    text = re.sub(r"^(?:the|a|an)\s+", "", text)
+    text = re.sub(r"^(?:the|a|an)\s+", "", text)
+    return text or "unknown"
+
+
+def _noun_phrase(text: str, fallback: str) -> str:
+    text = _strip_articles(text)
+    if text == "unknown" or not text:
+        return f"the {fallback}"
+    return f"the {text}"
+
+
+def _arm_prefix(arm: str) -> str:
+    arm = str(arm).strip().lower()
+    if arm == "left arm":
+        return "Left arm"
+    if arm == "right arm":
+        return "Right arm"
+    if arm == "both arms":
+        return "Both arms"
+    return "Robot"
+
+
+def _cap_action(action: str) -> str:
+    action = str(action).strip().lower() or "manipulate"
+    return action[:1].upper() + action[1:]
+
+
+def _direction_phrase(direction: str, prefix: str) -> str:
+    direction = str(direction).strip().lower()
+    if not direction or direction == "unknown":
+        return ""
+    return f" {prefix} the {direction}"
+
+
+def _place_phrase(relation: str, target: str, target_direction: str) -> str:
+    return f"{relation} {target}{_direction_phrase(target_direction, 'at')}"
+
+
+def _canonical_from_fields(fields: dict[str, str]) -> str:
+    prefix = _arm_prefix(fields["arm"])
+    obj = _noun_phrase(fields["object_description"], "object")
+    target = _noun_phrase(fields["target_description"], "target")
+    action = fields["action"]
+    relation = fields["placement_relation"]
+    from_direction = _direction_phrase(fields["approach_direction"], "from")
+    place = _place_phrase(relation, target, fields["target_direction"])
+
+    if action in {"pick up", "grasp", "hold"}:
+        return f"{prefix}: pick up {obj}{from_direction} and place it {place}."
+    if action in {"place", "release"}:
+        return f"{prefix}: place {obj} {place}."
+    if action in {"seal", "close", "open", "unseal", "align", "insert", "remove", "push", "pull"}:
+        if target != obj:
+            return f"{prefix}: {action} {obj} {relation} {target}{_direction_phrase(fields['target_direction'], 'at')}."
+        return f"{prefix}: {action} {obj}{from_direction}."
+    if action == "handover":
+        return f"{prefix}: hand over {obj}{from_direction}."
+    if action == "move":
+        return f"{prefix}: move {obj} {place}."
+    return f"{prefix}: manipulate {obj}{from_direction}."
+
+
+def _variants_from_fields(fields: dict[str, str]) -> list[str]:
+    prefix = _arm_prefix(fields["arm"])
+    obj = _noun_phrase(fields["object_description"], "object")
+    target = _noun_phrase(fields["target_description"], "target")
+    action = fields["action"]
+    relation = fields["placement_relation"]
+    place = _place_phrase(relation, target, fields["target_direction"])
+
+    if action in {"pick up", "grasp", "hold"}:
+        return [
+            _canonical_from_fields(fields),
+            f"{prefix}: move {obj} {place}.",
+            f"{prefix}: put {obj} {place}.",
+        ]
+    if action in {"seal", "close", "open", "unseal"}:
+        return [
+            _canonical_from_fields(fields),
+            f"{prefix}: {_cap_action(action).lower()} {target}.",
+            f"{prefix}: finish {_cap_action(action).lower()}ing {target}.",
+        ]
+    return [
+        _canonical_from_fields(fields),
+        f"{prefix}: {_cap_action(action).lower()} {obj}.",
+        f"{prefix}: move {obj} {place}.",
+    ]
+
+
+def _normalize_language_fields(raw: dict[str, Any], fallback: LabelResult) -> dict[str, str]:
+    arm = _enum_field(raw, "arm", ARM_VALUES, fallback.arm)
+    approach_direction = _enum_field(raw, "approach_direction", DIRECTION_VALUES, fallback.approach_direction)
+    object_color = _field(raw, "object_color", fallback.object_color)
+    object_size = _field(raw, "object_size", fallback.object_size)
+    object_name = _field(raw, "object_name", fallback.object_name)
+    object_description = str(raw.get("object_description") or "").strip().lower()
+    if not object_description:
+        object_description = _description_from_parts(
+            object_color, object_size, object_name, fallback.object_description
+        )
+    action = _enum_field(raw, "action", ACTION_VALUES, fallback.action)
+    target_direction = _enum_field(raw, "target_direction", DIRECTION_VALUES, fallback.target_direction)
+    target_color = _field(raw, "target_color", fallback.target_color)
+    target_size = _field(raw, "target_size", fallback.target_size)
+    target_name = _field(raw, "target_name", fallback.target_name)
+    target_description = str(raw.get("target_description") or "").strip().lower()
+    if not target_description:
+        target_description = _description_from_parts(
+            target_color, target_size, target_name, fallback.target_description
+        )
+    placement_relation = _enum_field(raw, "placement_relation", RELATION_VALUES, fallback.placement_relation)
+    return {
+        "arm": arm,
+        "approach_direction": approach_direction,
+        "object_color": object_color,
+        "object_size": object_size,
+        "object_name": object_name,
+        "object_description": object_description,
+        "action": action,
+        "target_direction": target_direction,
+        "target_color": target_color,
+        "target_size": target_size,
+        "target_name": target_name,
+        "target_description": target_description,
+        "placement_relation": placement_relation,
+    }
 
 
 def _normalize_label(raw: dict[str, Any], fallback: LabelResult, min_confidence: float) -> LabelResult:
@@ -506,15 +900,26 @@ def _normalize_label(raw: dict[str, Any], fallback: LabelResult, min_confidence:
     except (TypeError, ValueError):
         confidence = 0.0
 
+    language_fields = _normalize_language_fields(raw, fallback)
+    has_structured_fields = any(key in raw for key in language_fields)
+    canonical_instruction = (
+        _canonical_from_fields(language_fields)
+        if has_structured_fields
+        else str(raw.get("canonical_instruction") or fallback.canonical_instruction).strip()
+    )
+    if has_structured_fields:
+        variants = _variants_from_fields(language_fields)
+
     label = LabelResult(
-        canonical_instruction=str(raw.get("canonical_instruction") or fallback.canonical_instruction).strip(),
+        canonical_instruction=canonical_instruction,
         stage_label=str(raw.get("stage_label") or fallback.stage_label).strip(),
-        object=str(raw.get("object") or fallback.object).strip(),
-        target=str(raw.get("target") or fallback.target).strip(),
+        object=str(raw.get("object") or raw.get("object_description") or fallback.object).strip(),
+        target=str(raw.get("target") or raw.get("target_description") or fallback.target).strip(),
         confidence=confidence,
         variants=variants,
         needs_review=bool(raw.get("needs_review", False)) or confidence < min_confidence,
         source="openrouter",
+        **language_fields,
     )
     if not label.canonical_instruction:
         return fallback
@@ -663,6 +1068,296 @@ def _collect_keyframe_images(
     return images, manifest
 
 
+def _semantic_camera_keys(source: Any, cfg: dict[str, Any]) -> list[str]:
+    sem_cfg = cfg.get("semantic_segmentation", {}) or {}
+    key_cfg = cfg.get("keyframes", {}) or {}
+    available = set(getattr(source.meta, "camera_keys", [])) or {
+        key for key, feature in source.features.items() if feature.get("dtype") in ("image", "video")
+    }
+    configured = sem_cfg.get("camera_keys")
+    if configured == "all":
+        keys = sorted(available)
+    elif configured:
+        keys = [str(key) for key in configured]
+    else:
+        keys = [key_cfg.get("head_camera_key", "observation.images.head_image")]
+    return [key for key in dict.fromkeys(keys) if key in available]
+
+
+def _semantic_sample_local_indices(episode_len: int, cfg: dict[str, Any]) -> list[int]:
+    if episode_len <= 0:
+        return []
+    sem_cfg = cfg.get("semantic_segmentation", {}) or {}
+    fps = float(cfg.get("_fps", 30))
+    max_frames = max(1, int(sem_cfg.get("max_sample_frames", 18)))
+    interval = max(1, int(round(float(sem_cfg.get("sample_interval_sec", 2.0)) * fps)))
+
+    indices = list(range(0, episode_len, interval))
+    if not indices or indices[-1] != episode_len - 1:
+        indices.append(episode_len - 1)
+    if len(indices) > max_frames:
+        indices = sorted({int(round(v)) for v in np.linspace(0, episode_len - 1, max_frames)})
+    return [max(0, min(episode_len - 1, int(idx))) for idx in indices]
+
+
+def _collect_episode_overview_images(
+    source: Any,
+    episode_start: int,
+    episode_len: int,
+    cfg: dict[str, Any],
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    sem_cfg = cfg.get("semantic_segmentation", {}) or {}
+    key_cfg = cfg.get("keyframes", {}) or {}
+    camera_keys = _semantic_camera_keys(source, cfg)
+    local_indices = _semantic_sample_local_indices(episode_len, cfg)
+    quality = int(sem_cfg.get("jpeg_quality", key_cfg.get("jpeg_quality", 85)))
+
+    images: list[dict[str, str]] = []
+    manifest: dict[str, Any] = {
+        "local_indices": local_indices,
+        "source_indices": [int(episode_start + idx) for idx in local_indices],
+        "camera_keys": camera_keys,
+        "hashes": [],
+    }
+    for local_idx in local_indices:
+        source_idx = int(episode_start + local_idx)
+        item = source[source_idx]
+        for camera_key in camera_keys:
+            if camera_key not in item:
+                continue
+            image_bytes = _image_to_jpeg_bytes(item[camera_key], source.features[camera_key], quality)
+            digest = hashlib.sha256(image_bytes).hexdigest()
+            role = f"overview_frame_{local_idx:06d}"
+            manifest["hashes"].append(
+                {
+                    "role": role,
+                    "camera_key": camera_key,
+                    "local_frame": int(local_idx),
+                    "source_index": int(source_idx),
+                    "sha256": digest,
+                }
+            )
+            images.append(
+                {
+                    "role": role,
+                    "camera_key": camera_key,
+                    "local_frame": str(local_idx),
+                    "source_index": str(source_idx),
+                    "sha256": digest,
+                    "data_url": "data:image/jpeg;base64,"
+                    + base64.b64encode(image_bytes).decode("ascii"),
+                }
+            )
+    return images, manifest
+
+
+def _auxiliary_segments_payload(segments: list[RawSegment]) -> list[dict[str, Any]]:
+    return [
+        {
+            "active_arm": segment.active_arm,
+            "start_frame": int(segment.start),
+            "end_frame": int(segment.end),
+            "core_start_frame": int(segment.core_start),
+            "core_end_frame": int(segment.core_end),
+            "close_frames": segment.close_frames,
+            "open_frames": segment.open_frames,
+        }
+        for segment in segments
+    ]
+
+
+def _frame_from_semantic_item(
+    item: dict[str, Any],
+    *,
+    frame_keys: tuple[str, ...],
+    time_keys: tuple[str, ...],
+    fps: float,
+    default: int,
+) -> int:
+    for key in frame_keys:
+        if key in item and item[key] is not None:
+            return int(round(float(item[key])))
+    for key in time_keys:
+        if key in item and item[key] is not None:
+            return int(round(float(item[key]) * fps))
+    return int(default)
+
+
+def _normalize_semantic_segments(
+    raw: dict[str, Any] | list[Any],
+    parent_episode: int,
+    episode_len: int,
+    cfg: dict[str, Any],
+) -> list[RawSegment]:
+    raw_segments = raw.get("segments") if isinstance(raw, dict) else raw
+    if not isinstance(raw_segments, list):
+        return []
+
+    sem_cfg = cfg.get("semantic_segmentation", {}) or {}
+    fps = float(cfg.get("_fps", 30))
+    min_len = max(1, int(round(float(sem_cfg.get("min_segment_sec", 1.0)) * fps)))
+    pad = max(0, int(round(float(sem_cfg.get("boundary_padding_sec", 0.0)) * fps)))
+    valid_arms = {"left", "right", "both"}
+
+    segments: list[RawSegment] = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        raw_start = _frame_from_semantic_item(
+            item,
+            frame_keys=("start_frame", "start"),
+            time_keys=("start_time_sec", "start_sec"),
+            fps=fps,
+            default=0,
+        )
+        raw_end = _frame_from_semantic_item(
+            item,
+            frame_keys=("end_frame", "end"),
+            time_keys=("end_time_sec", "end_sec"),
+            fps=fps,
+            default=episode_len,
+        )
+        raw_start = max(0, min(episode_len - 1, raw_start))
+        raw_end = max(raw_start + 1, min(episode_len, raw_end))
+
+        start = max(0, raw_start - pad)
+        end = min(episode_len, raw_end + pad)
+        if end - start < min_len:
+            continue
+
+        core_start = _frame_from_semantic_item(
+            item,
+            frame_keys=("core_start_frame",),
+            time_keys=("core_start_time_sec",),
+            fps=fps,
+            default=raw_start,
+        )
+        core_end = _frame_from_semantic_item(
+            item,
+            frame_keys=("core_end_frame",),
+            time_keys=("core_end_time_sec",),
+            fps=fps,
+            default=raw_end - 1,
+        )
+        core_start = max(start, min(end - 1, core_start))
+        core_end = max(core_start, min(end - 1, core_end))
+
+        active_arm = str(item.get("active_arm", "both")).strip().lower()
+        if active_arm not in valid_arms:
+            active_arm = "both"
+
+        semantic_label = {
+            "canonical_instruction": item.get("canonical_instruction", ""),
+            "stage_label": item.get("stage_label", "semantic_subtask"),
+            "object": item.get("object", "unknown"),
+            "target": item.get("target", "unknown"),
+            "confidence": item.get("confidence", 0.0),
+            "variants": item.get("variants", []),
+            "needs_review": item.get("needs_review", False),
+            "arm": item.get("arm", item.get("active_arm", "unknown")),
+            "approach_direction": item.get("approach_direction", "unknown"),
+            "object_color": item.get("object_color", "unknown"),
+            "object_size": item.get("object_size", "unknown"),
+            "object_name": item.get("object_name", item.get("object", "object")),
+            "object_description": item.get("object_description", item.get("object", "unknown object")),
+            "action": item.get("action", "manipulate"),
+            "target_direction": item.get("target_direction", "unknown"),
+            "target_color": item.get("target_color", "unknown"),
+            "target_size": item.get("target_size", "unknown"),
+            "target_name": item.get("target_name", item.get("target", "target")),
+            "target_description": item.get("target_description", item.get("target", "unknown target")),
+            "placement_relation": item.get("placement_relation", "at"),
+        }
+        segments.append(
+            RawSegment(
+                parent_episode=parent_episode,
+                segment_id=-1,
+                stage_id="",
+                active_arm=active_arm,
+                start=start,
+                end=end,
+                core_start=core_start,
+                core_end=core_end,
+                source_segments=[
+                    {
+                        "source": "vlm_semantic_segmentation",
+                        "active_arm": active_arm,
+                        "start_frame": raw_start,
+                        "end_frame": raw_end,
+                        "reasoning": str(item.get("reasoning", "")),
+                    }
+                ],
+                semantic_label=semantic_label,
+            )
+        )
+
+    segments = sorted(segments, key=lambda seg: (seg.start, seg.end))
+    for idx, segment in enumerate(segments):
+        segment.segment_id = idx
+        segment.stage_id = f"episode_{parent_episode:06d}_stage_{idx:03d}"
+    return segments
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, dict):
+        return json.dumps(content, ensure_ascii=False)
+    if isinstance(content, list):
+        return "".join(
+            str(part.get("text", "")) if isinstance(part, dict) else str(part)
+            for part in content
+        )
+    return str(content)
+
+
+def _strip_json_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+def _extract_json_candidate(text: str) -> str:
+    text = _strip_json_fences(text)
+    if not text:
+        return text
+
+    object_start = text.find("{")
+    object_end = text.rfind("}")
+    if 0 <= object_start < object_end:
+        return text[object_start : object_end + 1]
+
+    array_start = text.find("[")
+    array_end = text.rfind("]")
+    if 0 <= array_start < array_end:
+        return text[array_start : array_end + 1]
+
+    return text
+
+
+def _parse_json_content(content: Any, *, context: str) -> dict[str, Any]:
+    if isinstance(content, dict):
+        return content
+
+    text = _message_content_to_text(content)
+    candidate = _extract_json_candidate(text)
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        no_trailing_commas = re.sub(r",(\s*[}\]])", r"\1", candidate)
+        if no_trailing_commas != candidate:
+            try:
+                return json.loads(no_trailing_commas)
+            except json.JSONDecodeError:
+                pass
+
+        preview = candidate[:1200].replace("\n", "\\n")
+        raise ValueError(
+            f"{context} returned invalid JSON: {exc.msg} at line {exc.lineno} "
+            f"column {exc.colno} char {exc.pos}. raw_preview={preview}"
+        ) from exc
+
+
 class JsonlCache:
     def __init__(self, path: Path | None, *, resume: bool):
         self.path = path
@@ -728,6 +1423,56 @@ class OpenRouterLabeler:
         if not ({"response_format", "structured_outputs"} & supported):
             logger.warning("[LABEL] Model %s may not support JSON schema output.", self.model)
 
+    def segment_episode(
+        self,
+        *,
+        parent_episode: int,
+        parent_task: str,
+        episode_len: int,
+        auxiliary_segments: list[RawSegment],
+        overview_images: list[dict[str, str]],
+    ) -> list[RawSegment]:
+        sem_cfg = self.cfg.get("semantic_segmentation", {}) or {}
+        if not sem_cfg.get("enabled", False):
+            return []
+        if not self.enabled or not self.api_key:
+            return []
+        if not overview_images:
+            logger.warning("[SEG] No overview images available for semantic segmentation.")
+            return []
+
+        cache_key = self._semantic_cache_key(parent_episode, parent_task, episode_len, auxiliary_segments, overview_images)
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            cached_segments = cached.get("semantic_segments") if cached else None
+            if cached_segments is not None:
+                segments = _normalize_semantic_segments(cached_segments, parent_episode, episode_len, self.cfg)
+                if segments:
+                    return segments
+
+        try:
+            raw_segments = self._request_semantic_segments(
+                parent_episode=parent_episode,
+                parent_task=parent_task,
+                episode_len=episode_len,
+                auxiliary_segments=auxiliary_segments,
+                overview_images=overview_images,
+            )
+            segments = _normalize_semantic_segments(raw_segments, parent_episode, episode_len, self.cfg)
+            if self.cache is not None:
+                self.cache.append(
+                    cache_key,
+                    {
+                        "semantic_segments": raw_segments,
+                        "parent_episode": parent_episode,
+                        "created_at": time.time(),
+                    },
+                )
+            return segments
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[SEG] OpenRouter semantic segmentation failed for episode=%s: %s", parent_episode, exc)
+            return []
+
     def label(
         self,
         segment: RawSegment,
@@ -736,6 +1481,15 @@ class OpenRouterLabeler:
         images: list[dict[str, str]],
     ) -> LabelResult:
         fallback = _template_instruction(segment, parent_task, total_segments)
+        sem_cfg = self.cfg.get("semantic_segmentation", {}) or {}
+        if (
+            segment.semantic_label
+            and sem_cfg.get("use_segment_labels", True)
+            and not sem_cfg.get("relabel_segments", False)
+        ):
+            label = _normalize_label(segment.semantic_label, fallback, self.min_confidence)
+            label.source = "openrouter_semantic_segmentation"
+            return label
         if not self.enabled:
             return fallback
         if not self.api_key:
@@ -774,8 +1528,29 @@ class OpenRouterLabeler:
             )
             return fallback
 
+    def _semantic_cache_key(
+        self,
+        parent_episode: int,
+        parent_task: str,
+        episode_len: int,
+        auxiliary_segments: list[RawSegment],
+        overview_images: list[dict[str, str]],
+    ) -> str:
+        payload = {
+            "type": "semantic_segmentation",
+            "language_schema_version": "slot_v2",
+            "model": self.model,
+            "parent_episode": parent_episode,
+            "parent_task": parent_task,
+            "episode_len": episode_len,
+            "auxiliary_segments": _auxiliary_segments_payload(auxiliary_segments),
+            "image_hashes": [image["sha256"] for image in overview_images],
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
     def _cache_key(self, segment: RawSegment, parent_task: str, images: list[dict[str, str]]) -> str:
         payload = {
+            "language_schema_version": "slot_v2",
             "model": self.model,
             "parent_task": parent_task,
             "segment": {
@@ -790,17 +1565,284 @@ class OpenRouterLabeler:
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
+    def _request_semantic_segments(
+        self,
+        *,
+        parent_episode: int,
+        parent_task: str,
+        episode_len: int,
+        auxiliary_segments: list[RawSegment],
+        overview_images: list[dict[str, str]],
+    ) -> dict[str, Any]:
+        sem_cfg = self.cfg.get("semantic_segmentation", {}) or {}
+        max_segments = max(1, int(sem_cfg.get("max_segments", 12)))
+        sample_metadata = [
+            {
+                "role": image["role"],
+                "local_frame": int(image["local_frame"]),
+                "camera_key": image["camera_key"],
+            }
+            for image in overview_images
+        ]
+        auxiliary = _auxiliary_segments_payload(auxiliary_segments)
+
+        content: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "You are segmenting a long dual-arm robot manipulation episode into semantic subtasks. "
+                    "Use the chronological overview images as the primary evidence. Gripper close/open and "
+                    "motion segments are only auxiliary hints; if the visual task semantics disagree with "
+                    "the gripper heuristic, trust the visual semantics.\n"
+                    f"Parent task: {parent_task or 'unknown'}\n"
+                    f"Parent episode: {parent_episode}\n"
+                    f"Episode length in local frames: {episode_len}\n"
+                    "Frame numbers are local to the episode. `start_frame` is inclusive and `end_frame` is exclusive. "
+                    "Create one segment per meaningful subtask, such as moving a specific object, placing it at "
+                    "a target, sealing/closing, handing off between arms, or coordinated dual-arm manipulation. "
+                    "Do not split solely because the gripper opened or closed.\n"
+                    "For every segment, fill the structured language slots first: arm, approach_direction, "
+                    "object_color, object_size, object_name, action, target_direction, target_color, "
+                    "target_size, target_name, and placement_relation. "
+                    "Use `unknown` when an attribute is not visually clear. "
+                    "Keep canonical_instruction short and imperative, for example: "
+                    "`Left arm: pick up the yellow cube and place it in the black basket.` "
+                    "`Right arm: place the blue package in the black basket.` "
+                    "`Both arms: seal the black basket.` "
+                    "Use generic object or target names only when the images do not support a specific name.\n"
+                    f"Sampled frames: {json.dumps(sample_metadata, ensure_ascii=False)}\n"
+                    f"Auxiliary gripper/motion segments: {json.dumps(auxiliary, ensure_ascii=False)}"
+                ),
+            }
+        ]
+        for image in overview_images:
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image["data_url"],
+                    },
+                }
+            )
+
+        segment_schema = {
+            "type": "object",
+            "properties": {
+                "start_frame": {"type": "integer"},
+                "end_frame": {"type": "integer"},
+                "core_start_frame": {"type": "integer"},
+                "core_end_frame": {"type": "integer"},
+                "active_arm": {"type": "string", "enum": ["left", "right", "both"]},
+                "arm": {"type": "string", "enum": ARM_VALUES},
+                "approach_direction": {"type": "string", "enum": DIRECTION_VALUES},
+                "object_color": {"type": "string"},
+                "object_size": {"type": "string"},
+                "object_name": {"type": "string"},
+                "object_description": {"type": "string"},
+                "action": {"type": "string", "enum": ACTION_VALUES},
+                "target_direction": {"type": "string", "enum": DIRECTION_VALUES},
+                "target_color": {"type": "string"},
+                "target_size": {"type": "string"},
+                "target_name": {"type": "string"},
+                "target_description": {"type": "string"},
+                "placement_relation": {"type": "string", "enum": RELATION_VALUES},
+                "stage_label": {"type": "string"},
+                "canonical_instruction": {"type": "string"},
+                "object": {"type": "string"},
+                "target": {"type": "string"},
+                "confidence": {"type": "number"},
+                "variants": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "minItems": 3,
+                    "maxItems": 3,
+                },
+                "needs_review": {"type": "boolean"},
+                "reasoning": {"type": "string"},
+            },
+            "required": [
+                "start_frame",
+                "end_frame",
+                "core_start_frame",
+                "core_end_frame",
+                "active_arm",
+                "arm",
+                "approach_direction",
+                "object_color",
+                "object_size",
+                "object_name",
+                "object_description",
+                "action",
+                "target_direction",
+                "target_color",
+                "target_size",
+                "target_name",
+                "target_description",
+                "placement_relation",
+                "stage_label",
+                "canonical_instruction",
+                "object",
+                "target",
+                "confidence",
+                "variants",
+                "needs_review",
+                "reasoning",
+            ],
+            "additionalProperties": False,
+        }
+        request_payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You identify semantic stages in robot manipulation data for imitation learning. "
+                        "Return only valid JSON. Do not wrap JSON in markdown. Do not include comments."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": content,
+                },
+            ],
+            "temperature": float(self.openrouter_cfg.get("temperature", 0.2)),
+            "max_tokens": int(sem_cfg.get("max_tokens", self.openrouter_cfg.get("max_tokens", 800))),
+            "provider": {"require_parameters": True},
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "robot_semantic_subtasks",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "segments": {
+                                "type": "array",
+                                "items": segment_schema,
+                                "minItems": 1,
+                                "maxItems": max_segments,
+                            }
+                        },
+                        "required": ["segments"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+        }
+        body = json.dumps(request_payload).encode("utf-8")
+        request = urllib.request.Request(
+            OPENROUTER_CHAT_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": str(self.openrouter_cfg.get("referer", "dual_arm_teleop")),
+                "X-Title": str(self.openrouter_cfg.get("title", "dual_arm_teleop_split_label_dataset")),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"HTTP {exc.code}: {detail}") from exc
+
+        message = response_payload["choices"][0]["message"]
+        content_text = message.get("content", "")
+        try:
+            return _parse_json_content(content_text, context="semantic segmentation")
+        except ValueError as exc:
+            if not sem_cfg.get("repair_invalid_json", True):
+                raise
+            logger.warning("[SEG] Invalid JSON from OpenRouter, trying one repair request: %s", exc)
+            return self._repair_json_response(
+                content_text,
+                context="semantic segmentation",
+                schema_hint=(
+                    "Return a JSON object with exactly one key `segments`. `segments` is an array of objects. "
+                    "Each object must include integer start_frame, end_frame, core_start_frame, core_end_frame; "
+                    "active_arm as left/right/both; arm, approach_direction, object_color, object_size, "
+                    "object_name, object_description, action, target_direction, target_color, target_size, "
+                    "target_name, target_description, placement_relation; stage_label, canonical_instruction, "
+                    "object, target, confidence, variants array of exactly 3 strings, needs_review boolean, and reasoning."
+                ),
+                max_tokens=int(sem_cfg.get("repair_max_tokens", sem_cfg.get("max_tokens", 1200))),
+            )
+
+    def _repair_json_response(
+        self,
+        content: Any,
+        *,
+        context: str,
+        schema_hint: str,
+        max_tokens: int,
+    ) -> dict[str, Any]:
+        raw_text = _message_content_to_text(content)
+        repair_payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You repair malformed JSON. Return only valid JSON matching the requested shape. "
+                        "Do not add markdown fences or explanation."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"{schema_hint}\n\n"
+                        "Repair this malformed JSON without changing the intended values:\n"
+                        f"{raw_text}"
+                    ),
+                },
+            ],
+            "temperature": 0,
+            "max_tokens": int(max_tokens),
+        }
+        body = json.dumps(repair_payload).encode("utf-8")
+        request = urllib.request.Request(
+            OPENROUTER_CHAT_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": str(self.openrouter_cfg.get("referer", "dual_arm_teleop")),
+                "X-Title": str(self.openrouter_cfg.get("title", "dual_arm_teleop_split_label_dataset")),
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"repair HTTP {exc.code}: {detail}") from exc
+
+        message = response_payload["choices"][0]["message"]
+        return _parse_json_content(message.get("content", ""), context=f"{context} repair")
+
     def _request_label(self, segment: RawSegment, parent_task: str, images: list[dict[str, str]]) -> dict[str, Any]:
         content: list[dict[str, Any]] = [
             {
                 "type": "text",
                 "text": (
                     "You are labeling robot manipulation sub-episodes for imitation learning. "
-                    "Use the images and metadata to produce a concise English instruction. "
+                    "Use the images and metadata to fill a structured language template. "
+                    "First decide the slots: arm, approach_direction, object_color, object_size, object_name, "
+                    "action, target_direction, target_color, target_size, target_name, and placement_relation. "
+                    "Use `unknown` for visually unclear attributes. "
+                    "Keep the canonical instruction short and imperative, for example: "
+                    "`Left arm: pick up the yellow cube and place it in the black basket.` "
+                    "`Right arm: place the blue package in the black basket.` "
+                    "`Both arms: seal the black basket.` "
                     "Do not invent object names when the object is unclear; use generic wording. "
                     f"Parent task: {parent_task}\n"
                     f"Active arm: {segment.active_arm}\n"
                     f"Segment index: {segment.segment_id}\n"
+                    f"Segment frame range: {segment.start}:{segment.end}\n"
+                    f"Auxiliary event frames: close={segment.close_frames}, open={segment.open_frames}\n"
                     "Return exactly the requested JSON schema."
                 ),
             }
@@ -839,6 +1881,19 @@ class OpenRouterLabeler:
                         "type": "object",
                         "properties": {
                             "canonical_instruction": {"type": "string"},
+                            "arm": {"type": "string", "enum": ARM_VALUES},
+                            "approach_direction": {"type": "string", "enum": DIRECTION_VALUES},
+                            "object_color": {"type": "string"},
+                            "object_size": {"type": "string"},
+                            "object_name": {"type": "string"},
+                            "object_description": {"type": "string"},
+                            "action": {"type": "string", "enum": ACTION_VALUES},
+                            "target_direction": {"type": "string", "enum": DIRECTION_VALUES},
+                            "target_color": {"type": "string"},
+                            "target_size": {"type": "string"},
+                            "target_name": {"type": "string"},
+                            "target_description": {"type": "string"},
+                            "placement_relation": {"type": "string", "enum": RELATION_VALUES},
                             "stage_label": {"type": "string"},
                             "object": {"type": "string"},
                             "target": {"type": "string"},
@@ -853,6 +1908,19 @@ class OpenRouterLabeler:
                         },
                         "required": [
                             "canonical_instruction",
+                            "arm",
+                            "approach_direction",
+                            "object_color",
+                            "object_size",
+                            "object_name",
+                            "object_description",
+                            "action",
+                            "target_direction",
+                            "target_color",
+                            "target_size",
+                            "target_name",
+                            "target_description",
+                            "placement_relation",
                             "stage_label",
                             "object",
                             "target",
@@ -886,17 +1954,28 @@ class OpenRouterLabeler:
 
         message = response_payload["choices"][0]["message"]
         content_text = message.get("content", "")
-        if isinstance(content_text, dict):
-            return content_text
-        if isinstance(content_text, list):
-            content_text = "".join(
-                str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in content_text
+        try:
+            return _parse_json_content(content_text, context="segment label")
+        except ValueError as exc:
+            if not (self.cfg.get("semantic_segmentation", {}) or {}).get("repair_invalid_json", True):
+                raise
+            logger.warning("[LABEL] Invalid JSON from OpenRouter, trying one repair request: %s", exc)
+            return self._repair_json_response(
+                content_text,
+                context="segment label",
+                schema_hint=(
+                    "Return a JSON object with canonical_instruction, stage_label, object, target, "
+                    "arm, approach_direction, object_color, object_size, object_name, object_description, "
+                    "action, target_direction, target_color, target_size, target_name, target_description, "
+                    "placement_relation, confidence, variants array of exactly 3 strings, and needs_review boolean."
+                ),
+                max_tokens=int(self.openrouter_cfg.get("repair_max_tokens", self.openrouter_cfg.get("max_tokens", 800))),
             )
-        return json.loads(str(content_text))
 
 
 def _create_output_dataset(source: Any, cfg: dict[str, Any]) -> Any:
     _require_lerobot()
+    _assert_output_root_is_separate_from_source(source, cfg)
     output_cfg = cfg["output"]
     output_root = _as_path_or_none(output_cfg.get("root"))
     if output_root is not None and output_root.exists():
@@ -1043,6 +2122,103 @@ def _tasks_for_output(label: LabelResult, cfg: dict[str, Any]) -> list[str]:
     return deduped
 
 
+def _report_enabled(cfg: dict[str, Any], key: str, default: bool = True) -> bool:
+    return bool((cfg.get("report", {}) or {}).get(key, default))
+
+
+def _report_line(text: str = "") -> None:
+    print(text, file=sys.stderr, flush=True)
+
+
+def _fmt_seconds(frame: int, fps: float) -> str:
+    return f"{frame / max(fps, 1e-6):.2f}s"
+
+
+def _segment_semantic_summary(segment: RawSegment) -> str:
+    label = segment.semantic_label or {}
+    instruction = str(label.get("canonical_instruction", "")).strip()
+    if not instruction:
+        return ""
+    details = [
+        f"instruction={instruction}",
+        f"arm={label.get('arm', label.get('active_arm', 'unknown'))}",
+        f"direction={label.get('approach_direction', 'unknown')}->{label.get('target_direction', 'unknown')}",
+        f"action={label.get('action', 'unknown')}",
+        f"object={label.get('object', 'unknown')}",
+        f"target={label.get('target', 'unknown')}",
+        f"confidence={label.get('confidence', 0.0)}",
+    ]
+    return " | ".join(details)
+
+
+def _print_episode_segmentation_report(
+    cfg: dict[str, Any],
+    *,
+    ep_idx: int,
+    episode_len: int,
+    parent_task: str,
+    segmentation_source: str,
+    gripper_source: str,
+    gripper_sides: list[str],
+    segments: list[RawSegment],
+    action_filter_stats: dict[str, int] | None = None,
+) -> None:
+    if not _report_enabled(cfg, "print_segments", True):
+        return
+
+    fps = float(cfg.get("_fps", 30))
+    _report_line(
+        f"\n[SPLIT] episode={ep_idx} frames={episode_len} duration={episode_len / max(fps, 1e-6):.2f}s "
+        f"segments={len(segments)} source={segmentation_source}"
+    )
+    _report_line(f"        task={parent_task}")
+    _report_line(f"        auxiliary_gripper_source={gripper_source} sides={gripper_sides}")
+    if action_filter_stats:
+        _report_line(
+            "        action_filter="
+            f"before:{action_filter_stats.get('before', 0)} "
+            f"after:{action_filter_stats.get('after', 0)} "
+            f"trimmed:{action_filter_stats.get('trimmed', 0)} "
+            f"dropped_zero_action:{action_filter_stats.get('dropped_zero_action', 0)}"
+        )
+    for segment in segments:
+        duration = (segment.end - segment.start) / max(fps, 1e-6)
+        _report_line(
+            f"  - seg={segment.segment_id:03d} arm={segment.active_arm} "
+            f"frames={segment.start}:{segment.end} "
+            f"time={_fmt_seconds(segment.start, fps)}-{_fmt_seconds(segment.end, fps)} "
+            f"len={duration:.2f}s core={segment.core_start}:{segment.core_end}"
+        )
+        if segment.close_frames or segment.open_frames:
+            _report_line(f"    gripper_hint: close={segment.close_frames} open={segment.open_frames}")
+        semantic_summary = _segment_semantic_summary(segment)
+        if semantic_summary:
+            _report_line(f"    semantic: {semantic_summary}")
+
+
+def _print_label_report(
+    cfg: dict[str, Any],
+    *,
+    segment: RawSegment,
+    label: LabelResult,
+    task_variants: list[str],
+) -> None:
+    if not _report_enabled(cfg, "print_labels", True):
+        return
+
+    _report_line(f"    [LABEL seg={segment.segment_id:03d}] {label.canonical_instruction}")
+    _report_line(
+        f"      stage={label.stage_label} arm={label.arm} action={label.action} "
+        f"direction={label.approach_direction}->{label.target_direction} "
+        f"object={label.object_description} target={label.target_description} "
+        f"relation={label.placement_relation} confidence={label.confidence:.2f} "
+        f"needs_review={label.needs_review} source={label.source}"
+    )
+    if _report_enabled(cfg, "print_variants", True):
+        for idx, variant in enumerate(task_variants[1:], start=1):
+            _report_line(f"      variant_{idx}: {variant}")
+
+
 def split_label_dataset(cfg: dict[str, Any]) -> None:
     _require_lerobot()
     source_cfg = cfg["source"]
@@ -1058,13 +2234,23 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
     if label_only:
         write_dataset = False
 
+    semantic_cfg = cfg.get("semantic_segmentation", {}) or {}
+    semantic_on_dry_run = bool(semantic_cfg.get("enabled", False) and semantic_cfg.get("run_on_dry_run", False))
+    _assert_no_source_writes(
+        source,
+        cfg,
+        write_dataset=write_dataset,
+        dry_run=dry_run,
+        semantic_on_dry_run=semantic_on_dry_run,
+    )
+
     manifest_dir = _manifest_dir(cfg)
     split_manifest_path = manifest_dir / "split_manifest.jsonl"
     vla_manifest_path = manifest_dir / "vla_manifest.jsonl"
     cache_path = _as_path_or_none((cfg.get("openrouter", {}) or {}).get("cache_path"))
     cache = JsonlCache(cache_path, resume=bool(cfg.get("resume_cache", True)))
     labeler = OpenRouterLabeler(cfg, cache)
-    if not dry_run:
+    if not dry_run or semantic_on_dry_run:
         labeler.validate_model()
 
     if not dry_run:
@@ -1093,7 +2279,7 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
             gripper_values, gripper_sides, gripper_source = _extract_gripper_signal(
                 arrays, action_names, state_names, cfg
             )
-            segments = split_episode(
+            auxiliary_segments = split_episode(
                 parent_episode=int(ep_idx),
                 gripper_values=gripper_values,
                 gripper_sides=gripper_sides,
@@ -1102,14 +2288,40 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
                 cfg=cfg,
             )
             parent_task = source[int(start)]["task"] if episode_len else ""
+            segments = auxiliary_segments
+            segmentation_source = "gripper_motion_fallback"
+            if semantic_cfg.get("enabled", False) and (not dry_run or semantic_on_dry_run):
+                overview_images, _overview_manifest = _collect_episode_overview_images(source, start, episode_len, cfg)
+                semantic_segments = labeler.segment_episode(
+                    parent_episode=int(ep_idx),
+                    parent_task=str(parent_task),
+                    episode_len=episode_len,
+                    auxiliary_segments=auxiliary_segments,
+                    overview_images=overview_images,
+                )
+                if semantic_segments:
+                    segments = semantic_segments
+                    segmentation_source = "vlm_semantic"
+                elif not semantic_cfg.get("fallback_to_gripper", True):
+                    segments = []
+                    segmentation_source = "vlm_semantic_failed_no_fallback"
+
+            segments, action_filter_stats = _filter_segments_by_action(
+                segments,
+                arrays.get("action"),
+                action_names,
+                cfg,
+            )
             total_segments += len(segments)
             logger.info(
-                "[EP %s] frames=%d gripper_source=%s sides=%s segments=%d",
+                "[EP %s] frames=%d segmentation=%s gripper_source=%s sides=%s segments=%d action_filter=%s",
                 ep_idx,
                 episode_len,
+                segmentation_source,
                 gripper_source,
                 gripper_sides,
                 len(segments),
+                action_filter_stats,
             )
             for segment in segments:
                 logger.info(
@@ -1123,6 +2335,17 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
                     segment.close_frames,
                     segment.open_frames,
                 )
+            _print_episode_segmentation_report(
+                cfg,
+                ep_idx=int(ep_idx),
+                episode_len=episode_len,
+                parent_task=str(parent_task),
+                segmentation_source=segmentation_source,
+                gripper_source=gripper_source,
+                gripper_sides=gripper_sides,
+                segments=segments,
+                action_filter_stats=action_filter_stats,
+            )
 
             if dry_run:
                 continue
@@ -1134,6 +2357,7 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
                 label = labeler.label(segment, parent_task, len(segments), images)
                 output_episodes: list[dict[str, Any]] = []
                 task_variants = _tasks_for_output(label, cfg)
+                _print_label_report(cfg, segment=segment, label=label, task_variants=task_variants)
 
                 if output is not None:
                     for variant_idx, task in enumerate(task_variants):

@@ -1,0 +1,76 @@
+# LeRobot Diffusion Policy training configuration.
+# The daily-edit area is intentionally small; semantic defaults that protect
+# checkpoint and downstream rollout behavior are kept explicit at the end.
+
+# =========================
+# Required / frequently edited
+# =========================
+device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
+n_obs_steps: 2  # int > 0. Number of observation frames used as diffusion conditioning and dataset delta timestamps.
+horizon: 8  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
+
+# =========================
+# Model / policy architecture
+# =========================
+normalization_mapping:  # supported modes: MIN_MAX | MEAN_STD | IDENTITY | QUANTILES | QUANTILE10.
+  VISUAL: MEAN_STD  # Used by pre/post processors for image normalization.
+  STATE: MIN_MAX  # Used by pre/post processors for robot state normalization.
+  ACTION: MIN_MAX  # Used by training targets and action unnormalization.
+
+vision_backbone: resnet18  # must start with "resnet"; passed to torchvision.models.<vision_backbone>.
+crop_shape: [160, 160]  # null or [H, W] with positive dims; must fit image features inferred from dataset metadata.
+crop_is_random: false  # train-time random crop when true; eval/inference always center crops.
+pretrained_backbone_weights: null  # options not enumerated in LeRobot; passed to torchvision backbone weights.
+use_group_norm: true  # Diffusion RGB encoder option; cannot be true with pretrained_backbone_weights set.
+spatial_softmax_num_keypoints: 32  # int > 0. Number of spatial-softmax keypoints.
+use_separate_rgb_encoder_per_camera: false  # true creates one RGB encoder per camera; false shares one encoder.
+
+down_dims: [512, 1024, 2048]  # non-empty positive ints; controls U-Net channels and downsampling depth.
+kernel_size: 5  # int > 0. Conv1d kernel size in diffusion U-Net residual blocks.
+n_groups: 8  # int > 0. GroupNorm groups in diffusion U-Net Conv1d blocks.
+diffusion_step_embed_dim: 128  # int > 0. Timestep embedding dimension used by the U-Net.
+use_film_scale_modulation: true  # true uses FiLM scale+bias; false uses FiLM bias only.
+
+noise_scheduler_type: DDPM  # options: DDPM | DDIM. Used by _make_noise_scheduler for training and later inference config.
+num_train_timesteps: 100  # int > 0. Forward diffusion timesteps; also default inference steps when num_inference_steps is null.
+beta_schedule: squaredcos_cap_v2  # options not enumerated in LeRobot; passed to diffusers DDPMScheduler/DDIMScheduler.
+beta_start: 0.0001  # float > 0 and <= beta_end. Passed to diffusers scheduler.
+beta_end: 0.02  # float > 0 and >= beta_start. Passed to diffusers scheduler.
+prediction_type: epsilon  # options: epsilon | sample. Selects diffusion loss target.
+
+# =========================
+# Training-only parameters
+# =========================
+drop_n_last_frames: 0  # int >= 0. Used by EpisodeAwareSampler; original default is horizon - n_action_steps - n_obs_steps + 1.
+do_mask_loss_for_padding: false  # training loss only. false matches original Diffusion Policy behavior.
+optimizer_lr: 0.0001  # Adam preset lr when use_policy_training_preset is true.
+optimizer_betas: [0.95, 0.999]  # Adam preset betas; two floats in [0, 1).
+optimizer_eps: 0.00000001  # Adam preset eps.
+optimizer_weight_decay: 0.000001  # Adam preset weight_decay.
+scheduler_name: cosine  # DiffuserSchedulerConfig name; options not enumerated in LeRobot, passed to diffusers.get_scheduler.
+scheduler_warmup_steps: 500  # int >= 0. Warmup steps for DiffuserSchedulerConfig.
+
+# =========================
+# Inference-only parameters
+# =========================
+# num_inference_steps intentionally lives in diffusion_reason_config.yaml.
+# Training checkpoints keep num_inference_steps at the DiffusionConfig default
+# (null), meaning inference defaults to num_train_timesteps unless reason config
+# overrides it.
+
+# =========================
+# Default semantic overrides / 默认语义补充
+# Keep these explicit even if they are not directly used in this phase.
+# They protect checkpoint config / validation / downstream inference semantics.
+# =========================
+push_to_hub: false  # PreTrainedConfig default is true; keep explicit to avoid accidental model upload validation/push.
+use_amp: false  # AMP flag on policy config. Custom run_train uses Accelerator, but keep explicit for saved config semantics.
+pretrained_path: null  # null means train from scratch; set to a pretrained_model directory only for finetune.
+n_action_steps: 7  # int > 0 and <= horizon - n_obs_steps + 1. Not diffusion loss target length, but saved for rollout caching.
+clip_sample: true  # inference scheduler behavior saved in config; clips denoised samples to +/- clip_sample_range.
+clip_sample_range: 1.0  # float. Scheduler clip magnitude used when clip_sample is true.
+
+# input_features / output_features are omitted intentionally.
+# Empty values are dropped by policy_config_utils, then make_policy infers them
+# from dataset metadata before model construction.
+# Hub metadata repo_id/private/tags/license is omitted while push_to_hub=false.

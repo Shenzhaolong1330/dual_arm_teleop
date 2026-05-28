@@ -1,151 +1,92 @@
 record:
-  repo_id: &repo_id "dual_franka_1/pick_up_and_seal"
-  # Suggested format: <hf_username>/<description>, description = task.description -> Verb_SourceObject_prep_TargetObject
-  # e.g. Pick up the green cube and put it into the trash bin -> pick_greencube_into_trashbin
-  debug: 0 # if True, robot will not execute any actions, but gripper can still be controlled
-  user_notes:  # any additional notes about the dataset
-  fps: 30  # dataset and camera frame rate
-  control_mode: &control_mode "oculus"  # teleoperation control mode (only "oculus" supported)
-  use_gripper: &use_gripper true  # whether to use gripper
-  run_mode: "run_record" # "run_record" or "run_policy" or "run_mix"
-  verbose_action_debug: true  # print policy/robot Cartesian delta norms during deployment
+  repo_id: &repo_id "franka_dual_arm/left_right_pick_chp_rollout"
+  # repo_id: &repo_id "nero_task3_step1/2mL_empty_right"
+  # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
+  # <description>: https://github.com/wbcdcompetition/wbcd_tasks/tree/main/track-3-lab-experiments
+  #   step1:
+  #     2mL_empty: Seat a 2 mL vial into the 2 mL empty rack
+  #     2ml_filled: Seat a filled 2 mL vial into the 2 mL filled rack
+  #     8mL_empty: Seat an 8 mL vial into the 8 mL empty rack
+  #     8mL_filled: Seat a filled 8 mL vial into the 8 mL filled rack
+  #   step2 opc
+  #   step3:
+  #     remove_cap: Remove the cap from the source bottle
+  #     remove_tubing: Remove the tubing from the source bottle
+  #     insert_tubing: Insert the tubing into the target bottle
+  #     replace_cap: Replace the cap on the source bottle
 
-  # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka
+  debug:
+    robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
+  user_notes: "Franka template; replace TODO values before real collection."
+  # user_notes:  # any additional notes about the dataset
+  fps: 30 # dataset and camera frame rate
+  run_mode: "run_record" # run_record | run_policy | run_mix
+
+  # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka.
+  # Hardware-specific teleop / robot / cameras sections are loaded from scripts/DAS_config by robot_type.
   robot_type: &robot_type "franka_dual_arm"
+  # robot_type: &robot_type "nero_dual_arm"
 
-  teleop:
-    control_mode: *control_mode
-    dual_arm: true  # dual-arm mode
-    oculus_config:
-      ip: #"192.168.8.114"  # Oculus Quest IP address
-      use_gripper: *use_gripper
-      # --- ARX R5 scalers/signs ---
-      # left_pose_scaler: [2.5, 2.5]   # left arm scaler [position, orientation]
-      # left_channel_signs: [1, 1, 1, -1, -1, 1]  # left arm signs [x,y,z,rx,ry,rz]
-      # right_pose_scaler: [2.5, 2.5]  # right arm scaler [position, orientation]
-      # right_channel_signs: [1, 1, 1, -1, -1, 1]  # right arm signs [x,y,z,rx,ry,rz]
-      # --- Nero scalers/signs (uncomment when robot_type: "nero_dual_arm") ---
-      # left_pose_scaler: [0.3, 0.3]
-      # left_channel_signs: [-1, -1, 1, 1, 1, 1]
-      # right_pose_scaler: [0.3, 0.3]
-      # right_channel_signs: [-1, -1, 1, 1, 1, 1]
-      # --- Dual Franka scalers/signs ---
-      left_pose_scaler: [0.8, 0.8]
-      left_channel_signs: [1, 1, 1, -1, -1, 1]
-      right_pose_scaler: [0.8, 0.8]
-      right_channel_signs: [1, 1, 1, -1, -1, 1]
-      action_smoothing_method: "one_euro"  # one_euro, ema, or none
-      action_smoothing_alpha: 0.7  # only used when action_smoothing_method: "ema"
-      action_smoothing_freq: 30.0
-      action_smoothing_min_cutoff: 2.0
-      action_smoothing_beta: 1.0
-      action_smoothing_d_cutoff: 1.0
-      mirror_teleop: true  # true: stand opposite the robot; swap left/right controllers and grippers
-      visualize_placo: false  # whether to visualize robot using placo
+  # Optional explicit override if you do not want the robot_type default mapping:
+  # das_config_path: scripts/DAS_config/franka_config.yaml
+  # das_config_path: scripts/DAS_config/nero_cofig.yaml
 
-  robot:
-    # --- Dobot config (use when robot_type: "dobot_dual_arm") ---
-    # robot_ip: &ip "192.168.110.41"
-    # robot_port: 4242
-    # use_gripper: *use_gripper
-    # gripper_ip: "192.168.110.15"
-    # gripper_port: 4243
-    # close_threshold: 0.05
-    # gripper_reverse: false
-    # gripper_max_open: 0.1
-    # gripper_force: 2.0
-
-    # --- Nero config (use when robot_type: "nero_dual_arm") ---
-    # robot_ip: &ip "localhost"
-    # robot_port: 4242
-    # use_gripper: *use_gripper
-    # close_threshold: 0.7
-    # gripper_bin_threshold: 0.98
-    # gripper_reverse: false
-    # gripper_max_open: 0.085
-
-    # --- ARX R5 config (use when robot_type: "arx_dual_arm") ---
-    # robot_ip: &ip "10.10.10.2"  # ARX RPC server IP (robot-side Linux)
-    # robot_port: 4242            # zerorpc port
-    # use_gripper: *use_gripper
-    # gripper_reverse: false      # ARX integrated gripper, 0=open 1=closed
-    # close_threshold: 0.5
-    # Note: gripper_ip/port/max_open/force/speed are ignored for ARX (gripper is integrated)
-
-    # --- Dual Franka config (use when robot_type: "franka_dual_arm") ---
-    robot_ip: &ip "172.16.0.1"
-    robot_port: 4242
-    use_gripper: *use_gripper
-    close_threshold: 0.7
-    gripper_reverse: false
-    gripper_max_open: 0.085
-    gripper_force: 10.0
-    gripper_speed: 0.1
-    reset_go_home: true        # true: A/reset calls server go_home; false: only re-anchor target to current pose
-    go_home_duration_sec: 5.0
-    go_home_rate_hz: 50.0
-    max_cartesian_delta: 0.06 # null disables wrapper-side EE translation clipping
-    max_rotation_delta: 0.08   # null disables wrapper-side EE rotation clipping
-
-  # 策略配置文件路径 (训练和部署共享同一配置)
-  policy_cfg: "scripts/config/policies/act_cfg.yaml"
-  
   policy:
-    type: "act"  # 策略类型 (act, diffusion)
-    device: "cuda"  # 运行设备 (cuda, cpu)
-    push_to_hub: False  # 禁用模型推送
-    pretrained_path: "/home/deepcybo/lerobot/dual_arm_ws/dual_arm_teleop/outputs/train/act_dual_franka1_pick_up_and_seal_merged_11/checkpoints/last/pretrained_model"  # 预训练模型路径下要包括config.json
-    # 其他超参数从 policy_cfg 文件读取
+    # 策略类型: act | diffusion | dp | diffusion_policy
+    # 轮次式 DAgger 的 run_mix 采集目前只实现 ACT checkpoint 推理。
+
+    # Franka:
+    # For ACT:
+    type: "act"
+    config_path: scripts/policy_config/act_reason_config.yaml
+    pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+
+    # For diffusion:
+    # type: "diffusion"
+    # config_path: scripts/policy_config/diffusion_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+
+    # Nero:
+    # For ACT:
+    # type: "act"
+    # config_path: scripts/policy_config/act_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/nero_dual_arm/left_right_pick/act_20260520_E50_V01_2/checkpoints/last/pretrained_model"
+    # type: "diffusion"
+    # config_path: scripts/policy_config/diffusion_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/wbcd_ws/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/task3_step1/2mL_empty_right/dp_20260523_E249_LastFrames0/checkpoints/last/pretrained_model"
+
+    # Policy hyperparameters have been moved to scripts/policy_config/*_reason_config.yaml.
 
   task:
-    description: "Pick up all the objects into the basket and seal the basket" # task description
-    num_episodes: 10 # number of episodes to record
-    display: True # Whether to display the data during recording
+    description: "pick up small vials and insert them in the empty rack" # task description
+    num_episodes: 50 # number of episodes to record
+    display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
-    resume_dataset: roboticiq/pick_all_yellow_cube_to_brown_basket_20260208_v01 # dataset to resume from if resume is True
-  
+    resume_dataset: # dataset to resume from if resume is true
+    # robot-dagger sets success_policy automatically for full_success_episode/hybrid.
+    # explicit prompts y/n; recorded_is_success saves every kept episode as success=true.
+    success_policy:
+    annotate_success: false # ask after each run_mix episode and write a per-frame success flag
+
   time:
     episode_time_sec: 6000 # max time per episode in seconds
     reset_time_sec: 6000 # max time to reset between episodes in seconds
-    save_meta_period: 1 # Save metadata after every N episodes
-
-  cameras:
-    # --- Dobot serials (use when robot_type: "dobot_dual_arm") ---
-    # left_wrist_cam_serial: "317422075656"
-    # right_wrist_cam_serial: "344322074412"
-    # head_cam_serial: "243322071821"
-
-    # --- Nero serials (use when robot_type: "nero_dual_arm") ---
-    # left_wrist_cam_serial: "412622270929"
-    # right_wrist_cam_serial: "412622270701"
-    # head_cam_serial: "339322074423"
-
-    # --- ARX R5 serials (use when robot_type: "arx_dual_arm") ---
-    # left_wrist_cam_serial: "218622274803"   # left wrist camera serial number
-    # right_wrist_cam_serial: "218622278394"  # right wrist camera serial number
-    # head_cam_serial: "218622271302"         # head (overhead) camera serial number
-    # width: 424 # 640 424
-    # height: 240 # 360 240
-
-    # --- Dual Franka serials (use when robot_type: "franka_dual_arm") ---
-    left_wrist_cam_serial: "347622074336"   # left wrist camera serial number
-    right_wrist_cam_serial: "337322072568"  # right wrist camera  serial number 
-    head_cam_serial: "348522072761"         # head (overhead) camera serial number
-    width: 424 # 640 424
-    height: 240 # 360 240
+    save_meta_period: 1 # save metadata after every N episodes
 
   storage:
-    push_to_hub: False # whether to push the dataset to your huggingface repo after recording
+    push_to_hub: false # whether to push the dataset to your HuggingFace repo after recording
 
 replay:
-  dataset_name: dual_franka_1/pick_up_and_seal_20260515_v27
-  episode_idx: 7 # episode index to replay
-  robot_type: *robot_type  # robot type to use for replay
-  robot:
-    ip: *ip
-    robot_port: 4242  # dual-arm zerorpc port
-  control_mode: *control_mode 
+  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
+  episode_idx: 0 # episode index to replay
+  # episode_idx: 15
+  reset_on_finish: true # replay结束后回home
+  disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
+  robot_type: *robot_type # robot details are loaded from scripts/DAS_config by robot_type
 
 visualize:
-  dataset_name: dual_franka_1/pick_up_and_seal_20260515_v30
+  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
   episode_index: 0 # episode index to visualize
+  # episode_index: 15

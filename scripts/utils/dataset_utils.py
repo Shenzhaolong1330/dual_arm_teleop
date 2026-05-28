@@ -31,21 +31,25 @@ def generate_dataset_name(cfg):
         # list folders that start with the description
         existing = [p.name for p in base_path.iterdir() if p.is_dir() and p.name.startswith(description + "_")]
 
-        # find the largest existing vNN for this description
+        # find the largest existing vNN for this description on *today*.
+        # This makes version reset daily: each new day starts from v01.
+        today_str = datetime.today().strftime("%Y%m%d")
         max_v = 0
-        pattern = re.compile(rf"^{re.escape(description)}_\d{{8}}_v(\d+)$")
+        pattern = re.compile(rf"^{re.escape(description)}_(\d{{8}})_v(\d+)$")
         for name in existing:
             m = pattern.match(name)
             if m:
                 try:
-                    vnum = int(m.group(1))
+                    date_str = m.group(1)
+                    vnum = int(m.group(2))
+                    if date_str != today_str:
+                        continue
                     if vnum > max_v:
                         max_v = vnum
                 except ValueError:
                     continue
 
         next_v = max_v + 1
-        today_str = datetime.today().strftime("%Y%m%d")
         version_str = f"v{str(next_v).zfill(2)}"
         dataset_name = f"{user}/{description}_{today_str}_{version_str}"
 

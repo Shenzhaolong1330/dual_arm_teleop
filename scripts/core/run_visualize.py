@@ -16,6 +16,22 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, DONE, OBS_STATE, REWARD
 
 
+def _default_scripts_dir() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _default_record_cfg_path() -> Path:
+    return _default_scripts_dir() / "config" / "record_cfg.yaml"
+
+
+def _load_record_cfg_yaml(cfg_path: Path) -> dict:
+    with open(cfg_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    if not isinstance(cfg, dict) or "visualize" not in cfg:
+        raise ValueError(f"Visualize config must contain a top-level `visualize` mapping: {cfg_path}")
+    return cfg
+
+
 class EpisodeSampler(torch.utils.data.Sampler):
     def __init__(self, dataset: LeRobotDataset, episode_index: int):
         from_idx = dataset.meta.episodes["dataset_from_index"][episode_index]
@@ -134,13 +150,23 @@ def visualize_dataset(
         except KeyboardInterrupt:
             print("Ctrl-C received. Exiting.")
 
-def main():
-    parent_path = Path(__file__).resolve().parent
-    cfg_path = parent_path.parent / "config" / "record_cfg.yaml"
-    with open(cfg_path, 'r') as f:
-        cfg = yaml.safe_load(f)
+def main(argv: list[str] | None = None):
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument(
+        "--config",
+        "--config-path",
+        dest="config_path",
+        type=Path,
+        default=_default_record_cfg_path(),
+        help="Path to record_cfg.yaml.",
+    )
+    pre_args, _ = pre_parser.parse_known_args(argv)
+    cfg = _load_record_cfg_yaml(pre_args.config_path)
 
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Visualize a LeRobot dataset episode with Rerun.",
+        parents=[pre_parser],
+    )
 
     parser.add_argument(
         "--repo-id",
@@ -222,8 +248,9 @@ def main():
         ),
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     kwargs = vars(args)
+    kwargs.pop("config_path")
     repo_id = kwargs.pop("repo_id")
     root = kwargs.pop("root")
     tolerance_s = kwargs.pop("tolerance_s")
