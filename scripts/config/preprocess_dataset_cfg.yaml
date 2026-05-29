@@ -1,25 +1,39 @@
 preprocess_dataset:
   source:
-    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01"
-    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01"
+    repo_id: "franka_dual_arm/left_right_pick_merged_E150_evorl_28d"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/left_right_pick_merged_E150_evorl_28d"
     episodes: null        # null means all episodes, or set e.g. [0, 1, 2]
     max_episodes: null    # optional quick-test limit
 
   output:
-    repo_id: "dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
-    root: "/home/deepcybo/.cache/huggingface/lerobot/dual_franka_1/pick_up_and_seal_20260513_v01_cleaned"
+    repo_id: "franka_dual_arm/left_right_pick_merged_E150_evorl_28d_cleaned"
+    root: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm/left_right_pick_merged_E150_evorl_28d_cleaned"
     overwrite: false
-    image_writer_threads: 4
-    batch_encoding_size: 1
+    image_writer_threads: 8
+    batch_encoding_size: 4
 
   dry_run: false
 
-  # 1) Compress long no-motion spans instead of deleting every zero-action frame.
+  # 1) Compress long no-motion spans. Prefer robot state rate over action==0.
+  # Gripper state changes count as motion even if arm pose/joints do not move.
   static_trim:
     enabled: true
-    min_static_frames: 30
+    motion_source: "state_rate"  # state_rate | action_delta
+    # Only compress/delete continuous static spans that are at least this long.
+    min_static_frames: 10
     keep_start_frames: 5
     keep_end_frames: 5
+    state_rate:
+      ignore_gripper: false
+      # Units are per second because the tool multiplies frame-to-frame state
+      # differences by dataset fps. Use small eps-like thresholds to approximate
+      # state_rate == 0 while tolerating tiny serialization noise.
+      joint_norm_threshold: 0.000001
+      translation_norm_threshold: 0.000001
+      rotation_norm_threshold: 0.000001
+      gripper_norm_threshold: 0.000001
+      norm_threshold: 0.000001
+    # Fallback only when observation.state is unavailable.
     translation_norm_threshold: 0.001
     rotation_norm_threshold: 0.005
 

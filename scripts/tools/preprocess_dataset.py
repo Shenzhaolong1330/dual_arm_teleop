@@ -110,6 +110,106 @@ def _gripper_event_mask(actions: np.ndarray, action_names: list[str], cfg: dict[
     return _expanded_mask(event_mask, int(gripper_cfg.get("keep_radius_frames", 15)))
 
 
+def _feature_indices(
+    names: list[str],
+    *,
+    include: tuple[str, ...] = (),
+    suffixes: set[str] | None = None,
+    exclude: tuple[str, ...] = (),
+) -> list[int]:
+    suffixes = suffixes or set()
+    indices: list[int] = []
+    for idx, name in enumerate(names):
+        lower = name.lower()
+        if exclude and any(token in lower for token in exclude):
+            continue
+        if include and not all(token in lower for token in include):
+            continue
+        if suffixes and lower.rsplit(".", 1)[-1] not in suffixes:
+            continue
+        indices.append(idx)
+    return indices
+
+
+def _state_rate_motion_mask(
+    states: np.ndarray | None,
+    state_names: list[str],
+    fps: float,
+    cfg: dict[str, Any],
+) -> np.ndarray | None:
+    trim_cfg = cfg.get("static_trim", {}) or {}
+    state_cfg = trim_cfg.get("state_rate", {}) or {}
+    if states is None or states.size == 0:
+        return None
+
+    states = np.asarray(states, dtype=np.float32)
+    if states.ndim == 1:
+        states = states[:, None]
+    if states.shape[0] == 0:
+        return np.zeros(0, dtype=bool)
+
+    diffs = np.zeros_like(states, dtype=np.float32)
+    if states.shape[0] > 1:
+        diffs[1:] = np.abs(np.diff(states, axis=0)) * max(float(fps), 1e-6)
+
+    ignore_gripper = bool(state_cfg.get("ignore_gripper", False))
+    exclude = ("gripper",) if ignore_gripper else ()
+    gripper_indices = (
+        []
+        if ignore_gripper
+        else _feature_indices(
+            state_names,
+            include=("gripper",),
+        )
+    )
+    translation_indices = _feature_indices(
+        state_names,
+        include=("ee_pose",),
+        suffixes={"x", "y", "z"},
+        exclude=exclude,
+    )
+    rotation_indices = _feature_indices(
+        state_names,
+        include=("ee_pose",),
+        suffixes={"rx", "ry", "rz", "roll", "pitch", "yaw"},
+        exclude=exclude,
+    )
+    joint_indices = _feature_indices(
+        state_names,
+        include=("joint",),
+        exclude=exclude,
+    )
+
+    motion = np.zeros(states.shape[0], dtype=bool)
+
+    def mark(indices: list[int], threshold_key: str, default: float) -> None:
+        nonlocal motion
+        if not indices:
+            return
+        norms = np.linalg.norm(diffs[:, indices], axis=1)
+        active = norms > float(state_cfg.get(threshold_key, default))
+        motion |= active
+        motion[:-1] |= active[1:]
+
+    mark(joint_indices, "joint_norm_threshold", 1e-6)
+    mark(translation_indices, "translation_norm_threshold", 1e-6)
+    mark(rotation_indices, "rotation_norm_threshold", 1e-6)
+    mark(gripper_indices, "gripper_norm_threshold", 1e-6)
+
+    if not (joint_indices or translation_indices or rotation_indices or gripper_indices):
+        all_indices = [
+            idx
+            for idx, name in enumerate(state_names)
+            if not (ignore_gripper and "gripper" in name.lower())
+        ] or list(range(states.shape[1]))
+        norms = np.linalg.norm(diffs[:, all_indices], axis=1)
+        active = norms > float(state_cfg.get("norm_threshold", 1e-6))
+        motion |= active
+        motion[:-1] |= active[1:]
+
+    return motion
+
+
 def _median_filter(values: np.ndarray, window: int) -> np.ndarray:
     if window <= 1:
         return values.copy()
@@ -178,7 +278,7 @@ def _smooth_actions(actions: np.ndarray, action_names: list[str], cfg: dict[str,
     return smoothed
 
 
-def _motion_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray:
+def _action_motion_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray:
     trim_cfg = cfg.get("static_trim", {}) or {}
     translation_indices = _indices_matching(action_names, {"x", "y", "z"})
     rotation_indices = _indices_matching(action_names, {"rx", "ry", "rz"})
@@ -198,12 +298,31 @@ def _motion_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, An
     )
 
 
+def _motion_mask(
+    actions: np.ndarray,
+    action_names: list[str],
+    states: np.ndarray | None,
+    state_names: list[str],
+    fps: float,
+    cfg: dict[str, Any],
+) -> tuple[np.ndarray, str]:
+    trim_cfg = cfg.get("static_trim", {}) or {}
+    motion_source = str(trim_cfg.get("motion_source", "state_rate")).lower()
+    if motion_source in {"state", "state_rate", "observation.state"}:
+        state_motion = _state_rate_motion_mask(states, state_names, fps, cfg)
+        if state_motion is not None:
+            return state_motion, "state_rate"
+        logger.warning("[preprocess] observation.state unavailable; falling back to action delta motion.")
+
+    return _action_motion_mask(actions, action_names, cfg), "action_delta"
+
+
 def _trim_static_runs(moving_or_protected: np.ndarray, cfg: dict[str, Any]) -> np.ndarray:
     trim_cfg = cfg.get("static_trim", {}) or {}
     if not trim_cfg.get("enabled", False):
         return np.ones_like(moving_or_protected, dtype=bool)
 
-    min_static = int(trim_cfg.get("min_static_frames", 30))
+    min_static = int(trim_cfg.get("min_static_frames", 10))
     keep_start = int(trim_cfg.get("keep_start_frames", 5))
     keep_end = int(trim_cfg.get("keep_end_frames", 5))
     keep = moving_or_protected.copy()
@@ -219,7 +338,7 @@ def _trim_static_runs(moving_or_protected: np.ndarray, cfg: dict[str, Any]) -> n
             idx += 1
         end = idx
         run_len = end - start
-        if run_len <= min_static:
+        if run_len < min_static:
             keep[start:end] = True
             continue
         keep[start : min(end, start + keep_start)] = True
@@ -227,17 +346,33 @@ def _trim_static_runs(moving_or_protected: np.ndarray, cfg: dict[str, Any]) -> n
     return keep
 
 
-def _episode_arrays(dataset: LeRobotDataset, start: int, end: int) -> np.ndarray:
+def _episode_columns(dataset: LeRobotDataset, start: int, end: int, columns: list[str]) -> dict[str, np.ndarray]:
     raw_dataset = dataset.hf_dataset.with_format(None)
-    return np.asarray(raw_dataset[start:end]["action"], dtype=np.float32)
+    batch = raw_dataset[start:end]
+    out: dict[str, np.ndarray] = {}
+    for key in columns:
+        if key in batch:
+            out[key] = np.asarray(batch[key], dtype=np.float32)
+    return out
 
 
 def _to_numpy(value: Any) -> Any:
     if isinstance(value, torch.Tensor):
-        return value.cpu().numpy()
+        return value.detach().cpu().numpy()
     if isinstance(value, np.ndarray):
         return value
     return value
+
+
+def _coerce_numeric_feature(value: Any, feature: dict[str, Any]) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+
+    array = np.asarray(value, dtype=np.dtype(feature["dtype"]))
+    expected_shape = tuple(feature.get("shape", ()))
+    if array.shape != expected_shape and array.size == int(np.prod(expected_shape, dtype=np.int64)):
+        array = array.reshape(expected_shape)
+    return array
 
 
 def _restore_image_layout(value: Any, feature: dict[str, Any]) -> Any:
@@ -264,14 +399,17 @@ def _frame_from_source_item(
 ) -> dict[str, Any]:
     frame = {}
     for key in source.features:
+        feature = source.features[key]
         if key in DEFAULT_FEATURES:
             continue
         if key == "action":
-            frame[key] = action.astype(np.float32)
-        elif source.features[key]["dtype"] in ["image", "video"]:
-            frame[key] = _restore_image_layout(item[key], source.features[key])
+            frame[key] = _coerce_numeric_feature(action, feature)
+        elif feature["dtype"] in ["image", "video"]:
+            frame[key] = _restore_image_layout(item[key], feature)
+        elif feature["dtype"] == "string":
+            frame[key] = item[key]
         else:
-            frame[key] = _to_numpy(item[key])
+            frame[key] = _coerce_numeric_feature(item[key], feature)
     frame["task"] = item["task"]
     return frame
 
@@ -313,6 +451,8 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
     )
     episodes = _select_episodes(source, cfg)
     action_names = source.features["action"]["names"]
+    state_names = source.features.get("observation.state", {}).get("names") or []
+    state_names = [str(name) for name in state_names]
     dry_run = bool(cfg.get("dry_run", False))
 
     output = None if dry_run else _create_output_dataset(source, cfg)
@@ -324,23 +464,33 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
             ep = source.meta.episodes[int(ep_idx)]
             start = int(ep["dataset_from_index"])
             end = int(ep["dataset_to_index"])
-            actions = _episode_arrays(source, start, end)
+            arrays = _episode_columns(source, start, end, ["action", "observation.state"])
+            actions = arrays["action"]
+            states = arrays.get("observation.state")
 
             smoothed_actions = _smooth_actions(actions, action_names, cfg)
             gripper_keep = _gripper_event_mask(actions, action_names, cfg)
-            motion = _motion_mask(smoothed_actions, action_names, cfg)
+            motion, motion_source = _motion_mask(
+                smoothed_actions,
+                action_names,
+                states,
+                state_names,
+                float(source.fps),
+                cfg,
+            )
             keep_mask = _trim_static_runs(motion | gripper_keep, cfg)
             keep_indices = np.flatnonzero(keep_mask) + start
 
             total_in += end - start
             total_out += len(keep_indices)
             logger.info(
-                "[EP %s -> %s] frames %d -> %d (%.1f%% kept), motion=%.1f%% gripper_keep=%.1f%%",
+                "[EP %s -> %s] frames %d -> %d (%.1f%% kept), motion=%s %.1f%% gripper_keep=%.1f%%",
                 ep_idx,
                 new_ep_idx,
                 end - start,
                 len(keep_indices),
                 100.0 * len(keep_indices) / max(end - start, 1),
+                motion_source,
                 100.0 * float(motion.mean()) if len(motion) else 0.0,
                 100.0 * float(gripper_keep.mean()) if len(gripper_keep) else 0.0,
             )
