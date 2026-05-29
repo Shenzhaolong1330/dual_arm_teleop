@@ -137,6 +137,47 @@ def _validate_local_pretrained_path(pretrained_path: str | Path | None) -> None:
         )
 
 
+def _resolve_resume_checkpoint_dir(output_dir: Path | None) -> Path:
+    if output_dir is None:
+        raise ValueError("`train.output_dir` is required when `train.resume: true`.")
+
+    checkpoints_dir = output_dir / "checkpoints"
+    if not checkpoints_dir.is_dir():
+        raise FileNotFoundError(
+            "Cannot resume training because the checkpoints directory does not exist: "
+            f"{checkpoints_dir}"
+        )
+
+    last_checkpoint = checkpoints_dir / "last"
+    if last_checkpoint.exists():
+        checkpoint_dir = last_checkpoint.resolve()
+    else:
+        numbered_checkpoints = sorted(
+            (
+                path
+                for path in checkpoints_dir.iterdir()
+                if path.is_dir() and path.name.isdigit()
+            ),
+            key=lambda path: int(path.name),
+        )
+        if not numbered_checkpoints:
+            raise FileNotFoundError(
+                "Cannot resume training because no numbered checkpoints were found in: "
+                f"{checkpoints_dir}"
+            )
+        checkpoint_dir = numbered_checkpoints[-1]
+
+    pretrained_dir = checkpoint_dir / "pretrained_model"
+    training_state_dir = checkpoint_dir / "training_state"
+    if not pretrained_dir.is_dir() or not training_state_dir.is_dir():
+        raise FileNotFoundError(
+            "Resume checkpoint is incomplete. Expected both `pretrained_model` and "
+            f"`training_state` under: {checkpoint_dir}"
+        )
+
+    return checkpoint_dir
+
+
 def run_act_dagger_from_train_cfg(train_cfg: Dict[str, Any]) -> None:
     """
     Internal ACT training helper for the round-based DAgger controller.
@@ -314,20 +355,9 @@ class TrainPipelineConfig(HubMixin):
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
         elif self.resume:
-            # The entire train config is already loaded, we just need to get the checkpoint dir
-            config_path = parser.parse_arg("config_path")
-            if not config_path:
-                raise ValueError(
-                    f"A config_path is expected when resuming a run. Please specify path to {TRAIN_CONFIG_NAME}"
-                )
-            if not Path(config_path).resolve().exists():
-                raise NotADirectoryError(
-                    f"{config_path=} is expected to be a local path. "
-                    "Resuming from the hub is not supported for now."
-                )
-            policy_path = Path(config_path).parent
-            self.policy.pretrained_path = policy_path
-            self.checkpoint_path = policy_path.parent
+            checkpoint_dir = _resolve_resume_checkpoint_dir(self.output_dir)
+            self.policy.pretrained_path = checkpoint_dir / "pretrained_model"
+            self.checkpoint_path = checkpoint_dir
 
         if not self.job_name:
             if self.env is None:
