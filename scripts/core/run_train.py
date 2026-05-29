@@ -110,6 +110,71 @@ from huggingface_hub.errors import HfHubHTTPError
 TRAIN_CONFIG_NAME = "train_config.json"
 
 
+def _is_video_decode_error(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(
+        marker in text
+        for marker in (
+            "InvalidDataError",
+            "Invalid data found when processing input",
+            "Could not push packet to decoder",
+            "avcodec_send_packet",
+        )
+    )
+
+
+class RetryOnVideoDecodeErrorDataset(torch.utils.data.Dataset):
+    """Replace rare unreadable video samples with nearby valid samples during training."""
+
+    def __init__(self, dataset: torch.utils.data.Dataset, max_retries: int = 64, log_limit: int = 20):
+        self.dataset = dataset
+        self.max_retries = max(1, int(max_retries))
+        self.log_limit = max(0, int(log_limit))
+        self._logged_failures = 0
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.dataset, name)
+
+    def _fallback_indices(self, idx: int):
+        length = len(self)
+        for offset in range(1, self.max_retries + 1):
+            yield (idx + offset) % length
+            yield (idx - offset) % length
+
+    def __getitem__(self, idx: int) -> Any:
+        idx = int(idx)
+        try:
+            return self.dataset[idx]
+        except Exception as exc:
+            if not _is_video_decode_error(exc):
+                raise
+            original_exc = exc
+
+        for attempt, fallback_idx in enumerate(self._fallback_indices(idx), start=1):
+            try:
+                item = self.dataset[fallback_idx]
+            except Exception as exc:
+                if _is_video_decode_error(exc):
+                    continue
+                raise
+            if self._logged_failures < self.log_limit:
+                logging.warning(
+                    "Skipped unreadable video sample idx=%s; using fallback idx=%s after %d attempt(s).",
+                    idx,
+                    fallback_idx,
+                    attempt,
+                )
+                self._logged_failures += 1
+            return item
+
+        raise RuntimeError(
+            f"Failed to replace unreadable video sample idx={idx} after {self.max_retries} retries."
+        ) from original_exc
+
+
 def _validate_local_pretrained_path(pretrained_path: str | Path | None) -> None:
     """Fail early when an absolute local checkpoint path is misspelled."""
     if not pretrained_path:
@@ -262,10 +327,14 @@ class TrainPipelineConfig(HubMixin):
             str(policy["device"]) if policy.get("device") is not None else None
         )
     
-        self.dataset: DatasetConfig = DatasetConfig(
-            repo_id = dataset["repo_id"],
-            root = dataset["root"]
-            )
+        dataset_kwargs: dict[str, Any] = {
+            "repo_id": dataset["repo_id"],
+            "root": dataset.get("root"),
+        }
+        for key in ("episodes", "revision", "use_imagenet_stats", "video_backend", "streaming"):
+            if key in dataset:
+                dataset_kwargs[key] = dataset[key]
+        self.dataset: DatasetConfig = DatasetConfig(**dataset_kwargs)
 
         # self.env: envs.EnvConfig | None = envs.EnvConfig(
         #     env_name = env["env_name"],
@@ -321,6 +390,8 @@ class TrainPipelineConfig(HubMixin):
         # Number of workers for the dataloader.
         self.num_workers: int = cfg["num_workers"]
         self.batch_size: int = cfg["batch_size"]
+        self.skip_bad_video_samples: bool = bool(dataset.get("skip_bad_video_samples", False))
+        self.bad_video_sample_retries: int = int(dataset.get("bad_video_sample_retries", 64))
         self.dagger_sampling: dict[str, Any] = dict(cfg.get("dagger_sampling", {"enabled": False}))
         self.steps: int = cfg["steps"]
         self.eval_freq: int = cfg["eval_freq"]
@@ -746,6 +817,7 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
         logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
         logging.info(f"{dataset.num_episodes=}")
+        logging.info(f"dataset.video_backend={cfg.dataset.video_backend}")
         num_processes = accelerator.num_processes
         effective_bs = cfg.batch_size * num_processes
         logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
@@ -789,8 +861,18 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 sampler = sampling_result.sampler
                 shuffle = False
 
+    dataset_for_loader = dataset
+    if cfg.skip_bad_video_samples:
+        logging.warning(
+            "skip_bad_video_samples=true: unreadable video samples will be replaced with nearby valid samples."
+        )
+        dataset_for_loader = RetryOnVideoDecodeErrorDataset(
+            dataset,
+            max_retries=cfg.bad_video_sample_retries,
+        )
+
     dataloader = torch.utils.data.DataLoader(
-        dataset,
+        dataset_for_loader,
         num_workers=cfg.num_workers,
         batch_size=cfg.batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
@@ -831,10 +913,24 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info("Start offline training on a fixed dataset")
 
+    logged_first_batch = False
     for _ in range(step, cfg.steps):
         start_time = time.perf_counter()
+        if is_main_process and not logged_first_batch:
+            logging.info("Loading first training batch...")
         batch = next(dl_iter)
+        if is_main_process and not logged_first_batch:
+            logging.info("First training batch loaded in %.2fs", time.perf_counter() - start_time)
+            logging.info("Preprocessing first training batch...")
+            preprocess_start_time = time.perf_counter()
         batch = preprocessor(batch)
+        if is_main_process and not logged_first_batch:
+            logging.info(
+                "First training batch preprocessed in %.2fs",
+                time.perf_counter() - preprocess_start_time,
+            )
+            logging.info("Running first optimization step...")
+            first_update_start_time = time.perf_counter()
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(
@@ -846,12 +942,18 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
         )
+        if is_main_process and not logged_first_batch:
+            logging.info("First optimization step finished in %.2fs", time.perf_counter() - first_update_start_time)
+            logged_first_batch = True
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
         # increment `step` here.
         step += 1
         train_tracker.step()
-        is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
+        is_warmup_log_step = 0 < step <= 5
+        is_log_step = is_main_process and (
+            is_warmup_log_step or (cfg.log_freq > 0 and step % cfg.log_freq == 0)
+        )
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
