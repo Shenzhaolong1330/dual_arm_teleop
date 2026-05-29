@@ -1,84 +1,59 @@
-# Dual-Arm Teleoperation for Le-nero
+# Dual Arm Teleoperation
 
-This package is the dual-arm teleoperation and data-collection layer used by Le-nero. It is based on LeRobot and provides robot adapters, Oculus teleoperation, dataset recording/replay/visualization, policy training, and a round-based DAgger loop.
-
-<p align="center">
-  <img src="docs/pic/nero.png" alt="Dobot dual-arm system" width="600">
-</p>
+This project provides dual-arm teleoperation, data acquisition, replay/visualization, policy training, and a round-based DAgger loop. It uses the `lerobot` package from `Key-Zzs/Le-nero` for datasets, policies, and DAgger-related behavior, plus this repository's own robot and teleoperator adapters.
 
 <p align="center">
-  <img src="docs/pic/dobot.jpeg" alt="Dobot dual-arm system" width="600">
+  <img src="docs/images/supported_robots.jpg" alt="Supported robot systems" width="900">
 </p>
 
-<p align="center">
-  <img src="docs/pic/arx.jpeg" alt="ARX dual-arm system" width="600">
-</p>
-
-<p align="center">
-  <img src="docs/pic/quest3s.jpg" alt="Oculus Quest" width="600">
-</p>
+The robot adapters shown above are supported by the current registry: Dobot dual arm, AgileX Nero dual arm, ARX dual arm, and Franka single/dual arm. The exact `robot_type` values are `dobot_dual_arm`, `nero_dual_arm`, `arx_dual_arm`, `franka`, and `franka_dual_arm`.
 
 ## Repository Setup and Environment
 
-For a first-time clone, fetch submodules together with the main repository:
+For a first-time clone:
 
 ```bash
-git clone --recurse-submodules https://github.com/Key-Zzs/Le-nero
-cd Le-nero
+git clone https://github.com/Shenzhaolong1330/dual_arm_teleop.git
+cd dual_arm_teleop
 ```
 
-If the repository has already been cloned but submodule directories are empty or incomplete, run this from the repository root:
+To update this repository during daily development:
 
 ```bash
-git submodule sync --recursive
-git submodule update --init --recursive
-```
-
-To update the main repository and submodules during daily development:
-
-```bash
-cd Le-nero
+cd dual_arm_teleop
 git pull --ff-only
-git submodule sync --recursive
-git submodule update --init --recursive
-git submodule update --remote --merge --recursive
 ```
 
-To switch the main repository branch:
+To switch branches:
 
 ```bash
 git fetch origin
 git switch <branch_name>
-git submodule update --init --recursive
 ```
 
-To switch or update this dual-arm teleoperation package:
-
-```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
-git fetch origin
-git switch main
-git pull --ff-only
-```
-
-Create the Python environment and install both the root repository and this package:
+Create the Python environment, install Le-nero first, then install this package:
 
 ```bash
 conda create -n dual_arm_teleop python=3.10 -y
 conda activate dual_arm_teleop
 python -m pip install --upgrade pip
 
+# Install the Le-nero repository first. This provides the lerobot package used by
+# the policy and DAgger code in this project.
+git clone https://github.com/Key-Zzs/Le-nero.git
 cd Le-nero
 pip install -e .
 
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 pip install -e .
 ```
 
-Oculus Reader is not managed by the current `.gitmodules`, so it must be cloned separately into the required location:
+If `Le-nero` is already cloned locally, use that checkout instead of cloning it again. Install `Key-Zzs/Le-nero` rather than upstream vanilla LeRobot for the policy and DAgger stack expected by this project.
+
+Oculus Reader is not vendored by this repository, so it must be cloned separately into the required location:
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/teleoperators/oculus_teleoperator/oculus
+cd /path/to/dual_arm_teleop/teleoperators/oculus_teleoperator/oculus
 git clone https://github.com/rail-berkeley/oculus_reader.git
 cd oculus_reader
 pip install -e .
@@ -87,7 +62,7 @@ pip install -e .
 If the directory already exists, update it and reinstall:
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/teleoperators/oculus_teleoperator/oculus/oculus_reader
+cd /path/to/dual_arm_teleop/teleoperators/oculus_teleoperator/oculus/oculus_reader
 git pull --ff-only
 pip install -e .
 ```
@@ -113,28 +88,28 @@ scripts/core/*.py command entry points
         |
         +--> robots create the real robot interface
         +--> teleoperators create Oculus teleoperation input
-        +--> ../../src/lerobot/policies create policy models
+        +--> Le-nero's lerobot.policies create policy models
         |
         v
-LeRobot dataset / train / replay / visualize
+Le-nero-provided lerobot dataset / train / replay / visualize
 ```
 
 ### Policy Layer
 
-Policy code is located in the root Le-nero repository:
+Policy and DAgger implementations come from the installed `Key-Zzs/Le-nero` repository, which provides the `lerobot` Python package used here:
 
 ```text
-src/lerobot/policies
+lerobot.policies
 ```
 
-This directory keeps LeRobot policy abstractions and implementations such as `act`, `diffusion`, `smolvla`, and `pi0`. The dual-arm teleoperation scripts mainly use `lerobot.policies.factory.make_policy` and `make_pre_post_processors` to create policy objects and their pre/post-processors.
+That package keeps the policy abstractions and implementations such as `act`, `diffusion`, `smolvla`, and `pi0`, plus project-specific behavior used by the training and DAgger flow. The dual-arm teleoperation scripts mainly use `lerobot.policies.factory.make_policy` and `make_pre_post_processors` to create policy objects and their pre/post-processors.
 
 The most commonly used policy config files in this package are:
 
-- `scripts/policy_config/act_train_config.yaml`: ACT training config.
-- `scripts/policy_config/act_reason_config.yaml`: ACT inference/deployment config.
-- `scripts/policy_config/diffusion_train_config.yaml`: Diffusion Policy training config.
-- `scripts/policy_config/diffusion_reason_config.yaml`: Diffusion Policy inference/deployment config.
+- `scripts/config/policies/act_train_config.yaml`: ACT training config.
+- `scripts/config/policies/act_reason_config.yaml`: ACT inference/deployment config.
+- `scripts/config/policies/diffusion_train_config.yaml`: Diffusion Policy training config.
+- `scripts/config/policies/diffusion_reason_config.yaml`: Diffusion Policy inference/deployment config.
 
 `scripts/core/policy_config_utils.py` resolves policy config paths from `record_cfg.yaml`, `train_cfg.yaml`, or `dagger_rounds_cfg.yaml`. Relative paths are resolved first against this package root, and absolute paths are also supported.
 
@@ -151,6 +126,7 @@ robots
 - `franka`
 - `dobot_dual_arm`
 - `nero_dual_arm`
+- `arx_dual_arm`
 - `franka_dual_arm`
 
 Scripts do not instantiate a concrete robot class directly. Instead, they use the configured `robot_type` to call:
@@ -160,15 +136,24 @@ create_robot_config(robot_type, **robot_cfg)
 create_robot(robot_type, robot_config)
 ```
 
+This package uses its own `robots` and `teleoperators` registries in the `robot-*` commands. It no longer ships top-level LeRobot plugin shim packages such as `lerobot_robot_*` or `lerobot_teleoperator_*`, so upstream LeRobot CLI auto-discovery aliases from `register_third_party_devices()` are not provided here.
+
 Each concrete robot class implements the robot interface expected by LeRobot, such as `connect()`, `reset()`, `send_action()`, camera initialization, observation fields, and action fields. For example, `robots/dual_agilex_nero/nero_dual_arm.py` connects to the dual-arm zerorpc service through `NeroDualArmClient`, then organizes dual-arm end-effector poses, joint states, gripper commands, and RealSense cameras into a LeRobot-compatible data structure.
 
 Hardware-specific parameters should usually live in config files instead of runtime scripts:
 
 ```text
-scripts/DAS_config
+scripts/config/robots
 ```
 
-For example, `nero_cofig.yaml` defines the Nero robot IP, port, gripper parameters, Oculus mapping, and camera serial numbers. `run_record.py`, `run_replay.py`, and `reset_robot.py` automatically load the corresponding DAS config based on `record.robot_type`. You can also explicitly set `das_config_path` in `record_cfg.yaml`.
+The default robot config mapping is:
+
+- `dobot_dual_arm`: `scripts/config/robots/dobot_config.yaml`
+- `nero_dual_arm`: `scripts/config/robots/nero_cofig.yaml`
+- `arx_dual_arm`: `scripts/config/robots/arx_config.yaml`
+- `franka`, `franka_dual_arm`: `scripts/config/robots/franka_config.yaml`
+
+Each file defines the robot IP, port, gripper parameters, Oculus mapping, and camera serial numbers for that hardware profile. `run_record.py`, `run_replay.py`, and `reset_robot.py` automatically load the corresponding robot config based on `record.robot_type`. You can also explicitly set `das_config_path` in `record_cfg.yaml`.
 
 ### Tool Scripts, Data Collection, and Policy Configs
 
@@ -181,9 +166,9 @@ scripts
 Common directories:
 
 - `scripts/core`: command entry implementations for record, replay, visualize, reset, train, and DAgger.
-- `scripts/config`: main workflow configs, including `record_cfg.yaml`, `train_cfg.yaml`, and `dagger_rounds_cfg.yaml`.
-- `scripts/policy_config`: policy hyperparameter configs, split into train and reason configs.
-- `scripts/DAS_config`: hardware and teleoperation detail configs.
+- `scripts/config`: main workflow configs, including `record_cfg.yaml`, `train_cfg.yaml`, `dagger_rounds_cfg.yaml`, and dataset tool configs.
+- `scripts/config/policies`: policy hyperparameter configs, split into train and reason configs.
+- `scripts/config/robots`: hardware and teleoperation detail configs.
 - `scripts/tools`: dataset checks, RealSense device checks, dataset patching, renaming, and related utilities.
 
 Core config files:
@@ -191,6 +176,9 @@ Core config files:
 - `record_cfg.yaml`: main config shared by data collection, policy inference, mixed control, replay, and visualization.
 - `train_cfg.yaml`: policy training config, including dataset paths, output directory, GPU settings, batch size, training steps, and wandb.
 - `dagger_rounds_cfg.yaml`: round-based DAgger controller config that connects collection, export, and next-round training.
+- `preprocess_dataset_cfg.yaml`: dataset cleanup and action smoothing config.
+- `split_label_dataset_cfg.yaml`: sub-episode splitting, semantic labeling, and VLA manifest config.
+- `merge_dataset_cfg.yaml`: merge multiple local LeRobot datasets into one output dataset.
 - `*_train_config.yaml`: model structure and training-related hyperparameters used during policy training.
 - `*_reason_config.yaml`: model structure, device, and checkpoint parameters used during inference or deployment.
 
@@ -213,12 +201,15 @@ After installing this package, `setup.py` registers these console commands:
 | `robot-train` | Train ACT or Diffusion Policy | `scripts/config/train_cfg.yaml` |
 | `robot-dagger` | Run round-based DAgger: collect, export, then train the next-round policy | `scripts/config/dagger_rounds_cfg.yaml` |
 | `robot-dagger-export` | Export DAgger training data from raw run_mix logs | `scripts/config/dagger_rounds_cfg.yaml` `dagger_export` section |
-| `tools-check-dataset` | Inspect local LeRobot dataset information | Command arguments |
-| `tools-check-dagger-dataset` | Inspect an exported DAgger dataset | Command arguments |
+| `tools-check-dataset` | Clean stale entries from local `dataset_info.txt` | `scripts/config/record_cfg.yaml` |
+| `tools-check-dagger-dataset` | Audit an exported DAgger dataset before training | `scripts/config/dagger_rounds_cfg.yaml`, `scripts/config/train_cfg.yaml` |
 | `tools-check-rs` | Show RealSense device serial numbers | None |
+| `tools-preprocess-dataset` | Rewrite a LeRobot dataset after trimming static spans and optionally smoothing actions | `scripts/config/preprocess_dataset_cfg.yaml` |
+| `tools-split-label-dataset` | Split long episodes into labeled sub-episodes and optionally write a new dataset | `scripts/config/split_label_dataset_cfg.yaml` |
+| `tools-merge-datasets` | Merge several local LeRobot datasets with the same schema into one materialized dataset | `scripts/config/merge_dataset_cfg.yaml` |
 | `robot-help` | Print the command summary | None |
 
-All core commands support an explicit config file. It is recommended to pass the path during debugging:
+All core commands and config-driven tools support an explicit config file. It is recommended to pass the path during debugging:
 
 ```bash
 robot-record --config scripts/config/record_cfg.yaml
@@ -228,7 +219,38 @@ robot-reset --config scripts/config/record_cfg.yaml
 robot-train --config scripts/config/train_cfg.yaml
 robot-dagger --config scripts/config/dagger_rounds_cfg.yaml
 robot-dagger-export --config scripts/config/dagger_rounds_cfg.yaml
+tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run
+tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 ```
+
+## Tool Commands and Maintenance Scripts
+
+The registered tool commands are:
+
+| Command | Typical usage | Notes |
+| --- | --- | --- |
+| `tools-check-rs` | `tools-check-rs` | Requires `pyrealsense2`; prints connected RealSense names and serial numbers. |
+| `tools-check-dataset` | `tools-check-dataset --config scripts/config/record_cfg.yaml` | Removes dataset records whose folders no longer exist. Use `--lerobot-home` to override the dataset cache root. |
+| `tools-check-dagger-dataset` | `tools-check-dagger-dataset --config scripts/config/dagger_rounds_cfg.yaml --train-config scripts/config/train_cfg.yaml` | Audits exported DAgger data, schema, action values, source labels, and train compatibility. |
+| `tools-preprocess-dataset` | `tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run` | Supports `--overwrite` and `--max-episodes`; writes a cleaned dataset through LeRobot APIs. |
+| `tools-split-label-dataset` | `tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run` | Supports `--label-only`, `--write-dataset`, `--overwrite`, `--max-episodes`, and `--resume-cache`. |
+| `tools-merge-datasets` | `tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run` | Merges datasets listed in `source.datasets` under `source.parent_dir`; supports `--overwrite` and `--max-episodes`. |
+
+Additional maintenance scripts are not installed as console commands, but can be run from this package root:
+
+| Script | Typical usage | Purpose |
+| --- | --- | --- |
+| `scripts/tools/rename_lerobot_task.py` | `python scripts/tools/rename_lerobot_task.py --dataset-root <dataset> --new-task "<task>" --dry-run` | Rename a task prompt in `meta/tasks.parquet`, episode metadata, and optional `dataset_info.txt`. |
+| `scripts/tools/merge_lerobot_tasks.py` | `python scripts/tools/merge_lerobot_tasks.py --dataset-root <dataset> --source-task "<old>" --target-task "<keep>" --dry-run` | Merge one task label into another inside a single dataset. |
+| `scripts/tools/patch_lerobot_dataset_metadata.py` | `python scripts/tools/patch_lerobot_dataset_metadata.py --dataset-root <dataset> --check-only` | Inspect or patch explicit dataset metadata fields such as description and repo id. |
+| `scripts/tools/run_dagger_export_train_experiment.py` | `python scripts/tools/run_dagger_export_train_experiment.py --raw-dataset <raw> --base-dataset <seed_or_agg> --initial-checkpoint <ckpt> --output-root <out> --dry-run` | Run export/train experiments for different DAgger export modes. |
+| `scripts/core/check_dagger_sampling.py` | `python scripts/core/check_dagger_sampling.py --dataset <aggregated_dataset>` | Inspect source-aware DAgger sampler weights. |
+| `scripts/tools/check_robotiq_ports.sh` | `bash scripts/tools/check_robotiq_ports.sh --verbose` | Locate Robotiq-like serial devices under `/dev/serial/by-id`; also supports `--json`. |
+| `scripts/tools/map_gripper.sh` | `sudo bash scripts/tools/map_gripper.sh dobot_left_gripper` | Create a udev symlink for one connected USB gripper. |
+| `rm_tmp.sh` | `bash rm_tmp.sh` | Remove Python caches and build artifacts from this package. |
+
+Run dataset tools inside the same Le-nero/lerobot environment used for recording and training. Some tools import `lerobot`, `numpy`, `torch`, `pyarrow`, `pandas`, `pyrealsense2`, or hardware SDKs at startup.
 
 ## Configuration Checklist
 
@@ -242,7 +264,7 @@ Before data collection, usually edit `scripts/config/record_cfg.yaml`:
 - `record.time`: max episode duration, reset duration, and metadata save period.
 - `replay`, `visualize`: default dataset and episode used by replay and visualization.
 
-Hardware parameters are usually edited in `scripts/DAS_config/*.yaml`:
+Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
 
 - `teleop.oculus_config.ip`: Oculus Quest IP.
 - `teleop.oculus_config.*_pose_scaler` and `*_channel_signs`: mapping from left/right controllers to robot actions.
@@ -274,7 +296,7 @@ Before DAgger, usually edit `scripts/config/dagger_rounds_cfg.yaml`:
 ### Install and Test Oculus Reader
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 cd teleoperators/oculus_teleoperator/oculus/oculus_reader
 pip install -e .
 python oculus_reader/reader.py
@@ -283,7 +305,7 @@ python oculus_reader/reader.py
 ### Install the Oculus Reader APK
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 cd teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/APK
 adb install -r teleop-debug.apk
 ```
@@ -292,7 +314,7 @@ After installation, the app appears in the Oculus Quest library under **Unknown 
 
 ### Configure Oculus Teleoperation
 
-Set the Oculus IP and mapping in the selected DAS config, for example `scripts/DAS_config/nero_cofig.yaml`:
+Set the Oculus IP and mapping in the selected robot config, for example `scripts/config/robots/nero_cofig.yaml`:
 
 ```yaml
 teleop:
@@ -361,9 +383,9 @@ adb install -r teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_rea
 ## Common Workflow
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 
-# 1. Show camera serial numbers and fill them into scripts/DAS_config/*.yaml
+# 1. Show camera serial numbers and fill them into scripts/config/robots/*.yaml
 tools-check-rs
 
 # 2. Check that policy configs resolve correctly. Recommended before run_policy/run_mix
@@ -396,17 +418,13 @@ robot-replay --config scripts/config/record_cfg.yaml
 robot-visualize --config scripts/config/record_cfg.yaml
 ```
 
-<p align="center">
-  <img src="docs/pic/record.png" alt="Record" width="600">
-  <br>
-  <b>Figure 1: Record</b>
-</p>
+![Record](docs/images/record.png)
 
-<p align="center">
-  <img src="docs/pic/visualize.png" alt="Visualization" width="600">
-  <br>
-  <b>Figure 2: Visualization</b>
-</p>
+**Figure 1: Record**
+
+![Visualization](docs/images/visualize.png)
+
+**Figure 2: Visualization**
 
 ### Resume Recording
 
@@ -427,28 +445,42 @@ huggingface-cli whoami
 
 ### Merge Datasets
 
+For local LeRobot datasets that share the same feature schema, use the config-driven tool:
+
 ```bash
-lerobot-edit-dataset \
-    --repo_id <merged_repo_id> \
-    --operation.type merge \
-    --operation.repo_ids "['<repo_id_1>', '<repo_id_2>']"
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml
 ```
 
-For more dataset processing commands, see the LeRobot dataset tools documentation.
+The important fields in `scripts/config/merge_dataset_cfg.yaml` are:
+
+```yaml
+merge_datasets:
+  source:
+    parent_dir: "/path/to/common/source/folder"
+    repo_id_prefix: "franka_dual_arm"
+    datasets:
+      - "dataset_a"
+      - "dataset_b"
+
+  output:
+    parent_dir: "/path/to/output/folder"
+    dataset_name: "merged_dataset"
+```
+
+The tool uses `LeRobotDataset.create`, `add_frame`, `save_episode`, and `finalize` instead of directly editing parquet files. It preserves episode boundaries and task strings, validates fps/features/robot type by default, and writes `meta/merge_summary.json` in the output dataset.
+
+To merge or rename task prompts inside a single dataset, use `scripts/tools/merge_lerobot_tasks.py` or `scripts/tools/rename_lerobot_task.py`.
 
 ## Dataset Naming and Local Metadata
 
-<p align="center">
-  <img src="docs/pic/dataset.png" alt="Dataset" width="600">
-  <br>
-  <b>Figure 3: Dataset</b>
-</p>
+![Dataset](docs/images/dataset.png)
 
-<p align="center">
-  <img src="docs/pic/dataset_info.png" alt="Dataset info" width="600">
-  <br>
-  <b>Figure 4: Dataset Info</b>
-</p>
+**Figure 3: Dataset**
+
+![Dataset info](docs/images/dataset_info.png)
+
+**Figure 4: Dataset Info**
 
 LeRobot datasets are stored under `~/.cache/huggingface/lerobot` by default unless `dataset_path` or `dataset_root` is configured. Local dataset metadata may include:
 

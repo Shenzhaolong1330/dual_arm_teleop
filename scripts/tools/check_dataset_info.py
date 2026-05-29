@@ -1,23 +1,50 @@
-import yaml
+import argparse
+import os
 from pathlib import Path
-from lerobot.utils.constants import HF_LEROBOT_HOME
 import re
 import shutil
 from datetime import datetime
 
+import yaml
 
-def clean_dataset_info():
-    # ====== [LOAD CONFIG] ======
-    parent_path = Path(__file__).resolve().parent
-    cfg_path = parent_path.parent / "config" / "cfg.yaml"
+try:  # Keep --help usable outside the LeRobot runtime environment.
+    from lerobot.utils.constants import HF_LEROBOT_HOME
+except ModuleNotFoundError:  # pragma: no cover - depends on local env
+    HF_LEROBOT_HOME = None
+
+
+def _default_config_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "config" / "record_cfg.yaml"
+
+
+def _default_lerobot_home() -> Path:
+    if HF_LEROBOT_HOME is not None:
+        return Path(HF_LEROBOT_HOME)
+    if os.getenv("HF_LEROBOT_HOME"):
+        return Path(os.environ["HF_LEROBOT_HOME"]).expanduser()
+    if os.getenv("HF_HOME"):
+        return Path(os.environ["HF_HOME"]).expanduser() / "lerobot"
+    return Path.home() / ".cache" / "huggingface" / "lerobot"
+
+
+def _load_repo_id(cfg_path: Path) -> str:
     with open(cfg_path, "r") as f:
         cfg = yaml.safe_load(f)
+    record_cfg = cfg.get("record", cfg)
+    repo_id = record_cfg.get("repo_id")
+    if not repo_id:
+        raise ValueError(f"Cannot find record.repo_id in config: {cfg_path}")
+    return str(repo_id)
 
-    repo_id = cfg["record"]["repo_id"]
+
+def clean_dataset_info(config_path: Path | None = None, lerobot_home: Path | None = None):
+    # ====== [LOAD CONFIG] ======
+    cfg_path = config_path or _default_config_path()
+    repo_id = _load_repo_id(cfg_path)
     user_name = repo_id.split("/", 1)[0]
 
     # ====== [DEFINE PATHS] ======
-    base_path = Path(HF_LEROBOT_HOME) / user_name       # e.g. ~/.cache/lerobot/scylearning
+    base_path = (lerobot_home or _default_lerobot_home()) / user_name
     info_file = base_path / "dataset_info.txt"
 
     if not info_file.exists():
@@ -79,4 +106,22 @@ def clean_dataset_info():
 
 
 def main():
-    clean_dataset_info()
+    parser = argparse.ArgumentParser(description="Clean stale entries from local dataset_info.txt.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=_default_config_path(),
+        help="Path to record_cfg.yaml used to infer the dataset owner folder.",
+    )
+    parser.add_argument(
+        "--lerobot-home",
+        type=Path,
+        default=None,
+        help="Override LeRobot dataset home. Defaults like LeRobot: HF_LEROBOT_HOME or HF_HOME/lerobot.",
+    )
+    args = parser.parse_args()
+    clean_dataset_info(args.config, args.lerobot_home)
+
+
+if __name__ == "__main__":
+    main()

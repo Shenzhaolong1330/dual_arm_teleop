@@ -17,16 +17,16 @@ dagger_rounds:
   policy:
     type: act
     # Used for rollout / record / policy inference during DAgger data collection.
-    reason_config_path: scripts/policy_config/act_reason_config.yaml
+    reason_config_path: scripts/config/policies/act_reason_config.yaml
     # Used for training the next-round policy.
-    train_config_path: scripts/policy_config/act_train_config.yaml
+    train_config_path: scripts/config/policies/act_train_config.yaml
     # Legacy alias only: config_path is treated as reason_config_path by code.
-    # config_path: scripts/policy_config/act_reason_config.yaml
+    # config_path: scripts/config/policies/act_reason_config.yaml
   # For diffusion policy:
   # policy:
   #   type: diffusion
-  #   reason_config_path: scripts/policy_config/diffusion_reason_config.yaml
-  #   train_config_path: scripts/policy_config/diffusion_train_config.yaml
+  #   reason_config_path: scripts/config/policies/diffusion_reason_config.yaml
+  #   train_config_path: scripts/config/policies/diffusion_train_config.yaml
 
   num_rounds: 3
   round_schedule:

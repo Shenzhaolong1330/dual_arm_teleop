@@ -21,27 +21,30 @@ def _default_record_cfg_path() -> Path:
 
 
 ROBOT_DETAIL_CONFIG_FILES = {
+    "dobot_dual_arm": "dobot_config.yaml",
     "franka": "franka_config.yaml",
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
+    "arx_dual_arm": "arx_config.yaml",
 }
+ROBOT_CONFIG_DIR = Path("config") / "robots"
 
 
 def _load_das_config(robot_type: str) -> Dict[str, Any]:
     config_name = ROBOT_DETAIL_CONFIG_FILES.get(robot_type)
     if config_name is None:
         raise ValueError(
-            "No DAS_config mapping is defined for robot_type="
+            "No robot config mapping is defined for robot_type="
             f"{robot_type!r}. Add replay.robot or extend ROBOT_DETAIL_CONFIG_FILES."
         )
-    das_config_path = _default_scripts_dir() / "DAS_config" / config_name
+    das_config_path = _default_scripts_dir() / ROBOT_CONFIG_DIR / config_name
     with open(das_config_path, "r") as f:
         loaded = yaml.safe_load(f)
     if not isinstance(loaded, dict):
-        raise ValueError(f"DAS config must be a mapping: {das_config_path}")
+        raise ValueError(f"Robot config must be a mapping: {das_config_path}")
     detail_cfg = loaded.get("record", loaded)
     if not isinstance(detail_cfg, dict):
-        raise ValueError(f"DAS config `record` section must be a mapping: {das_config_path}")
+        raise ValueError(f"Robot config `record` section must be a mapping: {das_config_path}")
     return detail_cfg
 
 
@@ -79,6 +82,11 @@ class ReplayConfig:
         self.robot_ip: str = robot.get("robot_ip", robot.get("ip", "localhost"))
         self.robot_port: int = robot.get("robot_port", 4242)
         self.control_mode: str = cfg.get("control_mode", "oculus")
+        self.robot_config: Dict[str, Any] = dict(robot)
+        self.robot_config["robot_ip"] = self.robot_ip
+        self.robot_config["robot_port"] = self.robot_port
+        self.robot_config["control_mode"] = self.control_mode
+        self.robot_config["debug"] = False
         # Finish behavior: mirror run_record defaults.
         self.reset_on_finish: bool = cfg.get("reset_on_finish", True)
         self.disconnect_on_finish: bool = cfg.get("disconnect_on_finish", False)
@@ -96,10 +104,7 @@ def run_replay(replay_cfg: ReplayConfig):
 
     robot_config = create_robot_config(
         replay_cfg.robot_type,
-        robot_ip=replay_cfg.robot_ip,
-        robot_port=replay_cfg.robot_port,
-        debug=False,
-        control_mode=replay_cfg.control_mode
+        **replay_cfg.robot_config,
     )
     
     robot = create_robot(replay_cfg.robot_type, robot_config)

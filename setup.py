@@ -14,8 +14,6 @@ setup(
             "robots.*",
             "teleoperators*",
             "teleoperators.*",
-            "lerobot_robot_agilex_nero*",
-            "lerobot_teleoperator_oculus*",
         ],
     ),
     include_package_data=True,
@@ -45,6 +43,7 @@ setup(
             "tools-check-rs = scripts.tools.rs_devices:main",
             "tools-preprocess-dataset = scripts.tools.preprocess_dataset:main",
             "tools-split-label-dataset = scripts.tools.split_label_dataset:main",
+            "tools-merge-datasets = scripts.tools.merge_lerobot_datasets:main",
 
             # unified help command
             "robot-help = scripts.help.help_info:main",

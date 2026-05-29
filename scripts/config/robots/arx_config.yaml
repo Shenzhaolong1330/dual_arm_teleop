@@ -1,0 +1,41 @@
+# ARX R5 dual-arm hardware-side configuration loaded by scripts/core/run_record.py
+# when record.robot_type is arx_dual_arm.
+teleop:
+  control_mode: "oculus"
+  dual_arm: true
+  oculus_config:
+    ip:
+    use_gripper: true
+    left_pose_scaler: [2.5, 2.5]
+    left_channel_signs: [1, 1, 1, -1, -1, 1]
+    right_pose_scaler: [2.5, 2.5]
+    right_channel_signs: [1, 1, 1, -1, -1, 1]
+    visualize_placo: false
+
+robot:
+  # Historical hardware value restored from the ARX R5 record config.
+  # Replace this with the current ARX RPC server address before use.
+  robot_ip: "10.10.10.2"
+  robot_port: 4242
+  use_gripper: true
+  gripper_reverse: false
+  close_threshold: 0.5
+  gripper_open_value: 0.0
+  gripper_close_value: 1.0
+  go_home_on_connect: true
+  home_joint_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+  home_steps: 50
+  home_step_interval: 0.02
+  enable_ee_action_filter: true
+  ee_action_filter_alpha_pos: 0.4
+  ee_action_filter_alpha_rot: 0.35
+  enable_ee_action_deadband: true
+  ee_action_deadband_pos_norm: 0.00005
+  ee_action_deadband_rot_norm: 0.0005
+
+cameras:
+  left_wrist_cam_serial: "218622274803"
+  right_wrist_cam_serial: "218622278394"
+  head_cam_serial: "218622271302"
+  width: 424
+  height: 240

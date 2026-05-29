@@ -23,13 +23,15 @@ record:
   run_mode: "run_record" # run_record | run_policy | run_mix
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka.
-  # Hardware-specific teleop / robot / cameras sections are loaded from scripts/DAS_config by robot_type.
+  # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
   robot_type: &robot_type "franka_dual_arm"
   # robot_type: &robot_type "nero_dual_arm"
 
   # Optional explicit override if you do not want the robot_type default mapping:
-  # das_config_path: scripts/DAS_config/franka_config.yaml
-  # das_config_path: scripts/DAS_config/nero_cofig.yaml
+  # das_config_path: scripts/config/robots/dobot_config.yaml
+  # das_config_path: scripts/config/robots/franka_config.yaml
+  # das_config_path: scripts/config/robots/nero_cofig.yaml
+  # das_config_path: scripts/config/robots/arx_config.yaml
 
   policy:
     # 策略类型: act | diffusion | dp | diffusion_policy
@@ -38,24 +40,24 @@ record:
     # Franka:
     # For ACT:
     type: "act"
-    config_path: scripts/policy_config/act_reason_config.yaml
+    config_path: scripts/config/policies/act_reason_config.yaml
     pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"
-    # config_path: scripts/policy_config/diffusion_reason_config.yaml
+    # config_path: scripts/config/policies/diffusion_reason_config.yaml
     # pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:
     # type: "act"
-    # config_path: scripts/policy_config/act_reason_config.yaml
+    # config_path: scripts/config/policies/act_reason_config.yaml
     # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/nero_dual_arm/left_right_pick/act_20260520_E50_V01_2/checkpoints/last/pretrained_model"
     # type: "diffusion"
-    # config_path: scripts/policy_config/diffusion_reason_config.yaml
+    # config_path: scripts/config/policies/diffusion_reason_config.yaml
     # pretrained_path: "/home/deepcybo/wbcd_ws/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/task3_step1/2mL_empty_right/dp_20260523_E249_LastFrames0/checkpoints/last/pretrained_model"
 
-    # Policy hyperparameters have been moved to scripts/policy_config/*_reason_config.yaml.
+    # Policy hyperparameters live in scripts/config/policies/*_reason_config.yaml.
 
   task:
     description: "pick up small vials and insert them in the empty rack" # task description
@@ -83,7 +85,7 @@ replay:
   # episode_idx: 15
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
-  robot_type: *robot_type # robot details are loaded from scripts/DAS_config by robot_type
+  robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
   dataset_name: franka_dual_arm/left_right_pick_merged_E150

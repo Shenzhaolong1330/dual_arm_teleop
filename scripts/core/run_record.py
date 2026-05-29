@@ -92,17 +92,16 @@ GRIPPER_COMMAND_KEY_CANDIDATES = {
     "left": ("left_gripper_cmd", "left_gripper_cmd_bin"),
     "right": ("right_gripper_cmd", "right_gripper_cmd_bin"),
 }
-FRANKA_EXTRA_ROBOT_CONFIG_KEYS = (
-    "schema_mode",
-    "rpc_timeout_sec",
-    "open_grippers_on_connect",
-    "reset_opens_grippers",
-    "reset_go_home",
-    "go_home_duration_sec",
-    "go_home_rate_hz",
-    "max_cartesian_delta",
-    "max_rotation_delta",
-)
+BASE_ROBOT_CONFIG_KEYS = {
+    "robot_ip",
+    "robot_port",
+    "use_gripper",
+    "close_threshold",
+    "gripper_reverse",
+    "gripper_max_open",
+    "gripper_force",
+    "gripper_speed",
+}
 
 def _default_scripts_dir() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -117,10 +116,14 @@ def _default_record_cfg_path() -> Path:
 
 
 ROBOT_DETAIL_CONFIG_FILES = {
+    "dobot_dual_arm": "dobot_config.yaml",
     "franka": "franka_config.yaml",
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
+    "arx_dual_arm": "arx_config.yaml",
 }
+ROBOT_CONFIG_DIR = Path("config") / "robots"
+LEGACY_ROBOT_CONFIG_DIR = Path("DAS_config")
 
 ROBOT_DETAIL_CONFIG_KEYS = ("teleop", "robot", "cameras")
 
@@ -148,7 +151,10 @@ def _resolve_das_config_path(
         candidates = (
             project_root / path,
             scripts_dir / path,
-            scripts_dir / "DAS_config" / path,
+            scripts_dir / ROBOT_CONFIG_DIR / path,
+            scripts_dir / ROBOT_CONFIG_DIR / path.name,
+            project_root / "scripts" / ROBOT_CONFIG_DIR / path.name,
+            scripts_dir / LEGACY_ROBOT_CONFIG_DIR / path,
         )
         for candidate in candidates:
             if candidate.is_file():
@@ -158,11 +164,11 @@ def _resolve_das_config_path(
     config_name = ROBOT_DETAIL_CONFIG_FILES.get(robot_type)
     if config_name is None:
         raise ValueError(
-            "No DAS_config mapping is defined for robot_type="
+            "No robot config mapping is defined for robot_type="
             f"{robot_type!r}. Add record.das_config_path or extend "
             "ROBOT_DETAIL_CONFIG_FILES."
         )
-    return scripts_dir / "DAS_config" / config_name
+    return scripts_dir / ROBOT_CONFIG_DIR / config_name
 
 
 def _load_robot_detail_cfg(
@@ -180,15 +186,15 @@ def _load_robot_detail_cfg(
     with open(das_config_path, "r") as f:
         loaded = yaml.safe_load(f)
     if not isinstance(loaded, dict):
-        raise ValueError(f"DAS config must be a mapping: {das_config_path}")
+        raise ValueError(f"Robot config must be a mapping: {das_config_path}")
     detail_cfg = loaded.get("record", loaded)
     if not isinstance(detail_cfg, dict):
-        raise ValueError(f"DAS config `record` section must be a mapping: {das_config_path}")
+        raise ValueError(f"Robot config `record` section must be a mapping: {das_config_path}")
 
     missing = [key for key in ROBOT_DETAIL_CONFIG_KEYS if key not in detail_cfg]
     if missing:
         raise ValueError(
-            f"DAS config is missing required section(s) {missing}: {das_config_path}"
+            f"Robot config is missing required section(s) {missing}: {das_config_path}"
         )
     return {key: copy.deepcopy(detail_cfg[key]) for key in ROBOT_DETAIL_CONFIG_KEYS}
 
@@ -366,9 +372,9 @@ class RecordConfig:
         self.gripper_force: float = robot.get("gripper_force", 10.0)
         self.gripper_speed: float = robot.get("gripper_speed", 0.1)
         self.robot_extra_config: dict[str, Any] = {
-            key: robot[key]
-            for key in FRANKA_EXTRA_ROBOT_CONFIG_KEYS
-            if key in robot and robot[key] is not None
+            key: value
+            for key, value in robot.items()
+            if key not in BASE_ROBOT_CONFIG_KEYS and value is not None
         }
         
         # Task config

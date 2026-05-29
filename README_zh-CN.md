@@ -1,84 +1,58 @@
-# Le-nero 双臂遥操作与数据采集
+# Dual Arm Teleoperation 双臂遥操作
 
-本目录是 Le-nero 中的双臂遥操作与数据采集层，基于 LeRobot 提供机器人适配、Oculus 遥操作、数据集录制/回放/可视化、策略训练和轮次式 DAgger 闭环。
-
-<p align="center">
-  <img src="docs/pic/nero.png" alt="Dobot dual-arm system" width="600">
-</p>
+本项目用于双臂遥操作、数据采集、回放/可视化、策略训练和轮次式 DAgger 闭环。项目使用 `Key-Zzs/Le-nero` 提供的 `lerobot` 包作为数据集、策略和 DAgger 相关实现，并使用本仓库自己的机器人和遥操作适配层。
 
 <p align="center">
-  <img src="docs/pic/dobot.jpeg" alt="Dobot dual-arm system" width="600">
+  <img src="docs/images/supported_robots.jpg" alt="Supported robot systems" width="900">
 </p>
 
-<p align="center">
-  <img src="docs/pic/arx.jpeg" alt="ARX dual-arm system" width="600">
-</p>
-
-<p align="center">
-  <img src="docs/pic/quest3s.jpg" alt="Oculus Quest" width="600">
-</p>
+上图中的机器人适配器已在当前注册表中支持：Dobot 双臂、AgileX Nero 双臂、ARX 双臂，以及 Franka 单臂/双臂。对应的 `robot_type` 分别是 `dobot_dual_arm`、`nero_dual_arm`、`arx_dual_arm`、`franka` 和 `franka_dual_arm`。
 
 ## 仓库获取与环境配置
 
-首次拉取仓库时建议直接带上子模块：
+首次拉取仓库：
 
 ```bash
-git clone --recurse-submodules https://github.com/Key-Zzs/Le-nero
-cd Le-nero
+git clone https://github.com/Shenzhaolong1330/dual_arm_teleop.git
+cd dual_arm_teleop
 ```
 
-如果已经 clone 过仓库，但子模块目录为空或缺文件，在仓库根目录执行：
+日常更新本仓库：
 
 ```bash
-git submodule sync --recursive
-git submodule update --init --recursive
-```
-
-日常更新主仓库和子模块：
-
-```bash
-cd Le-nero
+cd dual_arm_teleop
 git pull --ff-only
-git submodule sync --recursive
-git submodule update --init --recursive
-git submodule update --remote --merge --recursive
 ```
 
-切换主仓库分支：
+切换分支：
 
 ```bash
 git fetch origin
 git switch <branch_name>
-git submodule update --init --recursive
 ```
 
-切换或更新本双臂遥操作包：
-
-```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
-git fetch origin
-git switch main
-git pull --ff-only
-```
-
-创建 Python 环境并安装根仓库与本包：
+创建 Python 环境，先安装 Le-nero，再安装本包：
 
 ```bash
 conda create -n dual_arm_teleop python=3.10 -y
 conda activate dual_arm_teleop
 python -m pip install --upgrade pip
 
+# 先安装 Le-nero。它提供本项目策略和 DAgger 流程需要的 lerobot 包。
+git clone https://github.com/Key-Zzs/Le-nero.git
 cd Le-nero
 pip install -e .
 
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 pip install -e .
 ```
 
-Oculus Reader 不是通过当前 `.gitmodules` 管理的子模块，需要单独 clone 到指定目录：
+如果本地已经 clone 过 `Le-nero`，直接使用已有 checkout 即可。这里应安装 `Key-Zzs/Le-nero`，而不是上游原版 LeRobot，因为本项目的策略和 DAgger 流程依赖 Le-nero 中的内容。
+
+Oculus Reader 不随本仓库 vendored，需要单独 clone 到指定目录：
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/teleoperators/oculus_teleoperator/oculus
+cd /path/to/dual_arm_teleop/teleoperators/oculus_teleoperator/oculus
 git clone https://github.com/rail-berkeley/oculus_reader.git
 cd oculus_reader
 pip install -e .
@@ -87,7 +61,7 @@ pip install -e .
 如果该目录已经存在，只需要更新并重新安装：
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/teleoperators/oculus_teleoperator/oculus/oculus_reader
+cd /path/to/dual_arm_teleop/teleoperators/oculus_teleoperator/oculus/oculus_reader
 git pull --ff-only
 pip install -e .
 ```
@@ -113,28 +87,28 @@ scripts/core/*.py 命令入口
         |
         +--> robots 创建真实机器人接口
         +--> teleoperators 创建 Oculus 遥操作输入
-        +--> ../../src/lerobot/policies 创建策略模型
+        +--> Le-nero 的 lerobot.policies 创建策略模型
         |
         v
-LeRobot dataset / train / replay / visualize
+Le-nero 提供的 lerobot dataset / train / replay / visualize
 ```
 
 ### 策略层
 
-策略代码位于 Le-nero 根仓库：
+策略和 DAgger 实现来自已安装的 `Key-Zzs/Le-nero` 仓库，它提供本项目使用的 `lerobot` Python 包：
 
 ```text
-src/lerobot/policies
+lerobot.policies
 ```
 
-这里保留 LeRobot 的策略抽象和具体实现，例如 `act`、`diffusion`、`smolvla`、`pi0` 等。双臂遥操作脚本主要通过 `lerobot.policies.factory.make_policy` 和 `make_pre_post_processors` 创建策略对象及前后处理器。
+这个包里保留策略抽象和具体实现，例如 `act`、`diffusion`、`smolvla`、`pi0` 等，也包含训练和 DAgger 流程需要的项目相关行为。双臂遥操作脚本主要通过 `lerobot.policies.factory.make_policy` 和 `make_pre_post_processors` 创建策略对象及前后处理器。
 
 本包最常用的策略配置文件是：
 
-- `scripts/policy_config/act_train_config.yaml`：ACT 训练配置。
-- `scripts/policy_config/act_reason_config.yaml`：ACT 推理/部署配置。
-- `scripts/policy_config/diffusion_train_config.yaml`：Diffusion Policy 训练配置。
-- `scripts/policy_config/diffusion_reason_config.yaml`：Diffusion Policy 推理/部署配置。
+- `scripts/config/policies/act_train_config.yaml`：ACT 训练配置。
+- `scripts/config/policies/act_reason_config.yaml`：ACT 推理/部署配置。
+- `scripts/config/policies/diffusion_train_config.yaml`：Diffusion Policy 训练配置。
+- `scripts/config/policies/diffusion_reason_config.yaml`：Diffusion Policy 推理/部署配置。
 
 `scripts/core/policy_config_utils.py` 负责解析 `record_cfg.yaml`、`train_cfg.yaml` 或 `dagger_rounds_cfg.yaml` 中的策略配置路径。相对路径会优先按本包根目录解析，也支持直接写绝对路径。
 
@@ -151,6 +125,7 @@ robots
 - `franka`
 - `dobot_dual_arm`
 - `nero_dual_arm`
+- `arx_dual_arm`
 - `franka_dual_arm`
 
 脚本不会直接实例化某个具体机器人类，而是根据配置中的 `robot_type` 调用：
@@ -160,15 +135,24 @@ create_robot_config(robot_type, **robot_cfg)
 create_robot(robot_type, robot_config)
 ```
 
+本包的 `robot-*` 命令使用仓库内自己的 `robots` 和 `teleoperators` 注册表。现在不再保留 `lerobot_robot_*` 或 `lerobot_teleoperator_*` 这类顶层 LeRobot 插件 shim 包，因此不提供上游 LeRobot CLI `register_third_party_devices()` 的自动发现别名。
+
 具体机器人类负责实现 LeRobot 期望的机器人接口，例如 `connect()`、`reset()`、`send_action()`、相机初始化、观测字段和动作字段定义。以 `nero_dual_arm` 为例，`robots/dual_agilex_nero/nero_dual_arm.py` 通过 `NeroDualArmClient` 连接双臂 zerorpc 服务，并把双臂末端位姿、关节状态、夹爪命令和 RealSense 相机组织成 LeRobot 可记录的数据结构。
 
 硬件相关参数不建议直接写在运行脚本里，而是放在：
 
 ```text
-scripts/DAS_config
+scripts/config/robots
 ```
 
-例如 `nero_cofig.yaml` 定义 Nero 的机器人 IP、端口、夹爪参数、Oculus 映射和相机序列号。`run_record.py`、`run_replay.py`、`reset_robot.py` 会根据 `record.robot_type` 自动加载对应 DAS 配置；也可以在 `record_cfg.yaml` 中通过 `das_config_path` 显式指定。
+默认机器人配置映射如下：
+
+- `dobot_dual_arm`：`scripts/config/robots/dobot_config.yaml`
+- `nero_dual_arm`：`scripts/config/robots/nero_cofig.yaml`
+- `arx_dual_arm`：`scripts/config/robots/arx_config.yaml`
+- `franka`、`franka_dual_arm`：`scripts/config/robots/franka_config.yaml`
+
+每个文件定义对应硬件的机器人 IP、端口、夹爪参数、Oculus 映射和相机序列号。`run_record.py`、`run_replay.py`、`reset_robot.py` 会根据 `record.robot_type` 自动加载对应机器人配置；也可以在 `record_cfg.yaml` 中通过 `das_config_path` 显式指定。
 
 ### 工具脚本、数采系统与策略配置
 
@@ -181,9 +165,9 @@ scripts
 常用目录含义：
 
 - `scripts/core`：命令入口实现，包括采集、回放、可视化、重置、训练、DAgger。
-- `scripts/config`：主流程配置，包含 `record_cfg.yaml`、`train_cfg.yaml`、`dagger_rounds_cfg.yaml`。
-- `scripts/policy_config`：策略超参数配置，区分 train 和 reason 两类。
-- `scripts/DAS_config`：硬件和遥操作细节配置。
+- `scripts/config`：主流程配置，包含 `record_cfg.yaml`、`train_cfg.yaml`、`dagger_rounds_cfg.yaml` 和数据集工具配置。
+- `scripts/config/policies`：策略超参数配置，区分 train 和 reason 两类。
+- `scripts/config/robots`：硬件和遥操作细节配置。
 - `scripts/tools`：数据集检查、RealSense 设备检查、数据集修补和重命名等工具。
 
 核心配置文件：
@@ -191,6 +175,9 @@ scripts
 - `record_cfg.yaml`：数据采集、策略推理、混合控制、回放和可视化共用的主配置。
 - `train_cfg.yaml`：策略训练配置，包括数据集路径、输出目录、GPU、batch size、训练步数和 wandb。
 - `dagger_rounds_cfg.yaml`：轮次式 DAgger 控制器配置，负责把采集、导出、训练串成闭环。
+- `preprocess_dataset_cfg.yaml`：数据集清理、静止片段压缩和动作平滑配置。
+- `split_label_dataset_cfg.yaml`：长 episode 切分、语义标注和 VLA manifest 配置。
+- `merge_dataset_cfg.yaml`：把多个本地 LeRobot 数据集合并为一个输出数据集。
 - `*_train_config.yaml`：策略训练时使用的模型结构和训练相关超参数。
 - `*_reason_config.yaml`：策略推理或部署时使用的模型结构、设备和 checkpoint 参数。
 
@@ -213,12 +200,15 @@ scripts
 | `robot-train` | 训练 ACT 或 Diffusion Policy | `scripts/config/train_cfg.yaml` |
 | `robot-dagger` | 运行轮次式 DAgger：采集、导出、训练下一轮策略 | `scripts/config/dagger_rounds_cfg.yaml` |
 | `robot-dagger-export` | 从 raw run_mix 日志单独导出 DAgger 训练数据 | `scripts/config/dagger_rounds_cfg.yaml` 的 `dagger_export` 段 |
-| `tools-check-dataset` | 检查本地 LeRobot 数据集信息 | 命令参数 |
-| `tools-check-dagger-dataset` | 检查导出的 DAgger 数据集 | 命令参数 |
+| `tools-check-dataset` | 清理本地 `dataset_info.txt` 中已不存在的数据集记录 | `scripts/config/record_cfg.yaml` |
+| `tools-check-dagger-dataset` | 训练前审计导出的 DAgger 数据集 | `scripts/config/dagger_rounds_cfg.yaml`、`scripts/config/train_cfg.yaml` |
 | `tools-check-rs` | 查看 RealSense 设备序列号 | 无 |
+| `tools-preprocess-dataset` | 压缩静止片段、可选平滑动作，并通过 LeRobot API 重写数据集 | `scripts/config/preprocess_dataset_cfg.yaml` |
+| `tools-split-label-dataset` | 将长 episode 切分为带语义标签的子 episode，可选写新数据集 | `scripts/config/split_label_dataset_cfg.yaml` |
+| `tools-merge-datasets` | 将多个 schema 一致的本地 LeRobot 数据集合并为一个实体数据集 | `scripts/config/merge_dataset_cfg.yaml` |
 | `robot-help` | 打印命令摘要 | 无 |
 
-所有核心命令都支持显式传入配置文件，推荐调试时总是写明路径：
+所有核心命令和配置驱动的数据集工具都支持显式传入配置文件，推荐调试时总是写明路径：
 
 ```bash
 robot-record --config scripts/config/record_cfg.yaml
@@ -228,7 +218,38 @@ robot-reset --config scripts/config/record_cfg.yaml
 robot-train --config scripts/config/train_cfg.yaml
 robot-dagger --config scripts/config/dagger_rounds_cfg.yaml
 robot-dagger-export --config scripts/config/dagger_rounds_cfg.yaml
+tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run
+tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 ```
+
+## 工具命令与维护脚本
+
+已注册的工具命令如下：
+
+| 命令 | 常用用法 | 说明 |
+| --- | --- | --- |
+| `tools-check-rs` | `tools-check-rs` | 需要 `pyrealsense2`；打印已连接 RealSense 的名称和序列号。 |
+| `tools-check-dataset` | `tools-check-dataset --config scripts/config/record_cfg.yaml` | 删除本地记录中实际文件夹已不存在的数据集条目；可用 `--lerobot-home` 覆盖数据集缓存根目录。 |
+| `tools-check-dagger-dataset` | `tools-check-dagger-dataset --config scripts/config/dagger_rounds_cfg.yaml --train-config scripts/config/train_cfg.yaml` | 审计 DAgger 导出数据、schema、动作值、source 标签和训练兼容性。 |
+| `tools-preprocess-dataset` | `tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run` | 支持 `--overwrite` 和 `--max-episodes`；通过 LeRobot API 写出清理后的数据集。 |
+| `tools-split-label-dataset` | `tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run` | 支持 `--label-only`、`--write-dataset`、`--overwrite`、`--max-episodes` 和 `--resume-cache`。 |
+| `tools-merge-datasets` | `tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run` | 合并 `source.parent_dir` 下 `source.datasets` 列出的数据集；支持 `--overwrite` 和 `--max-episodes`。 |
+
+以下维护脚本未注册为 console command，但可在本包根目录直接运行：
+
+| 脚本 | 常用用法 | 作用 |
+| --- | --- | --- |
+| `scripts/tools/rename_lerobot_task.py` | `python scripts/tools/rename_lerobot_task.py --dataset-root <dataset> --new-task "<task>" --dry-run` | 重命名单个数据集里的 task prompt，并同步 `meta/tasks.parquet`、episode metadata 和可选 `dataset_info.txt`。 |
+| `scripts/tools/merge_lerobot_tasks.py` | `python scripts/tools/merge_lerobot_tasks.py --dataset-root <dataset> --source-task "<old>" --target-task "<keep>" --dry-run` | 将单个数据集里的一个 task 标签合并到另一个 task 标签。 |
+| `scripts/tools/patch_lerobot_dataset_metadata.py` | `python scripts/tools/patch_lerobot_dataset_metadata.py --dataset-root <dataset> --check-only` | 检查或修补数据集 description、repo id 等显式 metadata 字段。 |
+| `scripts/tools/run_dagger_export_train_experiment.py` | `python scripts/tools/run_dagger_export_train_experiment.py --raw-dataset <raw> --base-dataset <seed_or_agg> --initial-checkpoint <ckpt> --output-root <out> --dry-run` | 针对不同 DAgger export mode 跑导出/训练实验。 |
+| `scripts/core/check_dagger_sampling.py` | `python scripts/core/check_dagger_sampling.py --dataset <aggregated_dataset>` | 检查 source-aware DAgger sampler 权重。 |
+| `scripts/tools/check_robotiq_ports.sh` | `bash scripts/tools/check_robotiq_ports.sh --verbose` | 在 `/dev/serial/by-id` 下查找疑似 Robotiq 夹爪串口；也支持 `--json`。 |
+| `scripts/tools/map_gripper.sh` | `sudo bash scripts/tools/map_gripper.sh dobot_left_gripper` | 给单个已连接 USB 夹爪创建 udev 软链接。 |
+| `rm_tmp.sh` | `bash rm_tmp.sh` | 清理本包内 Python cache 和构建产物。 |
+
+数据集工具请在平时运行 Le-nero/lerobot 采集和训练的环境里执行。部分工具启动时会导入 `lerobot`、`numpy`、`torch`、`pyarrow`、`pandas`、`pyrealsense2` 或硬件 SDK。
 
 ## 配置检查清单
 
@@ -242,7 +263,7 @@ robot-dagger-export --config scripts/config/dagger_rounds_cfg.yaml
 - `record.time`：episode 最大时长、reset 时长和 metadata 保存周期。
 - `replay`、`visualize`：回放和可视化默认使用的数据集和 episode。
 
-硬件参数通常在 `scripts/DAS_config/*.yaml` 中修改：
+硬件参数通常在 `scripts/config/robots/*.yaml` 中修改：
 
 - `teleop.oculus_config.ip`：Oculus Quest IP。
 - `teleop.oculus_config.*_pose_scaler` 和 `*_channel_signs`：左右手柄到机器人动作的映射。
@@ -274,7 +295,7 @@ DAgger 前通常需要修改 `scripts/config/dagger_rounds_cfg.yaml`：
 ### 安装并测试 Oculus Reader
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 cd teleoperators/oculus_teleoperator/oculus/oculus_reader
 pip install -e .
 python oculus_reader/reader.py
@@ -283,7 +304,7 @@ python oculus_reader/reader.py
 ### 安装 Oculus Reader APK
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 cd teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_reader/APK
 adb install -r teleop-debug.apk
 ```
@@ -292,7 +313,7 @@ adb install -r teleop-debug.apk
 
 ### 配置 Oculus 遥操作
 
-在所选 DAS 配置中设置 Oculus IP 和映射参数，例如 `scripts/DAS_config/nero_cofig.yaml`：
+在所选机器人配置中设置 Oculus IP 和映射参数，例如 `scripts/config/robots/nero_cofig.yaml`：
 
 ```yaml
 teleop:
@@ -361,9 +382,9 @@ adb install -r teleoperators/oculus_teleoperator/oculus/oculus_reader/oculus_rea
 ## 常用流程
 
 ```bash
-cd Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop
+cd /path/to/dual_arm_teleop
 
-# 1. 查看相机序列号，填入 scripts/DAS_config/*.yaml
+# 1. 查看相机序列号，填入 scripts/config/robots/*.yaml
 tools-check-rs
 
 # 2. 检查策略配置能否正常解析，run_policy/run_mix 前推荐执行
@@ -396,17 +417,13 @@ robot-replay --config scripts/config/record_cfg.yaml
 robot-visualize --config scripts/config/record_cfg.yaml
 ```
 
-<p align="center">
-  <img src="docs/pic/record.png" alt="Record" width="600">
-  <br>
-  <b>Figure 1: Record</b>
-</p>
+![Record](docs/images/record.png)
 
-<p align="center">
-  <img src="docs/pic/visualize.png" alt="Visualization" width="600">
-  <br>
-  <b>Figure 2: Visualization</b>
-</p>
+**Figure 1: Record**
+
+![Visualization](docs/images/visualize.png)
+
+**Figure 2: Visualization**
 
 ### 追加录制
 
@@ -427,28 +444,42 @@ huggingface-cli whoami
 
 ### 合并数据集
 
+对于 feature schema 一致的本地 LeRobot 数据集，优先使用本仓库的配置式工具：
+
 ```bash
-lerobot-edit-dataset \
-    --repo_id <merged_repo_id> \
-    --operation.type merge \
-    --operation.repo_ids "['<repo_id_1>', '<repo_id_2>']"
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
+tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml
 ```
 
-更多数据集处理命令请参考 LeRobot 数据集工具文档。
+`scripts/config/merge_dataset_cfg.yaml` 中最重要的字段是：
+
+```yaml
+merge_datasets:
+  source:
+    parent_dir: "/path/to/common/source/folder"
+    repo_id_prefix: "franka_dual_arm"
+    datasets:
+      - "dataset_a"
+      - "dataset_b"
+
+  output:
+    parent_dir: "/path/to/output/folder"
+    dataset_name: "merged_dataset"
+```
+
+该工具使用 `LeRobotDataset.create`、`add_frame`、`save_episode` 和 `finalize`，不会直接手改 parquet。它会保留 episode 边界和 task 文本，默认校验 fps、features 和 robot type，并在输出数据集写入 `meta/merge_summary.json`。
+
+如果只是合并或重命名单个数据集内部的 task prompt，使用 `scripts/tools/merge_lerobot_tasks.py` 或 `scripts/tools/rename_lerobot_task.py`。
 
 ## 数据集命名与本地元数据
 
-<p align="center">
-  <img src="docs/pic/dataset.png" alt="Dataset" width="600">
-  <br>
-  <b>Figure 3: Dataset</b>
-</p>
+![Dataset](docs/images/dataset.png)
 
-<p align="center">
-  <img src="docs/pic/dataset_info.png" alt="Dataset info" width="600">
-  <br>
-  <b>Figure 4: Dataset Info</b>
-</p>
+**Figure 3: Dataset**
+
+![Dataset info](docs/images/dataset_info.png)
+
+**Figure 4: Dataset Info**
 
 默认情况下，LeRobot 数据集保存在 `~/.cache/huggingface/lerobot` 下，除非配置了 `dataset_path` 或 `dataset_root`。本地数据集元数据可能包含：
 

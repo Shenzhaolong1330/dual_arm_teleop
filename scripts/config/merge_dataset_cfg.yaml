@@ -1,0 +1,43 @@
+merge_datasets:
+  source:
+    # Common folder containing all input dataset directories.
+    # Example layout:
+    #   /home/user/.cache/huggingface/lerobot/franka_dual_arm/dataset_a
+    #   /home/user/.cache/huggingface/lerobot/franka_dual_arm/dataset_b
+    parent_dir: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm"
+
+    # Optional prefix used to build LeRobot repo_id when an item below is a
+    # plain directory name. If empty, the directory name itself is used.
+    repo_id_prefix: "franka_dual_arm"
+
+    # Each item can be a string dataset directory name, or a mapping with:
+    #   name: dataset directory name under parent_dir
+    #   repo_id: optional LeRobot repo id override
+    #   root: optional absolute dataset root override
+    #   episodes: optional list of episode indices
+    #   max_episodes: optional quick-test limit
+    datasets:
+      - "pick_task_a_20260529_v01"
+      - "pick_task_b_20260529_v01"
+
+    # null means all episodes from every source dataset.
+    max_episodes:
+    download_videos: true
+
+    # Keep this true unless you intentionally know how to merge different schemas.
+    strict_schema: true
+    strict_robot_type: true
+
+  output:
+    parent_dir: "/home/deepcybo/.cache/huggingface/lerobot/franka_dual_arm"
+    dataset_name: "merged_pick_tasks_20260529_v01"
+    # Optional. Defaults to repo_id_prefix/dataset_name when repo_id_prefix is set.
+    repo_id:
+    repo_id_prefix: "franka_dual_arm"
+    root:
+    overwrite: false
+    image_writer_threads: 4
+    image_writer_processes: 0
+    batch_encoding_size: 1
+
+  dry_run: false

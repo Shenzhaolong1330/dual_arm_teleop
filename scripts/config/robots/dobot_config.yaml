@@ -1,0 +1,35 @@
+# Dobot Nova5 dual-arm hardware-side configuration loaded by scripts/core/run_record.py
+# when record.robot_type is dobot_dual_arm.
+teleop:
+  control_mode: "oculus"
+  dual_arm: true
+  oculus_config:
+    ip:
+    use_gripper: true
+    left_pose_scaler: [1.0, 1.0]
+    left_channel_signs: [1, -1, 1, -1, 1, 1]
+    right_pose_scaler: [1.0, 1.0]
+    right_channel_signs: [1, -1, 1, -1, 1, 1]
+    visualize_placo: false
+
+robot:
+  # Historical hardware values restored from earlier record_cfg.yaml versions.
+  # Replace these with the current robot/gripper server addresses before use.
+  robot_ip: "192.168.110.41"
+  robot_port: 4242
+  use_gripper: true
+  # Set this to robot_ip when the Robotiq gripper server runs beside the robot server.
+  gripper_ip: "192.168.110.15"
+  gripper_port: 4243
+  close_threshold: 0.05
+  gripper_reverse: false
+  gripper_max_open: 0.1
+  gripper_force: 2.0
+  gripper_speed: 0.1
+
+cameras:
+  left_wrist_cam_serial: "317422075656"
+  right_wrist_cam_serial: "344322074412"
+  head_cam_serial: "243322071821"
+  width: 424
+  height: 240

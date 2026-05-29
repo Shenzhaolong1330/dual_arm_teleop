@@ -246,7 +246,7 @@ def resolve_policy_path(policy: dict[str, Any], policy_type: str, mode: str) -> 
         raw_path = policy.get("config_path")
         if raw_path is None:
             stem = "diffusion" if policy_type in {"diffusion", "dp", "diffusion_policy"} else "act"
-            raw_path = f"scripts/policy_config/{stem}_{mode}_config.yaml"
+            raw_path = f"scripts/config/policies/{stem}_{mode}_config.yaml"
         return resolve_main_path(raw_path)
 
 
@@ -1177,11 +1177,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--diffusion-train-config",
-        default=str(SCRIPTS_DIR / "policy_config" / "diffusion_train_config.yaml"),
+        default=str(SCRIPTS_DIR / "config" / "policies" / "diffusion_train_config.yaml"),
     )
     parser.add_argument(
         "--diffusion-reason-config",
-        default=str(SCRIPTS_DIR / "policy_config" / "diffusion_reason_config.yaml"),
+        default=str(SCRIPTS_DIR / "config" / "policies" / "diffusion_reason_config.yaml"),
     )
     parser.add_argument("--dataset-root", default=None, help="Override training dataset root.")
     parser.add_argument("--repo-id", default=None, help="Override training dataset repo_id.")

@@ -14,9 +14,6 @@ Core Commands:
   robot-dagger           Run DAgger rounds for policy improvement
   robot-dagger-export    Export DAgger data from raw run_mix logs
 
-Utility Commands:
-  utils-joint-offsets    Compute joint offsets for teleoperation
-
 Tool Commands:
   tools-check-dataset    Check local dataset information
   tools-check-dagger-dataset
@@ -26,13 +23,12 @@ Tool Commands:
                          Preprocess a LeRobot dataset for ACT training
   tools-split-label-dataset
                          Split long LeRobot episodes and label sub-episodes
+  tools-merge-datasets
+                         Merge multiple local LeRobot datasets into one
 
 Shell Tools:
   check_robotiq_ports.sh  Get Robotiq gripper serial ports
   map_gripper.sh          Helper for gripper device mapping
-
-Test Commands:
-  test-gripper-ctrl      Run gripper control command (operate the gripper)
 
 --------------------------------------------------
  Tip: Use 'robot-help' anytime to see this summary.

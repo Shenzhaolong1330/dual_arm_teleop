@@ -14,12 +14,12 @@ POLICY_CONFIG_RUNTIME_OVERRIDE_KEYS = {"pretrained_path"}
 POLICY_CONFIG_MODES = {"train", "reason"}
 DEPRECATED_POLICY_CONFIG_FILENAMES = {
     "act_config.yaml": (
-        "scripts/policy_config/act_train_config.yaml",
-        "scripts/policy_config/act_reason_config.yaml",
+        "scripts/config/policies/act_train_config.yaml",
+        "scripts/config/policies/act_reason_config.yaml",
     ),
     "diffusion_policy.yaml": (
-        "scripts/policy_config/diffusion_train_config.yaml",
-        "scripts/policy_config/diffusion_reason_config.yaml",
+        "scripts/config/policies/diffusion_train_config.yaml",
+        "scripts/config/policies/diffusion_reason_config.yaml",
     ),
 }
 
@@ -47,8 +47,8 @@ def get_default_policy_config_path(policy_type: str, mode: str) -> str:
     policy_type = normalize_policy_type(policy_type)
     mode = _validate_policy_config_mode(mode)
     if policy_type == "act":
-        return f"scripts/policy_config/act_{mode}_config.yaml"
-    return f"scripts/policy_config/diffusion_{mode}_config.yaml"
+        return f"scripts/config/policies/act_{mode}_config.yaml"
+    return f"scripts/config/policies/diffusion_{mode}_config.yaml"
 
 
 def default_policy_config_path(policy_type: str, mode: str = "reason") -> str:
@@ -69,6 +69,15 @@ def warn_if_deprecated_policy_config_path(path: Path) -> None:
     )
 
 
+def _legacy_policy_config_candidates(path: Path, scripts_dir: Path, project_root: Path) -> list[Path]:
+    parts = path.parts
+    if len(parts) >= 3 and parts[0] == "scripts" and parts[1] == "policy_config":
+        return [project_root / "scripts" / "config" / "policies" / Path(*parts[2:])]
+    if len(parts) >= 2 and parts[0] == "policy_config":
+        return [scripts_dir / "config" / "policies" / Path(*parts[1:])]
+    return []
+
+
 def resolve_policy_config_path(
     policy_cfg: Dict[str, Any],
     scripts_dir: Path,
@@ -80,9 +89,11 @@ def resolve_policy_config_path(
     """Resolve policy config paths without depending on the process cwd.
 
     Relative paths are checked in this order:
-    1. Project root, so `scripts/policy_config/act_reason_config.yaml` works
+    1. Project root, so `scripts/config/policies/act_reason_config.yaml` works
        from the lerobot_dual_arm_teleop project root.
-    2. The scripts directory, so `policy_config/act_reason_config.yaml` also works.
+    2. The scripts directory, so `config/policies/act_reason_config.yaml` also works.
+    3. Legacy `scripts/policy_config/...` and `policy_config/...` paths are
+       mapped to `scripts/config/policies/...` for external config compatibility.
     """
     mode = _validate_policy_config_mode(mode)
     policy_type = normalize_policy_type(policy_cfg.get("type", ""))
@@ -103,7 +114,11 @@ def resolve_policy_config_path(
             return resolved
         raise FileNotFoundError(f"Policy config file does not exist: {path}")
 
-    candidates = [project_root / path, scripts_dir / path]
+    candidates = [
+        project_root / path,
+        scripts_dir / path,
+        *_legacy_policy_config_candidates(path, scripts_dir, project_root),
+    ]
     for candidate in candidates:
         if candidate.is_file():
             resolved = candidate.resolve()
@@ -295,7 +310,7 @@ def merge_legacy_policy_fields(
     if deprecated_overrides:
         logging.warning(
             "[DEPRECATED] %s policy field(s) still defined in %s: %s. "
-            "Please move them to scripts/policy_config/*.yaml. "
+            "Please move them to scripts/config/policies/*.yaml. "
             "For backward compatibility, these values override the policy yaml for this run.",
             _policy_label(policy_type),
             source_name,
