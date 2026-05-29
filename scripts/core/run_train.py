@@ -328,6 +328,8 @@ class TrainPipelineConfig(HubMixin):
         self.save_checkpoint: bool = cfg["save_checkpoint"]
         self.save_freq: int = cfg["save_freq"]
         self.use_policy_training_preset: bool = cfg["use_policy_training_preset"]
+        self.optimizer: OptimizerConfig | None = None
+        self.scheduler: LRSchedulerConfig | None = None
 
         self.eval: EvalConfig = EvalConfig(
             n_episodes = eval["n_episodes"],
@@ -380,9 +382,9 @@ class TrainPipelineConfig(HubMixin):
 
         if not self.use_policy_training_preset and (self.optimizer is None or self.scheduler is None):
             raise ValueError("Optimizer and Scheduler must be set when the policy presets are not used.")
-        elif self.use_policy_training_preset and not self.resume:
-            self.optimizer = self.policy.get_optimizer_preset()
-            self.scheduler = self.policy.get_scheduler_preset()
+        elif self.use_policy_training_preset:
+            self.optimizer = self.optimizer or self.policy.get_optimizer_preset()
+            self.scheduler = self.scheduler or self.policy.get_scheduler_preset()
 
         if self.policy.push_to_hub and not self.policy.repo_id:
             raise ValueError(
