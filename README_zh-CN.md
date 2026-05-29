@@ -203,8 +203,8 @@ scripts
 | `tools-check-dataset` | 清理本地 `dataset_info.txt` 中已不存在的数据集记录 | `scripts/config/record_cfg.yaml` |
 | `tools-check-dagger-dataset` | 训练前审计导出的 DAgger 数据集 | `scripts/config/dagger_rounds_cfg.yaml`、`scripts/config/train_cfg.yaml` |
 | `tools-check-rs` | 查看 RealSense 设备序列号 | 无 |
-| `tools-preprocess-dataset` | 压缩静止片段、可选平滑动作，并通过 LeRobot API 重写数据集 | `scripts/config/preprocess_dataset_cfg.yaml` |
-| `tools-split-label-dataset` | 将长 episode 切分为带语义标签的子 episode，可选写新数据集 | `scripts/config/split_label_dataset_cfg.yaml` |
+| `tools-preprocess-dataset` | 基于 `observation.state` 变化率压缩静止片段、可选平滑动作，并通过 LeRobot API 重写数据集 | `scripts/config/preprocess_dataset_cfg.yaml` |
+| `tools-split-label-dataset` | 将长 episode 切分为带语义标签的子 episode，可选按 state 变化率过滤静止段并写新数据集 | `scripts/config/split_label_dataset_cfg.yaml` |
 | `tools-merge-datasets` | 将多个 schema 一致的本地 LeRobot 数据集合并为一个实体数据集 | `scripts/config/merge_dataset_cfg.yaml` |
 | `robot-help` | 打印命令摘要 | 无 |
 
@@ -232,8 +232,8 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 | `tools-check-rs` | `tools-check-rs` | 需要 `pyrealsense2`；打印已连接 RealSense 的名称和序列号。 |
 | `tools-check-dataset` | `tools-check-dataset --config scripts/config/record_cfg.yaml` | 删除本地记录中实际文件夹已不存在的数据集条目；可用 `--lerobot-home` 覆盖数据集缓存根目录。 |
 | `tools-check-dagger-dataset` | `tools-check-dagger-dataset --config scripts/config/dagger_rounds_cfg.yaml --train-config scripts/config/train_cfg.yaml` | 审计 DAgger 导出数据、schema、动作值、source 标签和训练兼容性。 |
-| `tools-preprocess-dataset` | `tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run` | 支持 `--overwrite` 和 `--max-episodes`；通过 LeRobot API 写出清理后的数据集。 |
-| `tools-split-label-dataset` | `tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run` | 支持 `--label-only`、`--write-dataset`、`--overwrite`、`--max-episodes` 和 `--resume-cache`。 |
+| `tools-preprocess-dataset` | `tools-preprocess-dataset --config scripts/config/preprocess_dataset_cfg.yaml --dry-run` | 支持 `--overwrite` 和 `--max-episodes`；默认用 `observation.state` 变化率压缩静止段，夹爪状态变化也算 motion；连续静止至少 10 帧才会被压缩；可选平滑动作，并通过 LeRobot API 写出清理后的数据集。 |
+| `tools-split-label-dataset` | `tools-split-label-dataset --config scripts/config/split_label_dataset_cfg.yaml --dry-run` | 支持 `--label-only`、`--write-dataset`、`--overwrite`、`--max-episodes` 和 `--resume-cache`；静止段过滤默认使用 `observation.state` 变化率，夹爪状态变化也会保留；连续静止至少 10 帧才会被裁剪。 |
 | `tools-merge-datasets` | `tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run` | 合并 `source.parent_dir` 下 `source.datasets` 列出的数据集；支持 `--overwrite` 和 `--max-episodes`。 |
 
 以下维护脚本未注册为 console command，但可在本包根目录直接运行：
