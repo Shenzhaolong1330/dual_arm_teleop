@@ -10,6 +10,10 @@ teleop:
     left_channel_signs: [1, 1, 1, -1, -1, 1]
     right_pose_scaler: [0.8, 0.8]
     right_channel_signs: [1, 1, 1, -1, -1, 1]
+    action_deadband_translation: 0.0002  # meters per frame; keep fine teleop motion responsive
+    action_deadband_rotation: 0.003      # radians per frame; keep fine teleop rotation responsive
+    action_spike_translation: 0.04       # meters per frame; ignore tracking jumps
+    action_spike_rotation: 0.09          # radians per frame; ignore tracking jumps before Franka clipping
     mirror_teleop: true
     visualize_placo: false
 

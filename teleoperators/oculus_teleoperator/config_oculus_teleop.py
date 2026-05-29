@@ -39,15 +39,16 @@ class OculusTeleopConfig(TeleoperatorConfig):
     action_smoothing_min_cutoff: float = 1.2
     action_smoothing_beta: float = 0.4
     action_smoothing_d_cutoff: float = 1.0
+    # Output-side filtering for noisy Oculus tracking. Deadband removes tiny
+    # still-hand jitter; spike limits reject one-frame tracking jumps entirely.
+    action_deadband_translation: float = 0.0
+    action_deadband_rotation: float = 0.0
+    action_spike_translation: float | None = None
+    action_spike_rotation: float | None = None
 
     # Mirror mode for operating while standing opposite the robot.
     # When enabled, controller-to-arm assignment is mirrored and the final
     # action remains expressed in the same robot-frame convention as normal.
-    mirror_teleop: bool = False
-
-    # Mirror mode for operating while standing opposite the robot.
-    # When enabled, controller-to-arm assignment is swapped and pose deltas are
-    # mirrored back into the normal robot-frame convention.
     mirror_teleop: bool = False
 
     use_ik: bool = False

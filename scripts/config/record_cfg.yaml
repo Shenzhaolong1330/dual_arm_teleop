@@ -41,12 +41,12 @@ record:
     # For ACT:
     type: "act"
     config_path: scripts/config/policies/act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"
     # config_path: scripts/config/policies/diffusion_reason_config.yaml
-    # pretrained_path: "/home/deepcybo/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:

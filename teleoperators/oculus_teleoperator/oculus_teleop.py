@@ -88,6 +88,10 @@ class OculusTeleop(Teleoperator):
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
+            action_deadband_translation=self.cfg.action_deadband_translation,
+            action_deadband_rotation=self.cfg.action_deadband_rotation,
+            action_spike_translation=self.cfg.action_spike_translation,
+            action_spike_rotation=self.cfg.action_spike_rotation,
             mirror_teleop=self.cfg.mirror_teleop,
         )
         
@@ -95,6 +99,14 @@ class OculusTeleop(Teleoperator):
         logger.info(f"===== [TELEOP] {self.name} connected successfully =====")
         logger.info(f"[TELEOP] Oculus dual-arm connected at IP: {self.cfg.ip}")
         logger.info(f"[TELEOP] mirror_teleop={self.cfg.mirror_teleop}")
+        logger.info(
+            "[TELEOP] output_filter deadband_translation=%s deadband_rotation=%s "
+            "spike_translation=%s spike_rotation=%s",
+            self.cfg.action_deadband_translation,
+            self.cfg.action_deadband_rotation,
+            self.cfg.action_spike_translation,
+            self.cfg.action_spike_rotation,
+        )
     
     def disconnect(self) -> None:
         """Disconnect from Oculus Quest."""

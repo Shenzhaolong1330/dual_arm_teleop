@@ -11,12 +11,15 @@ Mirror mode:
     Right controller -> Left arm, with mirrored pose deltas
 """
 
+import logging
 from typing import Dict, Optional, Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
 from .oculus_reader.oculus_reader import OculusReader
 from .robot import Robot
+
+logger = logging.getLogger(__name__)
 
 
 class OculusDualArmRobot(Robot):
@@ -59,6 +62,10 @@ class OculusDualArmRobot(Robot):
         right_pose_scaler: Sequence[float] = [1.0, 1.0],
         right_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
         action_smoothing_alpha: float = 0.35,
+        action_deadband_translation: float = 0.0,
+        action_deadband_rotation: float = 0.0,
+        action_spike_translation: Optional[float] = None,
+        action_spike_rotation: Optional[float] = None,
         mirror_teleop: bool = False,
     ):
         self._oculus_reader = OculusReader(ip_address=ip)
@@ -83,8 +90,13 @@ class OculusDualArmRobot(Robot):
 
         # EMA smoothing state (6D delta pose for each arm)
         self._action_smoothing_alpha = float(action_smoothing_alpha)
+        self._action_deadband_translation = self._nonnegative_float(action_deadband_translation)
+        self._action_deadband_rotation = self._nonnegative_float(action_deadband_rotation)
+        self._action_spike_translation = self._optional_positive_float(action_spike_translation)
+        self._action_spike_rotation = self._optional_positive_float(action_spike_rotation)
         self._left_smoothed_delta = None
         self._right_smoothed_delta = None
+        self._delta_filter_warn_counts = {"left": 0, "right": 0}
         
         # Reset request
         self._reset_requested = False
@@ -97,6 +109,19 @@ class OculusDualArmRobot(Robot):
         self._left_gripper_release_requested = False
         self._right_gripper_release_requested = False
 
+    @staticmethod
+    def _nonnegative_float(value: Optional[float]) -> float:
+        if value is None:
+            return 0.0
+        return max(0.0, float(value))
+
+    @staticmethod
+    def _optional_positive_float(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        value_float = float(value)
+        return value_float if value_float > 0.0 else None
+
     def _ema_smooth(self, current: np.ndarray, prev: Optional[np.ndarray]) -> np.ndarray:
         """Apply EMA smoothing to a 6D delta vector."""
         alpha = max(0.0, min(1.0, self._action_smoothing_alpha))
@@ -107,6 +132,50 @@ class OculusDualArmRobot(Robot):
     def _mirror_pose_delta(self, delta_pose: np.ndarray) -> np.ndarray:
         """Convert opposite-side operator motion back to the canonical robot frame."""
         return np.asarray(delta_pose, dtype=float) * self.MIRROR_ACTION_SIGNS
+
+    def _filter_delta_pose(self, side: str, delta_pose: np.ndarray) -> tuple[np.ndarray, bool]:
+        """Apply deadband and reject single-frame tracking jumps."""
+        filtered = np.asarray(delta_pose, dtype=float).copy()
+        translation_norm = float(np.linalg.norm(filtered[:3]))
+        rotation_norm = float(np.linalg.norm(filtered[3:]))
+
+        translation_spike = (
+            self._action_spike_translation is not None
+            and translation_norm > self._action_spike_translation
+        )
+        rotation_spike = (
+            self._action_spike_rotation is not None
+            and rotation_norm > self._action_spike_rotation
+        )
+        if translation_spike or rotation_spike:
+            self._delta_filter_warn_counts[side] += 1
+            warn_count = self._delta_filter_warn_counts[side]
+            if warn_count <= 5 or warn_count % 100 == 0:
+                logger.warning(
+                    "[TELEOP] Ignored %s controller tracking jump "
+                    "(translation_norm=%.4f rotation_norm=%.4f "
+                    "translation_limit=%s rotation_limit=%s raw=%s)",
+                    side,
+                    translation_norm,
+                    rotation_norm,
+                    self._action_spike_translation,
+                    self._action_spike_rotation,
+                    filtered.tolist(),
+                )
+            return np.zeros(6, dtype=float), True
+
+        if (
+            self._action_deadband_translation > 0.0
+            and translation_norm < self._action_deadband_translation
+        ):
+            filtered[:3] = 0.0
+        if (
+            self._action_deadband_rotation > 0.0
+            and rotation_norm < self._action_deadband_rotation
+        ):
+            filtered[3:] = 0.0
+
+        return filtered, False
 
     def num_dofs(self) -> int:
         # Each arm: 6 DOF pose + 1 gripper = 7, total = 14
@@ -215,9 +284,14 @@ class OculusDualArmRobot(Robot):
             if lg_pressed:
                 delta_left = self._compute_delta_pose(left_transform, self._left_prev_transform)
                 scaled_left = self._apply_scaling(delta_left, self._left_pose_scaler, self._left_channel_signs)
-                smoothed_left = self._ema_smooth(scaled_left, self._left_smoothed_delta)
-                self._left_smoothed_delta = smoothed_left.copy()
-                left_delta_out = smoothed_left
+                filtered_left, left_spike_rejected = self._filter_delta_pose("left", scaled_left)
+                if left_spike_rejected or not np.any(filtered_left):
+                    self._left_smoothed_delta = None
+                    left_delta_out = np.zeros(6)
+                else:
+                    smoothed_left = self._ema_smooth(filtered_left, self._left_smoothed_delta)
+                    self._left_smoothed_delta = smoothed_left.copy()
+                    left_delta_out = smoothed_left
                 self._left_prev_transform = left_transform.copy()
             else:
                 self._left_prev_transform = None
@@ -233,9 +307,14 @@ class OculusDualArmRobot(Robot):
             if rg_pressed:
                 delta_right = self._compute_delta_pose(right_transform, self._right_prev_transform)
                 scaled_right = self._apply_scaling(delta_right, self._right_pose_scaler, self._right_channel_signs)
-                smoothed_right = self._ema_smooth(scaled_right, self._right_smoothed_delta)
-                self._right_smoothed_delta = smoothed_right.copy()
-                right_delta_out = smoothed_right
+                filtered_right, right_spike_rejected = self._filter_delta_pose("right", scaled_right)
+                if right_spike_rejected or not np.any(filtered_right):
+                    self._right_smoothed_delta = None
+                    right_delta_out = np.zeros(6)
+                else:
+                    smoothed_right = self._ema_smooth(filtered_right, self._right_smoothed_delta)
+                    self._right_smoothed_delta = smoothed_right.copy()
+                    right_delta_out = smoothed_right
                 self._right_prev_transform = right_transform.copy()
             else:
                 self._right_prev_transform = None
