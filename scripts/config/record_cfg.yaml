@@ -20,7 +20,7 @@ record:
   user_notes: "Franka template; replace TODO values before real collection."
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_record" # run_record | run_policy | run_mix
+  run_mode: "run_policy" # run_record | run_policy | run_mix
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
@@ -39,14 +39,14 @@ record:
 
     # Franka:
     # For ACT:
-    type: "act"
-    config_path: scripts/config/policies/act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    # type: "act"
+    # config_path: scripts/config/policies/act_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
 
     # For diffusion:
-    # type: "diffusion"
-    # config_path: scripts/config/policies/diffusion_reason_config.yaml
-    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    type: "diffusion"
+    config_path: scripts/config/policies/diffusion_reason_config.yaml
+    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260529_E150/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:
