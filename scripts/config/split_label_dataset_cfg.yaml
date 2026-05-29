@@ -28,12 +28,21 @@ split_label_dataset:
 
   action_filter:
     enabled: true
-    # Remove zero-action dead time after semantic/gripper segmentation.
-    # By default, gripper command channels are ignored so an open/closed gripper
-    # value does not make a stationary frame count as meaningful motion.
+    # Remove static dead time after semantic/gripper segmentation. Prefer
+    # observation.state rate over action==0. Gripper state changes count as
+    # motion even if arm pose/joints do not move.
+    activity_source: "state_rate"  # state_rate | action_norm
+    state_rate:
+      ignore_gripper: false
+      norm_threshold: 0.000001
+    # Fallback only when observation.state is unavailable. By default, gripper
+    # command channels are ignored so an open/closed gripper value does not make
+    # a stationary frame count as meaningful motion.
     ignore_gripper: true
     norm_threshold: 0.000001
     trim_leading_trailing: true
+    # Only drop/trim continuous static spans that are at least this long.
+    min_static_frames: 10
     keep_context_sec: 0.15
     min_active_frames: 1
     min_active_ratio: 0.0

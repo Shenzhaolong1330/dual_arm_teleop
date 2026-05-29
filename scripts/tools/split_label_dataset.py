@@ -368,23 +368,94 @@ def _action_activity_mask(actions: np.ndarray | None, action_names: list[str], c
     return norms > float(filter_cfg.get("norm_threshold", 1e-6))
 
 
+def _state_filter_indices(state_names: list[str], state_dim: int, cfg: dict[str, Any]) -> list[int]:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    state_cfg = filter_cfg.get("state_rate", {}) or {}
+    configured = state_cfg.get("indices")
+    if configured is not None:
+        indices = [int(idx) for idx in configured]
+        return [idx for idx in indices if 0 <= idx < state_dim]
+
+    if not state_names:
+        return list(range(state_dim))
+
+    indices = list(range(min(state_dim, len(state_names))))
+    if state_cfg.get("ignore_gripper", False):
+        non_gripper = [idx for idx in indices if "gripper" not in state_names[idx].lower()]
+        if non_gripper:
+            indices = non_gripper
+    return indices
+
+
+def _state_rate_activity_mask(
+    states: np.ndarray | None,
+    state_names: list[str],
+    cfg: dict[str, Any],
+) -> np.ndarray | None:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    state_cfg = filter_cfg.get("state_rate", {}) or {}
+    if states is None or states.size == 0:
+        return None
+
+    states = np.asarray(states, dtype=np.float32)
+    if states.ndim == 1:
+        states = states[:, None]
+    indices = _state_filter_indices(state_names, int(states.shape[1]), cfg)
+    if not indices:
+        return None
+
+    fps = float(cfg.get("_fps", 30))
+    diffs = np.zeros_like(states, dtype=np.float32)
+    if states.shape[0] > 1:
+        diffs[1:] = np.abs(np.diff(states, axis=0)) * max(fps, 1e-6)
+
+    norms = np.linalg.norm(diffs[:, indices], axis=1)
+    active = norms > float(state_cfg.get("norm_threshold", 1e-6))
+    if states.shape[0] > 1:
+        active[:-1] |= active[1:]
+    return active
+
+
+def _segment_activity_mask(
+    actions: np.ndarray | None,
+    action_names: list[str],
+    states: np.ndarray | None,
+    state_names: list[str],
+    cfg: dict[str, Any],
+) -> tuple[np.ndarray | None, str]:
+    filter_cfg = cfg.get("action_filter", {}) or {}
+    source = str(filter_cfg.get("activity_source", "state_rate")).lower()
+    if source in {"state", "state_rate", "observation.state"}:
+        activity = _state_rate_activity_mask(states, state_names, cfg)
+        if activity is not None:
+            return activity, "state_rate"
+        logger.warning("[split_label] observation.state unavailable for action_filter; falling back to action norm.")
+
+    return _action_activity_mask(actions, action_names, cfg), "action_norm"
+
+
 def _filter_segments_by_action(
     segments: list[RawSegment],
     actions: np.ndarray | None,
     action_names: list[str],
+    states: np.ndarray | None,
+    state_names: list[str],
     cfg: dict[str, Any],
-) -> tuple[list[RawSegment], dict[str, int]]:
+) -> tuple[list[RawSegment], dict[str, Any]]:
     filter_cfg = cfg.get("action_filter", {}) or {}
     stats = {
         "before": len(segments),
         "after": len(segments),
         "dropped_zero_action": 0,
+        "dropped_static": 0,
         "trimmed": 0,
+        "activity_source": str(filter_cfg.get("activity_source", "state_rate")),
     }
     if not filter_cfg.get("enabled", True) or not segments:
         return segments, stats
 
-    activity = _action_activity_mask(actions, action_names, cfg)
+    activity, activity_source = _segment_activity_mask(actions, action_names, states, state_names, cfg)
+    stats["activity_source"] = activity_source
     if activity is None:
         return segments, stats
 
@@ -392,6 +463,7 @@ def _filter_segments_by_action(
     keep_context = max(0, int(round(float(filter_cfg.get("keep_context_sec", 0.15)) * fps)))
     min_active_frames = max(0, int(filter_cfg.get("min_active_frames", 1)))
     min_active_ratio = float(filter_cfg.get("min_active_ratio", 0.0))
+    min_static_frames = max(1, int(filter_cfg.get("min_static_frames", 10)))
     min_len = max(1, int(round(float(filter_cfg.get("min_segment_sec_after_trim", 0.2)) * fps)))
     trim_edges = bool(filter_cfg.get("trim_leading_trailing", True))
 
@@ -401,6 +473,7 @@ def _filter_segments_by_action(
         end = max(start, min(len(activity), int(segment.end)))
         if end <= start:
             stats["dropped_zero_action"] += 1
+            stats["dropped_static"] += 1
             continue
 
         local_active = activity[start:end]
@@ -408,17 +481,30 @@ def _filter_segments_by_action(
         active_count = int(active_indices.size)
         active_ratio = active_count / max(1, end - start)
         if active_count < min_active_frames or active_ratio < min_active_ratio:
-            stats["dropped_zero_action"] += 1
+            if end - start >= min_static_frames:
+                stats["dropped_zero_action"] += 1
+                stats["dropped_static"] += 1
+                continue
+            filtered.append(segment)
             continue
 
         if trim_edges:
-            new_start = max(start, start + int(active_indices[0]) - keep_context)
-            new_end = min(end, start + int(active_indices[-1]) + 1 + keep_context)
+            leading_static = int(active_indices[0])
+            trailing_static = int((end - start) - int(active_indices[-1]) - 1)
+            if leading_static >= min_static_frames:
+                new_start = max(start, start + leading_static - keep_context)
+            else:
+                new_start = start
+            if trailing_static >= min_static_frames:
+                new_end = min(end, start + int(active_indices[-1]) + 1 + keep_context)
+            else:
+                new_end = end
         else:
             new_start, new_end = start, end
 
         if new_end - new_start < min_len:
             stats["dropped_zero_action"] += 1
+            stats["dropped_static"] += 1
             continue
 
         if new_start != segment.start or new_end != segment.end:
@@ -426,12 +512,14 @@ def _filter_segments_by_action(
             segment.source_segments.append(
                 {
                     "source": "action_filter",
+                    "activity_source": activity_source,
                     "original_start": int(segment.start),
                     "original_end": int(segment.end),
                     "trimmed_start": int(new_start),
                     "trimmed_end": int(new_end),
                     "active_frames": active_count,
                     "active_ratio": active_ratio,
+                    "min_static_frames": min_static_frames,
                 }
             )
             segment.start = int(new_start)
@@ -928,10 +1016,21 @@ def _normalize_label(raw: dict[str, Any], fallback: LabelResult, min_confidence:
 
 def _to_numpy(value: Any) -> Any:
     if torch is not None and isinstance(value, torch.Tensor):
-        return value.cpu().numpy()
+        return value.detach().cpu().numpy()
     if isinstance(value, np.ndarray):
         return value
     return value
+
+
+def _coerce_numeric_feature(value: Any, feature: dict[str, Any]) -> np.ndarray:
+    if torch is not None and isinstance(value, torch.Tensor):
+        value = value.detach().cpu().numpy()
+
+    array = np.asarray(value, dtype=np.dtype(feature["dtype"]))
+    expected_shape = tuple(feature.get("shape", ()))
+    if array.shape != expected_shape and array.size == int(np.prod(expected_shape, dtype=np.int64)):
+        array = array.reshape(expected_shape)
+    return array
 
 
 def _restore_image_layout(value: Any, feature: dict[str, Any]) -> Any:
@@ -958,12 +1057,15 @@ def _frame_from_source_item(
 ) -> dict[str, Any]:
     frame = {}
     for key in source.features:
+        feature = source.features[key]
         if key in DEFAULT_FEATURES:
             continue
-        if source.features[key]["dtype"] in ["image", "video"]:
-            frame[key] = _restore_image_layout(item[key], source.features[key])
+        if feature["dtype"] in ["image", "video"]:
+            frame[key] = _restore_image_layout(item[key], feature)
+        elif feature["dtype"] == "string":
+            frame[key] = item[key]
         else:
-            frame[key] = _to_numpy(item[key])
+            frame[key] = _coerce_numeric_feature(item[key], feature)
     frame["task"] = task
     return frame
 
@@ -2161,7 +2263,7 @@ def _print_episode_segmentation_report(
     gripper_source: str,
     gripper_sides: list[str],
     segments: list[RawSegment],
-    action_filter_stats: dict[str, int] | None = None,
+    action_filter_stats: dict[str, Any] | None = None,
 ) -> None:
     if not _report_enabled(cfg, "print_segments", True):
         return
@@ -2176,10 +2278,11 @@ def _print_episode_segmentation_report(
     if action_filter_stats:
         _report_line(
             "        action_filter="
+            f"source:{action_filter_stats.get('activity_source', 'unknown')} "
             f"before:{action_filter_stats.get('before', 0)} "
             f"after:{action_filter_stats.get('after', 0)} "
             f"trimmed:{action_filter_stats.get('trimmed', 0)} "
-            f"dropped_zero_action:{action_filter_stats.get('dropped_zero_action', 0)}"
+            f"dropped_static:{action_filter_stats.get('dropped_static', action_filter_stats.get('dropped_zero_action', 0))}"
         )
     for segment in segments:
         duration = (segment.end - segment.start) / max(fps, 1e-6)
@@ -2310,6 +2413,8 @@ def split_label_dataset(cfg: dict[str, Any]) -> None:
                 segments,
                 arrays.get("action"),
                 action_names,
+                arrays.get("observation.state"),
+                state_names,
                 cfg,
             )
             total_segments += len(segments)
