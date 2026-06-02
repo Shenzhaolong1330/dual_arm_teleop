@@ -424,6 +424,9 @@ class RecordConfig:
             self.action_deadband_rotation = oculus_cfg.get("action_deadband_rotation", 0.0)
             self.action_spike_translation = oculus_cfg.get("action_spike_translation")
             self.action_spike_rotation = oculus_cfg.get("action_spike_rotation")
+            self.oculus_timing_debug = bool(oculus_cfg.get("timing_debug", False))
+            self.oculus_timing_debug_every_n = int(oculus_cfg.get("timing_debug_every_n", 30))
+            self.oculus_timing_warn_ms = float(oculus_cfg.get("timing_warn_ms", 33.0))
             self.mirror_teleop = oculus_cfg.get("mirror_teleop", False)
             self.position_axis_order = oculus_cfg.get("position_axis_order", [0, 1, 2])
             self.rotation_axis_order = oculus_cfg.get("rotation_axis_order", [0, 1, 2])
@@ -479,6 +482,9 @@ class RecordConfig:
                     action_deadband_rotation=self.action_deadband_rotation,
                     action_spike_translation=self.action_spike_translation,
                     action_spike_rotation=self.action_spike_rotation,
+                    timing_debug=self.oculus_timing_debug,
+                    timing_debug_every_n=self.oculus_timing_debug_every_n,
+                    timing_warn_ms=self.oculus_timing_warn_ms,
                     mirror_teleop=self.mirror_teleop,
                     position_axis_order=self.position_axis_order,
                     rotation_axis_order=self.rotation_axis_order,
@@ -489,6 +495,9 @@ class RecordConfig:
                 ip=self.oculus_ip,
                 pose_scaler=self.pose_scaler,
                 channel_signs=self.channel_signs,
+                timing_debug=self.oculus_timing_debug,
+                timing_debug_every_n=self.oculus_timing_debug_every_n,
+                timing_warn_ms=self.oculus_timing_warn_ms,
             )
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")

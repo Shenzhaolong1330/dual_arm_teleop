@@ -40,6 +40,13 @@ class FlexivDualArmConfig(RobotConfig):
     gripper_command_epsilon: float = 0.002
     action_debug: bool = True
     action_debug_every_n: int = 30
+    timing_debug: bool = False
+    timing_debug_every_n: int = 30
+    timing_warn_ms: float = 33.0
+    send_arms_parallel: bool = False
+    use_cartesian_servo_thread: bool = False
+    cartesian_servo_hz: float = 100.0
+    cartesian_servo_alpha: float = 0.35
 
     enable_on_connect: bool = True
     clear_fault_on_connect: bool = True

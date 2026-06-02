@@ -74,7 +74,7 @@ sudo apt install android-tools-adb
 adb devices
 ```
 
-On the first USB connection, allow USB debugging in the headset. For wireless connection, first use `adb shell ip route` to find the headset IP, then run `adb connect <Oculus_IP>:5555`.
+On the first USB connection, allow USB debugging in the headset. For wireless connection, first use `adb shell ip route` to find the headset IP, then run`adb tcpip 5555` and `adb connect <Oculus_IP>:5555`.
 
 ## Core Modules and Runtime Flow
 

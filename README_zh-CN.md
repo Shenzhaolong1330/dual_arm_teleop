@@ -73,7 +73,7 @@ sudo apt install android-tools-adb
 adb devices
 ```
 
-首次 USB 连接时需要在头显中允许 USB 调试；无线连接时可以先通过 `adb shell ip route` 查看头显 IP，再执行 `adb connect <Oculus_IP>:5555`。
+首次 USB 连接时需要在头显中允许 USB 调试；无线连接时可以先通过 `adb shell ip route` 查看头显 IP，再执行`adb tcpip 5555` 和 `adb connect <Oculus_IP>:5555`。
 
 ## 核心模块与调用机理
 

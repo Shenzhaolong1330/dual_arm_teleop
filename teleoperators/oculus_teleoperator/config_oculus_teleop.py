@@ -50,6 +50,9 @@ class OculusTeleopConfig(TeleoperatorConfig):
     action_deadband_rotation: float = 0.0
     action_spike_translation: float | None = None
     action_spike_rotation: float | None = None
+    timing_debug: bool = False
+    timing_debug_every_n: int = 30
+    timing_warn_ms: float = 33.0
 
     # Mirror mode for operating while standing opposite the robot.
     # When enabled, controller-to-arm assignment is mirrored and the final

@@ -6,9 +6,9 @@ teleop:
   oculus_config:
     ip: "192.168.110.40"
     use_gripper: true
-    left_pose_scaler: [1.5, 1.2]
+    left_pose_scaler: [0.7, 0.6]
     left_channel_signs: [-1, 1, 1, -1, -1, 1]
-    right_pose_scaler: [1.5, 1.2]
+    right_pose_scaler: [0.7, 0.6]
     right_channel_signs: [1, -1, 1, 1, 1, 1]
     position_axis_order: [1, 0, 2]
     rotation_axis_order: [1, 0, 2]
@@ -29,14 +29,18 @@ robot:
   left_gripper_name: "Flexiv-GN01"
   right_gripper_name: "Flexiv-GN01"
   switch_tool_on_connect: true
-  initialize_gripper_on_connect: false
+  initialize_gripper_on_connect: true
   gripper_min_width: 0.0
   gripper_max_open: 0.085
   gripper_speed: 0.1
   gripper_force: 20.0
   gripper_command_epsilon: 0.002
-  action_debug: true
+  action_debug: false
   action_debug_every_n: 30
+  send_arms_parallel: true
+  use_cartesian_servo_thread: true
+  cartesian_servo_hz: 150.0
+  cartesian_servo_alpha: 0.25
   gripper_reverse: false
   close_threshold: 0.5
   enable_on_connect: true
@@ -53,8 +57,8 @@ robot:
   home_joint_tolerance: 0.01
   home_joint_timeout_sec: 20.0
   zero_ft_sensor_on_connect: false
-  max_cartesian_delta: 0.05
-  max_rotation_delta: 0.10
+  max_cartesian_delta: 0.02
+  max_rotation_delta: 0.04
   cartesian_max_linear_vel: 0.8
   cartesian_max_angular_vel: 1.2
   cartesian_max_linear_acc: 3.0

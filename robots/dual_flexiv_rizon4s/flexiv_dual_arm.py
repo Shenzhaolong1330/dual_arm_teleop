@@ -95,12 +95,21 @@ class FlexivDualArm(Robot):
         self._right_gripper = None
         self._left_tool = None
         self._right_tool = None
+        self._left_robot_lock = threading.Lock()
+        self._right_robot_lock = threading.Lock()
         self._num_joints_per_arm = int(config.num_joints_per_arm)
         self._prev_observation: dict[str, Any] | None = None
         self._cached_left_pose7 = np.zeros(7, dtype=float)
         self._cached_right_pose7 = np.zeros(7, dtype=float)
         self._cached_left_pose7[3] = 1.0
         self._cached_right_pose7[3] = 1.0
+        self._servo_lock = threading.Lock()
+        self._servo_stop_event = threading.Event()
+        self._servo_thread: threading.Thread | None = None
+        self._servo_left_target_pose7 = self._cached_left_pose7.copy()
+        self._servo_right_target_pose7 = self._cached_right_pose7.copy()
+        self._servo_left_command_pose7 = self._cached_left_pose7.copy()
+        self._servo_right_command_pose7 = self._cached_right_pose7.copy()
         self._left_gripper_cmd = 1.0
         self._right_gripper_cmd = 1.0
         self._left_gripper_width: float | None = None
@@ -110,6 +119,7 @@ class FlexivDualArm(Robot):
         self._frame_lock = threading.Lock()
         self._latest_frames: dict[str, Any] = {}
         self._action_debug_count = 0
+        self._timing_debug_counts: dict[str, int] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -149,6 +159,7 @@ class FlexivDualArm(Robot):
         self._refresh_cached_poses()
         self._connect_cameras()
         self.is_connected = True
+        self._start_cartesian_servo_thread()
         logger.info("[FLEXIV] %s connected", self.name)
 
     def _prepare_robot(self, side: str, robot: Any) -> None:
@@ -302,6 +313,7 @@ class FlexivDualArm(Robot):
     def disconnect(self) -> None:
         if not self.is_connected:
             return
+        self._stop_cartesian_servo_thread()
         self._stop_cameras()
         for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
             if gripper is not None:
@@ -327,6 +339,7 @@ class FlexivDualArm(Robot):
     def reset(self) -> None:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        self._stop_cartesian_servo_thread()
         if self.config.reset_go_home:
             self._execute_home("left", self._left_robot)
             self._execute_home("right", self._right_robot)
@@ -336,21 +349,32 @@ class FlexivDualArm(Robot):
                 self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
                 self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
         self._refresh_cached_poses()
+        self._start_cartesian_servo_thread()
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
+        send_start_t = time.perf_counter()
+        timing: dict[str, float] = {}
         if not self.config.debug and "left_delta_ee_pose.x" in action:
+            cartesian_start_t = time.perf_counter()
             self._send_cartesian_delta(action)
+            timing["cartesian_ms"] = (time.perf_counter() - cartesian_start_t) * 1000.0
         elif not self.config.debug and all(
             f"left_joint_{i + 1}.pos" in action for i in range(self._num_joints_per_arm)
         ):
+            joint_start_t = time.perf_counter()
             self._send_joint_positions(action)
+            timing["joint_ms"] = (time.perf_counter() - joint_start_t) * 1000.0
 
         if self.config.use_gripper:
+            gripper_start_t = time.perf_counter()
             self._update_gripper_cache(action)
+            timing["gripper_ms"] = (time.perf_counter() - gripper_start_t) * 1000.0
         self._log_action_debug(action)
+        timing["total_ms"] = (time.perf_counter() - send_start_t) * 1000.0
+        self._log_timing_debug("send_action", timing)
         return action
 
     def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
@@ -363,29 +387,77 @@ class FlexivDualArm(Robot):
         left_delta[3:] = _clip_norm(left_delta[3:], self.config.max_rotation_delta)
         right_delta[3:] = _clip_norm(right_delta[3:], self.config.max_rotation_delta)
 
+        if self.config.use_cartesian_servo_thread:
+            with self._servo_lock:
+                target_left = _apply_delta_to_pose7(self._servo_left_target_pose7, left_delta)
+                target_right = _apply_delta_to_pose7(self._servo_right_target_pose7, right_delta)
+                self._servo_left_target_pose7 = target_left
+                self._servo_right_target_pose7 = target_right
+            self._cached_left_pose7 = target_left
+            self._cached_right_pose7 = target_right
+            return
+
         target_left = _apply_delta_to_pose7(self._cached_left_pose7, left_delta)
         target_right = _apply_delta_to_pose7(self._cached_right_pose7, right_delta)
-        zero_cartesian = [0.0] * 6
-        self._left_robot.SendCartesianMotionForce(
-            target_left.tolist(),
-            zero_cartesian,
-            zero_cartesian,
-            self.config.cartesian_max_linear_vel,
-            self.config.cartesian_max_angular_vel,
-            self.config.cartesian_max_linear_acc,
-            self.config.cartesian_max_angular_acc,
-        )
-        self._right_robot.SendCartesianMotionForce(
-            target_right.tolist(),
-            zero_cartesian,
-            zero_cartesian,
-            self.config.cartesian_max_linear_vel,
-            self.config.cartesian_max_angular_vel,
-            self.config.cartesian_max_linear_acc,
-            self.config.cartesian_max_angular_acc,
-        )
+        self._send_cartesian_pose_targets(target_left, target_right)
         self._cached_left_pose7 = target_left
         self._cached_right_pose7 = target_right
+
+    def _send_cartesian_pose_targets(self, target_left: np.ndarray, target_right: np.ndarray) -> None:
+        zero_cartesian = [0.0] * 6
+        def send_left() -> None:
+            with self._left_robot_lock:
+                self._left_robot.SendCartesianMotionForce(
+                    target_left.tolist(),
+                    zero_cartesian,
+                    zero_cartesian,
+                    self.config.cartesian_max_linear_vel,
+                    self.config.cartesian_max_angular_vel,
+                    self.config.cartesian_max_linear_acc,
+                    self.config.cartesian_max_angular_acc,
+                )
+
+        def send_right() -> None:
+            with self._right_robot_lock:
+                self._right_robot.SendCartesianMotionForce(
+                    target_right.tolist(),
+                    zero_cartesian,
+                    zero_cartesian,
+                    self.config.cartesian_max_linear_vel,
+                    self.config.cartesian_max_angular_vel,
+                    self.config.cartesian_max_linear_acc,
+                    self.config.cartesian_max_angular_acc,
+                )
+
+        if self.config.send_arms_parallel:
+            self._run_parallel_robot_calls((("left", send_left), ("right", send_right)))
+        else:
+            send_left()
+            send_right()
+
+    @staticmethod
+    def _run_parallel_robot_calls(calls: tuple[tuple[str, Any], ...]) -> None:
+        errors: list[tuple[str, BaseException]] = []
+        lock = threading.Lock()
+
+        def runner(side: str, fn: Any) -> None:
+            try:
+                fn()
+            except BaseException as exc:  # noqa: BLE001
+                with lock:
+                    errors.append((side, exc))
+
+        threads = [
+            threading.Thread(target=runner, args=(side, fn), daemon=True)
+            for side, fn in calls
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        if errors:
+            side, exc = errors[0]
+            raise RuntimeError(f"{side} Flexiv command failed during parallel send") from exc
 
     def _log_action_debug(self, action: dict[str, Any]) -> None:
         if not self.config.action_debug:
@@ -422,6 +494,146 @@ class FlexivDualArm(Robot):
             float(self._cached_right_pose7[1]),
             float(self._cached_right_pose7[2]),
         )
+
+    def _log_timing_debug(self, stage: str, timing: dict[str, float]) -> None:
+        if not self.config.timing_debug:
+            return
+
+        count = self._timing_debug_counts.get(stage, 0) + 1
+        self._timing_debug_counts[stage] = count
+        every_n = max(1, int(self.config.timing_debug_every_n))
+        total_ms = float(timing.get("total_ms", 0.0))
+        warn_ms = max(0.0, float(self.config.timing_warn_ms))
+        should_log = (
+            count <= 5
+            or count % every_n == 0
+            or (warn_ms > 0.0 and total_ms >= warn_ms)
+        )
+        if not should_log:
+            return
+
+        details = " ".join(
+            f"{key}={value:.1f}ms"
+            for key, value in sorted(timing.items())
+        )
+        log_fn = logger.warning if warn_ms > 0.0 and total_ms >= warn_ms else logger.info
+        log_fn(
+            "[FLEXIV TIMING] step=%d %s %s parallel=%s",
+            count,
+            stage,
+            details,
+            self.config.send_arms_parallel,
+        )
+
+    def _reset_servo_targets_from_cached(self) -> None:
+        with self._servo_lock:
+            self._servo_left_target_pose7 = self._cached_left_pose7.copy()
+            self._servo_right_target_pose7 = self._cached_right_pose7.copy()
+            self._servo_left_command_pose7 = self._cached_left_pose7.copy()
+            self._servo_right_command_pose7 = self._cached_right_pose7.copy()
+
+    def _start_cartesian_servo_thread(self) -> None:
+        if (
+            self.config.debug
+            or not self.config.use_cartesian_servo_thread
+            or self._left_robot is None
+            or self._right_robot is None
+        ):
+            return
+        if self._servo_thread is not None and self._servo_thread.is_alive():
+            return
+        self._reset_servo_targets_from_cached()
+        self._servo_stop_event.clear()
+        self._servo_thread = threading.Thread(
+            target=self._cartesian_servo_loop,
+            name="flexiv_cartesian_servo",
+            daemon=True,
+        )
+        self._servo_thread.start()
+        logger.info(
+            "[FLEXIV] Cartesian servo thread started hz=%.1f alpha=%.3f",
+            float(self.config.cartesian_servo_hz),
+            float(self.config.cartesian_servo_alpha),
+        )
+
+    def _stop_cartesian_servo_thread(self) -> None:
+        self._servo_stop_event.set()
+        thread = self._servo_thread
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.warning("[FLEXIV] Cartesian servo thread did not stop cleanly")
+        self._servo_thread = None
+
+    def _cartesian_servo_loop(self) -> None:
+        period_s = 1.0 / max(1.0, float(self.config.cartesian_servo_hz))
+        alpha = float(np.clip(self.config.cartesian_servo_alpha, 0.01, 1.0))
+        count = 0
+        while not self._servo_stop_event.is_set():
+            loop_start_t = time.perf_counter()
+            with self._servo_lock:
+                left_target = self._servo_left_target_pose7.copy()
+                right_target = self._servo_right_target_pose7.copy()
+                self._servo_left_command_pose7 = self._blend_pose7(
+                    self._servo_left_command_pose7,
+                    left_target,
+                    alpha,
+                )
+                self._servo_right_command_pose7 = self._blend_pose7(
+                    self._servo_right_command_pose7,
+                    right_target,
+                    alpha,
+                )
+                left_command = self._servo_left_command_pose7.copy()
+                right_command = self._servo_right_command_pose7.copy()
+
+            try:
+                send_start_t = time.perf_counter()
+                self._send_cartesian_pose_targets(left_command, right_command)
+                send_ms = (time.perf_counter() - send_start_t) * 1000.0
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[FLEXIV] Cartesian servo send failed: %s", exc)
+                self._servo_stop_event.wait(timeout=0.05)
+                continue
+
+            count += 1
+            if self.config.timing_debug:
+                total_ms = (time.perf_counter() - loop_start_t) * 1000.0
+                warn_ms = max(0.0, float(self.config.timing_warn_ms))
+                every_n = max(1, int(self.config.timing_debug_every_n) * 3)
+                if count <= 5 or count % every_n == 0 or (warn_ms > 0.0 and total_ms >= warn_ms):
+                    log_fn = logger.warning if warn_ms > 0.0 and total_ms >= warn_ms else logger.info
+                    log_fn(
+                        "[FLEXIV SERVO] step=%d send_ms=%.1f total_ms=%.1f hz=%.1f alpha=%.3f",
+                        count,
+                        send_ms,
+                        total_ms,
+                        float(self.config.cartesian_servo_hz),
+                        alpha,
+                    )
+
+            elapsed_s = time.perf_counter() - loop_start_t
+            self._servo_stop_event.wait(timeout=max(0.0, period_s - elapsed_s))
+
+    @staticmethod
+    def _blend_pose7(current_pose7: np.ndarray, target_pose7: np.ndarray, alpha: float) -> np.ndarray:
+        current = np.asarray(current_pose7, dtype=float).copy()
+        target = np.asarray(target_pose7, dtype=float).copy()
+        out = current.copy()
+        out[:3] = current[:3] + alpha * (target[:3] - current[:3])
+
+        current_quat = _rdk_quat_wxyz_to_scipy_xyzw(current[3:7])
+        target_quat = _rdk_quat_wxyz_to_scipy_xyzw(target[3:7])
+        if np.linalg.norm(current_quat) < 1e-12 or np.linalg.norm(target_quat) < 1e-12:
+            out[3:7] = target[3:7]
+            return out
+
+        current_rot = Rotation.from_quat(current_quat)
+        target_rot = Rotation.from_quat(target_quat)
+        delta_rot = target_rot * current_rot.inv()
+        step_rot = Rotation.from_rotvec(alpha * delta_rot.as_rotvec()) * current_rot
+        out[3:7] = _scipy_quat_xyzw_to_rdk_wxyz(step_rot.as_quat())
+        return out
 
     @staticmethod
     def _apply_mount_yaw(delta: np.ndarray, yaw_deg: float) -> np.ndarray:
@@ -512,10 +724,20 @@ class FlexivDualArm(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
         try:
+            obs_start_t = time.perf_counter()
+            timing: dict[str, float] = {}
             obs = {}
+            left_start_t = time.perf_counter()
             self._add_arm_observation(obs, "left", self._left_robot)
+            timing["left_state_ms"] = (time.perf_counter() - left_start_t) * 1000.0
+            right_start_t = time.perf_counter()
             self._add_arm_observation(obs, "right", self._right_robot)
+            timing["right_state_ms"] = (time.perf_counter() - right_start_t) * 1000.0
+            camera_start_t = time.perf_counter()
             self._add_camera_observations(obs)
+            timing["camera_ms"] = (time.perf_counter() - camera_start_t) * 1000.0
+            timing["total_ms"] = (time.perf_counter() - obs_start_t) * 1000.0
+            self._log_timing_debug("get_observation", timing)
             self._prev_observation = obs
             return obs
         except Exception as exc:  # noqa: BLE001
@@ -525,7 +747,9 @@ class FlexivDualArm(Robot):
             raise
 
     def _add_arm_observation(self, obs: dict[str, Any], side: str, robot: Any) -> None:
-        states = robot.states()
+        robot_lock = self._left_robot_lock if side == "left" else self._right_robot_lock
+        with robot_lock:
+            states = robot.states()
         joints = _as_np(getattr(states, "q", None), self._num_joints_per_arm)
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
         if np.linalg.norm(pose7[3:7]) < 1e-12:
@@ -555,9 +779,12 @@ class FlexivDualArm(Robot):
 
     def _refresh_cached_poses(self) -> None:
         if self._left_robot is not None:
-            self._cached_left_pose7 = _as_np(self._left_robot.states().tcp_pose, 7)
+            with self._left_robot_lock:
+                self._cached_left_pose7 = _as_np(self._left_robot.states().tcp_pose, 7)
         if self._right_robot is not None:
-            self._cached_right_pose7 = _as_np(self._right_robot.states().tcp_pose, 7)
+            with self._right_robot_lock:
+                self._cached_right_pose7 = _as_np(self._right_robot.states().tcp_pose, 7)
+        self._reset_servo_targets_from_cached()
 
     def _connect_cameras(self) -> None:
         if not self.cameras:
