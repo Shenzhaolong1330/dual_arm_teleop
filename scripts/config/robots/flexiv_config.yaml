@@ -6,12 +6,20 @@ teleop:
   oculus_config:
     ip: "192.168.110.40"
     use_gripper: true
-    left_pose_scaler: [0.7, 0.6]
-    left_channel_signs: [-1, 1, 1, -1, -1, 1]
-    right_pose_scaler: [0.7, 0.6]
-    right_channel_signs: [1, -1, 1, 1, 1, 1]
+    left_pose_scaler: [0.7, 0.5]
+    left_channel_signs: [-1, 1, 1, 1, -1, 1]
+    right_pose_scaler: [0.7, 0.5]
+    right_channel_signs: [1, -1, 1, -1, 1, 1]
     position_axis_order: [1, 0, 2]
     rotation_axis_order: [1, 0, 2]
+    action_smoothing_method: "one_euro"
+    action_smoothing_alpha: 0.25
+    action_smoothing_freq: 30.0
+    action_smoothing_min_cutoff: 0.8
+    action_smoothing_beta: 0.25
+    action_smoothing_d_cutoff: 1.0
+    action_missing_hold_frames: 2
+    action_missing_decay: 0.5
     action_deadband_translation: 0.0002
     action_deadband_rotation: 0.003
     action_spike_translation: 0.05
@@ -39,7 +47,7 @@ robot:
   action_debug_every_n: 30
   send_arms_parallel: true
   use_cartesian_servo_thread: true
-  cartesian_servo_hz: 150.0
+  cartesian_servo_hz: 200.0
   cartesian_servo_alpha: 0.25
   gripper_reverse: false
   close_threshold: 0.5

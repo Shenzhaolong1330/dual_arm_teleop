@@ -44,6 +44,8 @@ class OculusTeleopConfig(TeleoperatorConfig):
     action_smoothing_min_cutoff: float = 1.2
     action_smoothing_beta: float = 0.4
     action_smoothing_d_cutoff: float = 1.0
+    action_missing_hold_frames: int = 0
+    action_missing_decay: float = 0.5
     # Output-side filtering for noisy Oculus tracking. Deadband removes tiny
     # still-hand jitter; spike limits reject one-frame tracking jumps entirely.
     action_deadband_translation: float = 0.0
