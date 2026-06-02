@@ -87,6 +87,8 @@ class OculusTeleop(Teleoperator):
             left_channel_signs=self.cfg.left_channel_signs,
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
+            position_axis_order=self.cfg.position_axis_order,
+            rotation_axis_order=self.cfg.rotation_axis_order,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
             action_deadband_translation=self.cfg.action_deadband_translation,
             action_deadband_rotation=self.cfg.action_deadband_rotation,

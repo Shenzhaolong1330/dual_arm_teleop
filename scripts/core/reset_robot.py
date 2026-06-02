@@ -26,6 +26,7 @@ ROBOT_DETAIL_CONFIG_FILES = {
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
     "arx_dual_arm": "arx_config.yaml",
+    "flexiv_dual_arm": "flexiv_config.yaml",
 }
 ROBOT_CONFIG_DIR = Path("config") / "robots"
 

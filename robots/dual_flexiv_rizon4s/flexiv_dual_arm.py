@@ -1,0 +1,691 @@
+"""LeRobot adapter for two Flexiv Rizon4s arms through Flexiv RDK."""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any
+
+import numpy as np
+from scipy.spatial.transform import Rotation
+
+from lerobot.cameras import make_cameras_from_configs
+from lerobot.robots.robot import Robot
+from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
+
+from .config_flexiv import FlexivDualArmConfig
+
+logger = logging.getLogger(__name__)
+
+AXES = ("x", "y", "z", "rx", "ry", "rz")
+
+
+def _as_np(values: Any, length: int) -> np.ndarray:
+    out = np.zeros(length, dtype=float)
+    if values is None:
+        return out
+    arr = np.asarray(values, dtype=float).reshape(-1)
+    count = min(length, arr.size)
+    if count:
+        out[:count] = arr[:count]
+    return out
+
+
+def _clip_norm(values: np.ndarray, limit: float | None) -> np.ndarray:
+    if limit is None or limit <= 0:
+        return values
+    norm = float(np.linalg.norm(values))
+    if norm <= limit or norm < 1e-12:
+        return values
+    return values * (float(limit) / norm)
+
+
+def _pose7_to_pose6(pose7: Any) -> np.ndarray:
+    pose = _as_np(pose7, 7)
+    rotvec = np.zeros(3, dtype=float)
+    quat = _rdk_quat_wxyz_to_scipy_xyzw(pose[3:7])
+    if np.linalg.norm(quat) > 1e-12:
+        try:
+            rotvec = Rotation.from_quat(quat).as_rotvec()
+        except ValueError:
+            rotvec = np.zeros(3, dtype=float)
+    return np.concatenate([pose[:3], rotvec])
+
+
+def _apply_delta_to_pose7(current_pose7: np.ndarray, delta6: np.ndarray) -> np.ndarray:
+    target = np.asarray(current_pose7, dtype=float).copy()
+    target[:3] += delta6[:3]
+
+    current_quat = _rdk_quat_wxyz_to_scipy_xyzw(target[3:7])
+    if np.linalg.norm(current_quat) < 1e-12:
+        current_rot = Rotation.identity()
+    else:
+        current_rot = Rotation.from_quat(current_quat)
+    target_rot = Rotation.from_rotvec(delta6[3:]) * current_rot
+    target[3:7] = _scipy_quat_xyzw_to_rdk_wxyz(target_rot.as_quat())
+    return target
+
+
+def _rdk_quat_wxyz_to_scipy_xyzw(quat_wxyz: Any) -> np.ndarray:
+    quat = _as_np(quat_wxyz, 4)
+    return np.array([quat[1], quat[2], quat[3], quat[0]], dtype=float)
+
+
+def _scipy_quat_xyzw_to_rdk_wxyz(quat_xyzw: Any) -> np.ndarray:
+    quat = _as_np(quat_xyzw, 4)
+    return np.array([quat[3], quat[0], quat[1], quat[2]], dtype=float)
+
+
+class FlexivDualArm(Robot):
+    """Dual Flexiv Rizon4s adapter using Flexiv RDK Cartesian servo commands."""
+
+    config_class = FlexivDualArmConfig
+    name = "flexiv_dual_arm"
+
+    def __init__(self, config: FlexivDualArmConfig):
+        super().__init__(config)
+        self.config = config
+        self.cameras = make_cameras_from_configs(config.cameras)
+        self._is_connected = False
+        self._flexivrdk = None
+        self._left_robot = None
+        self._right_robot = None
+        self._left_gripper = None
+        self._right_gripper = None
+        self._left_tool = None
+        self._right_tool = None
+        self._num_joints_per_arm = int(config.num_joints_per_arm)
+        self._prev_observation: dict[str, Any] | None = None
+        self._cached_left_pose7 = np.zeros(7, dtype=float)
+        self._cached_right_pose7 = np.zeros(7, dtype=float)
+        self._cached_left_pose7[3] = 1.0
+        self._cached_right_pose7[3] = 1.0
+        self._left_gripper_cmd = 1.0
+        self._right_gripper_cmd = 1.0
+        self._left_gripper_width: float | None = None
+        self._right_gripper_width: float | None = None
+        self._camera_stop_event = threading.Event()
+        self._camera_threads: dict[str, threading.Thread] = {}
+        self._frame_lock = threading.Lock()
+        self._latest_frames: dict[str, Any] = {}
+        self._action_debug_count = 0
+
+    @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    @is_connected.setter
+    def is_connected(self, value: bool) -> None:
+        self._is_connected = bool(value)
+
+    def connect(self) -> None:
+        if self.is_connected:
+            raise DeviceAlreadyConnectedError(f"{self.name} is already connected.")
+        if not self.config.left_robot_sn or not self.config.right_robot_sn:
+            raise ValueError(
+                "Flexiv robot serial numbers are required. Fill "
+                "`left_robot_sn` and `right_robot_sn` in "
+                "scripts/config/robots/flexiv_config.yaml."
+            )
+
+        try:
+            import flexivrdk  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                "flexivrdk is not installed in the active Python environment. "
+                "Install it with: python -m pip install flexivrdk spdlog"
+            ) from exc
+
+        self._flexivrdk = flexivrdk
+        logger.info("[FLEXIV] Connecting left arm: %s", self.config.left_robot_sn)
+        self._left_robot = flexivrdk.Robot(self.config.left_robot_sn)
+        logger.info("[FLEXIV] Connecting right arm: %s", self.config.right_robot_sn)
+        self._right_robot = flexivrdk.Robot(self.config.right_robot_sn)
+
+        for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
+            self._prepare_robot(side, robot)
+
+        self._refresh_cached_poses()
+        self._connect_cameras()
+        self.is_connected = True
+        logger.info("[FLEXIV] %s connected", self.name)
+
+    def _prepare_robot(self, side: str, robot: Any) -> None:
+        if self.config.clear_fault_on_connect and robot.fault():
+            logger.warning("[FLEXIV] %s arm fault detected, clearing", side)
+            if not robot.ClearFault():
+                raise RuntimeError(f"Failed to clear {side} Flexiv arm fault.")
+
+        if self.config.enable_on_connect:
+            logger.info("[FLEXIV] Enabling %s arm", side)
+            robot.Enable()
+            while not robot.operational():
+                time.sleep(0.2)
+            logger.info("[FLEXIV] %s arm operational", side)
+
+        if self.config.use_gripper and not self.config.debug:
+            self._prepare_gripper(side, robot)
+
+        if self.config.go_home_on_connect:
+            self._execute_home(side, robot)
+            self._open_home_gripper(side)
+
+        if self.config.zero_ft_sensor_on_connect:
+            self._zero_ft_sensor(side, robot)
+
+        if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
+            try:
+                robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"Failed to switch {side} Flexiv arm to NRT_CARTESIAN_MOTION_FORCE. "
+                    "Make sure the arm is not touching anything while ZeroFTSensor runs. "
+                    "If this is only a connection/reset smoke test, set "
+                    "`switch_cartesian_mode_on_connect: false` in flexiv_config.yaml."
+                ) from exc
+            robot.SetForceControlAxis([False, False, False, False, False, False])
+
+    def _prepare_gripper(self, side: str, robot: Any) -> None:
+        gripper_name = (
+            self.config.left_gripper_name if side == "left" else self.config.right_gripper_name
+        )
+        if not gripper_name:
+            raise ValueError(
+                f"`{side}_gripper_name` is required when `use_gripper: true`. "
+                "Find the full name in Flexiv Elements -> Settings -> Device."
+            )
+
+        logger.info("[FLEXIV] Enabling %s gripper: %s", side, gripper_name)
+        gripper = self._flexivrdk.Gripper(robot)
+        gripper.Enable(gripper_name)
+
+        tool = None
+        if self.config.switch_tool_on_connect:
+            logger.info("[FLEXIV] Switching %s arm tool to %s", side, gripper_name)
+            tool = self._flexivrdk.Tool(robot)
+            tool.Switch(gripper_name)
+
+        if self.config.initialize_gripper_on_connect:
+            logger.info("[FLEXIV] Initializing %s gripper", side)
+            gripper.Init()
+
+        try:
+            params = gripper.params()
+            width = float(gripper.states().width)
+            logger.info(
+                "[FLEXIV] %s gripper params min_width=%.4f max_width=%.4f min_vel=%.4f max_vel=%.4f min_force=%.2f max_force=%.2f",
+                side,
+                float(params.min_width),
+                float(params.max_width),
+                float(params.min_vel),
+                float(params.max_vel),
+                float(params.min_force),
+                float(params.max_force),
+            )
+        except Exception:  # noqa: BLE001
+            width = float(self.config.gripper_max_open)
+
+        if side == "left":
+            self._left_gripper = gripper
+            self._left_tool = tool
+            self._left_gripper_width = width
+        else:
+            self._right_gripper = gripper
+            self._right_tool = tool
+            self._right_gripper_width = width
+
+    def _execute_home_plan(self, side: str, robot: Any) -> None:
+        logger.info("[FLEXIV] Moving %s arm with plan %s", side, self.config.home_plan_name)
+        robot.SwitchMode(self._flexivrdk.Mode.NRT_PLAN_EXECUTION)
+        robot.ExecutePlan(self.config.home_plan_name)
+        while robot.busy():
+            time.sleep(0.2)
+
+    def _home_joints_for_side(self, side: str) -> list[float]:
+        joints = self.config.left_home_joints if side == "left" else self.config.right_home_joints
+        return [float(value) for value in joints]
+
+    def _execute_home(self, side: str, robot: Any) -> None:
+        home_joints = self._home_joints_for_side(side)
+        if home_joints:
+            self._execute_joint_home(side, robot, home_joints)
+        else:
+            self._execute_home_plan(side, robot)
+
+    def _execute_joint_home(self, side: str, robot: Any, target_joints: list[float]) -> None:
+        if len(target_joints) != self._num_joints_per_arm:
+            raise ValueError(
+                f"`{side}_home_joints` must contain {self._num_joints_per_arm} values, "
+                f"got {len(target_joints)}."
+            )
+
+        logger.info("[FLEXIV] Moving %s arm to configured joint home", side)
+        robot.SwitchMode(self._flexivrdk.Mode.NRT_JOINT_POSITION)
+        zeros = [0.0] * self._num_joints_per_arm
+        max_vel = [float(self.config.home_joint_max_vel)] * self._num_joints_per_arm
+        max_acc = [float(self.config.home_joint_max_acc)] * self._num_joints_per_arm
+        robot.SendJointPosition(target_joints, zeros, max_vel, max_acc)
+
+        deadline = time.monotonic() + max(0.1, float(self.config.home_joint_timeout_sec))
+        tolerance = max(0.0, float(self.config.home_joint_tolerance))
+        target = np.asarray(target_joints, dtype=float)
+        while time.monotonic() < deadline:
+            current = _as_np(robot.states().q, self._num_joints_per_arm)
+            if float(np.max(np.abs(current - target))) <= tolerance:
+                logger.info("[FLEXIV] %s arm reached configured joint home", side)
+                return
+            time.sleep(0.1)
+        logger.warning(
+            "[FLEXIV] %s arm joint home timeout after %.1fs; continuing",
+            side,
+            float(self.config.home_joint_timeout_sec),
+        )
+
+    def _open_home_gripper(self, side: str) -> None:
+        if not self.config.use_gripper:
+            return
+        open_fraction = float(np.clip(self.config.home_gripper_open_fraction, 0.0, 1.0))
+        if side == "left":
+            self._left_gripper_cmd = open_fraction
+        else:
+            self._right_gripper_cmd = open_fraction
+        self._move_gripper_if_needed(side, open_fraction)
+
+    def _zero_ft_sensor(self, side: str, robot: Any) -> None:
+        logger.info("[FLEXIV] Zeroing %s arm force-torque sensor", side)
+        robot.SwitchMode(self._flexivrdk.Mode.NRT_PRIMITIVE_EXECUTION)
+        robot.ExecutePrimitive("ZeroFTSensor", dict())
+        while not robot.primitive_states()["terminated"]:
+            time.sleep(0.2)
+
+    def disconnect(self) -> None:
+        if not self.is_connected:
+            return
+        self._stop_cameras()
+        for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
+            if gripper is not None:
+                try:
+                    gripper.Stop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[FLEXIV] %s gripper stop failed during disconnect: %s", side, exc)
+        for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
+            if robot is not None:
+                try:
+                    robot.Stop()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[FLEXIV] %s arm stop failed during disconnect: %s", side, exc)
+        self._left_robot = None
+        self._right_robot = None
+        self._left_gripper = None
+        self._right_gripper = None
+        self._left_tool = None
+        self._right_tool = None
+        self.is_connected = False
+        logger.info("[FLEXIV] %s disconnected", self.name)
+
+    def reset(self) -> None:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        if self.config.reset_go_home:
+            self._execute_home("left", self._left_robot)
+            self._execute_home("right", self._right_robot)
+            self._open_home_gripper("left")
+            self._open_home_gripper("right")
+            if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
+                self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
+                self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
+        self._refresh_cached_poses()
+
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self.name} is not connected.")
+
+        if not self.config.debug and "left_delta_ee_pose.x" in action:
+            self._send_cartesian_delta(action)
+        elif not self.config.debug and all(
+            f"left_joint_{i + 1}.pos" in action for i in range(self._num_joints_per_arm)
+        ):
+            self._send_joint_positions(action)
+
+        if self.config.use_gripper:
+            self._update_gripper_cache(action)
+        self._log_action_debug(action)
+        return action
+
+    def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
+        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        left_delta = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
+        right_delta = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
+        left_delta[:3] = _clip_norm(left_delta[:3], self.config.max_cartesian_delta)
+        right_delta[:3] = _clip_norm(right_delta[:3], self.config.max_cartesian_delta)
+        left_delta[3:] = _clip_norm(left_delta[3:], self.config.max_rotation_delta)
+        right_delta[3:] = _clip_norm(right_delta[3:], self.config.max_rotation_delta)
+
+        target_left = _apply_delta_to_pose7(self._cached_left_pose7, left_delta)
+        target_right = _apply_delta_to_pose7(self._cached_right_pose7, right_delta)
+        zero_cartesian = [0.0] * 6
+        self._left_robot.SendCartesianMotionForce(
+            target_left.tolist(),
+            zero_cartesian,
+            zero_cartesian,
+            self.config.cartesian_max_linear_vel,
+            self.config.cartesian_max_angular_vel,
+            self.config.cartesian_max_linear_acc,
+            self.config.cartesian_max_angular_acc,
+        )
+        self._right_robot.SendCartesianMotionForce(
+            target_right.tolist(),
+            zero_cartesian,
+            zero_cartesian,
+            self.config.cartesian_max_linear_vel,
+            self.config.cartesian_max_angular_vel,
+            self.config.cartesian_max_linear_acc,
+            self.config.cartesian_max_angular_acc,
+        )
+        self._cached_left_pose7 = target_left
+        self._cached_right_pose7 = target_right
+
+    def _log_action_debug(self, action: dict[str, Any]) -> None:
+        if not self.config.action_debug:
+            return
+
+        self._action_debug_count += 1
+        every_n = max(1, int(self.config.action_debug_every_n))
+        if self._action_debug_count > 5 and self._action_debug_count % every_n != 0:
+            return
+
+        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        left_mapped = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
+        right_mapped = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
+        left_grip = self._gripper_value_from_action(action, "left")
+        right_grip = self._gripper_value_from_action(action, "right")
+        logger.info(
+            "[FLEXIV ACTION] step=%d raw_left_xyz=%.6f raw_right_xyz=%.6f "
+            "mapped_left_xyz=%.6f mapped_right_xyz=%.6f left_rot=%.6f right_rot=%.6f "
+            "left_grip=%s right_grip=%s target_left_xyz=[%.4f %.4f %.4f] target_right_xyz=[%.4f %.4f %.4f]",
+            self._action_debug_count,
+            float(np.linalg.norm(left_delta[:3])),
+            float(np.linalg.norm(right_delta[:3])),
+            float(np.linalg.norm(left_mapped[:3])),
+            float(np.linalg.norm(right_mapped[:3])),
+            float(np.linalg.norm(left_mapped[3:])),
+            float(np.linalg.norm(right_mapped[3:])),
+            None if left_grip is None else f"{left_grip:.3f}",
+            None if right_grip is None else f"{right_grip:.3f}",
+            float(self._cached_left_pose7[0]),
+            float(self._cached_left_pose7[1]),
+            float(self._cached_left_pose7[2]),
+            float(self._cached_right_pose7[0]),
+            float(self._cached_right_pose7[1]),
+            float(self._cached_right_pose7[2]),
+        )
+
+    @staticmethod
+    def _apply_mount_yaw(delta: np.ndarray, yaw_deg: float) -> np.ndarray:
+        if abs(float(yaw_deg)) < 1e-12:
+            return delta
+        rot_z = Rotation.from_euler("z", float(yaw_deg), degrees=True)
+        out = delta.copy()
+        out[:3] = rot_z.apply(out[:3])
+        out[3:] = rot_z.apply(out[3:])
+        return out
+
+    def _send_joint_positions(self, action: dict[str, Any]) -> None:
+        left_q = [float(action[f"left_joint_{i + 1}.pos"]) for i in range(self._num_joints_per_arm)]
+        right_q = [float(action[f"right_joint_{i + 1}.pos"]) for i in range(self._num_joints_per_arm)]
+        zeros = [0.0] * self._num_joints_per_arm
+        max_vel = [2.0] * self._num_joints_per_arm
+        max_acc = [3.0] * self._num_joints_per_arm
+        self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_JOINT_POSITION)
+        self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_JOINT_POSITION)
+        self._left_robot.SendJointPosition(left_q, zeros, max_vel, max_acc)
+        self._right_robot.SendJointPosition(right_q, zeros, max_vel, max_acc)
+
+    def _update_gripper_cache(self, action: dict[str, Any]) -> None:
+        left = self._gripper_value_from_action(action, "left")
+        right = self._gripper_value_from_action(action, "right")
+        if left is not None:
+            self._left_gripper_cmd = self._normalize_gripper(float(left))
+            self._move_gripper_if_needed("left", self._left_gripper_cmd)
+        if right is not None:
+            self._right_gripper_cmd = self._normalize_gripper(float(right))
+            self._move_gripper_if_needed("right", self._right_gripper_cmd)
+
+    @staticmethod
+    def _gripper_value_from_action(action: dict[str, Any], side: str) -> Any:
+        for key in (f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"):
+            value = action.get(key)
+            if value is not None:
+                return value
+        return None
+
+    def _normalize_gripper(self, value: float) -> float:
+        value = float(np.clip(value, 0.0, 1.0))
+        if self.config.gripper_reverse:
+            value = 1.0 - value
+        return value
+
+    def _gripper_width_from_cmd(self, open_fraction: float) -> float:
+        width = float(
+            self.config.gripper_min_width
+            + open_fraction * (self.config.gripper_max_open - self.config.gripper_min_width)
+        )
+        return float(np.clip(width, self.config.gripper_min_width, self.config.gripper_max_open))
+
+    def _move_gripper_if_needed(self, side: str, open_fraction: float) -> None:
+        gripper = self._left_gripper if side == "left" else self._right_gripper
+        if gripper is None:
+            return
+
+        target_width = self._gripper_width_from_cmd(open_fraction)
+        last_width = self._left_gripper_width if side == "left" else self._right_gripper_width
+        if last_width is not None and abs(target_width - last_width) < self.config.gripper_command_epsilon:
+            return
+
+        try:
+            params = gripper.params()
+            target_width = float(np.clip(target_width, params.min_width, params.max_width))
+            velocity = float(np.clip(self.config.gripper_speed, params.min_vel, params.max_vel))
+            force = float(np.clip(self.config.gripper_force, params.min_force, params.max_force))
+        except Exception:  # noqa: BLE001
+            velocity = self.config.gripper_speed
+            force = self.config.gripper_force
+
+        logger.info(
+            "[FLEXIV] %s gripper Move width=%.4f open_fraction=%.3f velocity=%.3f force=%.1f",
+            side,
+            target_width,
+            open_fraction,
+            velocity,
+            force,
+        )
+        gripper.Move(target_width, velocity, force)
+        if side == "left":
+            self._left_gripper_width = target_width
+        else:
+            self._right_gripper_width = target_width
+
+    def get_observation(self) -> dict[str, Any]:
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        try:
+            obs = {}
+            self._add_arm_observation(obs, "left", self._left_robot)
+            self._add_arm_observation(obs, "right", self._right_robot)
+            self._add_camera_observations(obs)
+            self._prev_observation = obs
+            return obs
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FLEXIV] get_observation failed: %s", exc)
+            if self._prev_observation is not None:
+                return self._prev_observation
+            raise
+
+    def _add_arm_observation(self, obs: dict[str, Any], side: str, robot: Any) -> None:
+        states = robot.states()
+        joints = _as_np(getattr(states, "q", None), self._num_joints_per_arm)
+        pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
+        if np.linalg.norm(pose7[3:7]) < 1e-12:
+            pose7[3] = 1.0
+        pose6 = _pose7_to_pose6(pose7)
+
+        if side == "left":
+            self._cached_left_pose7 = pose7.copy()
+        else:
+            self._cached_right_pose7 = pose7.copy()
+
+        for index, value in enumerate(joints, start=1):
+            obs[f"{side}_joint_{index}.pos"] = float(value)
+        for index, axis in enumerate(AXES):
+            obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
+
+        if self.config.use_gripper:
+            cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
+            obs[f"{side}_gripper_state_norm"] = float(cmd)
+            obs[f"{side}_gripper_cmd"] = float(cmd)
+            gripper = self._left_gripper if side == "left" else self._right_gripper
+            if gripper is not None:
+                try:
+                    obs[f"{side}_gripper_width"] = float(gripper.states().width)
+                except Exception:  # noqa: BLE001
+                    obs[f"{side}_gripper_width"] = self._gripper_width_from_cmd(cmd)
+
+    def _refresh_cached_poses(self) -> None:
+        if self._left_robot is not None:
+            self._cached_left_pose7 = _as_np(self._left_robot.states().tcp_pose, 7)
+        if self._right_robot is not None:
+            self._cached_right_pose7 = _as_np(self._right_robot.states().tcp_pose, 7)
+
+    def _connect_cameras(self) -> None:
+        if not self.cameras:
+            return
+        self._camera_stop_event.clear()
+        warmed_cameras: list[tuple[str, Any]] = []
+        for cam_name, cam in self.cameras.items():
+            # LeRobot's default RealSense connect() warmup reads with a fixed
+            # 200 ms timeout, which is too tight when three D435 pipelines start
+            # together. Disable that warmup and use the configurable one below.
+            cam.connect(warmup=False)
+            self._warmup_camera(cam_name, cam)
+            warmed_cameras.append((cam_name, cam))
+            logger.info("[CAM] %s warmed up", cam_name)
+
+        for cam_name, cam in warmed_cameras:
+            thread = threading.Thread(
+                target=self._camera_read_loop,
+                args=(cam_name, cam),
+                name=f"flexiv_cam_{cam_name}",
+                daemon=True,
+            )
+            thread.start()
+            self._camera_threads[cam_name] = thread
+            logger.info("[CAM] %s connected", cam_name)
+
+    def _warmup_camera(self, cam_name: str, cam: Any) -> None:
+        attempts = max(int(self.config.camera_warmup_attempts), 1)
+        timeout_ms = max(int(self.config.camera_read_timeout_ms), 200)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            try:
+                frame = cam.read(timeout_ms=timeout_ms)
+                with self._frame_lock:
+                    self._latest_frames[cam_name] = frame
+                if attempt > 1:
+                    logger.info("[CAM] %s warmed up after %d attempts", cam_name, attempt)
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                time.sleep(0.1)
+        raise RuntimeError(
+            f"Camera {cam_name} did not produce a frame after {attempts} warmup "
+            f"attempts with timeout_ms={timeout_ms}. Close realsense-viewer and "
+            "other camera users, then replug this RealSense if needed."
+        ) from last_error
+
+    def _stop_cameras(self) -> None:
+        self._camera_stop_event.set()
+        for cam_name, thread in self._camera_threads.items():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                logger.warning("[CAM] %s thread did not stop cleanly", cam_name)
+        self._camera_threads.clear()
+        self._latest_frames.clear()
+        for cam in self.cameras.values():
+            cam.disconnect()
+
+    def _camera_read_loop(self, cam_name: str, cam: Any) -> None:
+        timeout_ms = max(int(self.config.camera_read_timeout_ms), 200)
+        while not self._camera_stop_event.is_set():
+            try:
+                frame = cam.read(timeout_ms=timeout_ms)
+                with self._frame_lock:
+                    self._latest_frames[cam_name] = frame
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CAM] %s read failed: %s", cam_name, exc)
+                self._camera_stop_event.wait(timeout=0.1)
+
+    def _add_camera_observations(self, obs: dict[str, Any]) -> None:
+        if not self.cameras:
+            return
+        with self._frame_lock:
+            for cam_name in self.cameras:
+                if cam_name in self._latest_frames:
+                    obs[cam_name] = self._latest_frames[cam_name]
+                else:
+                    obs[cam_name] = self.cameras[cam_name].read(
+                        timeout_ms=max(int(self.config.camera_read_timeout_ms), 200)
+                    )
+
+    @property
+    def _motors_ft(self) -> dict[str, type]:
+        features = {}
+        for side in ("left", "right"):
+            for index in range(self._num_joints_per_arm):
+                features[f"{side}_joint_{index + 1}.pos"] = float
+            for axis in AXES:
+                features[f"{side}_ee_pose.{axis}"] = float
+            if self.config.use_gripper:
+                features[f"{side}_gripper_state_norm"] = float
+                features[f"{side}_gripper_cmd"] = float
+                features[f"{side}_gripper_width"] = float
+        return features
+
+    @property
+    def action_features(self) -> dict[str, type]:
+        features = {}
+        if self.config.control_mode == "oculus":
+            for side in ("left", "right"):
+                for axis in AXES:
+                    features[f"{side}_delta_ee_pose.{axis}"] = float
+        else:
+            for side in ("left", "right"):
+                for index in range(self._num_joints_per_arm):
+                    features[f"{side}_joint_{index + 1}.pos"] = float
+        if self.config.use_gripper:
+            features["left_gripper_cmd"] = float
+            features["right_gripper_cmd"] = float
+        return features
+
+    @property
+    def observation_features(self) -> dict[str, Any]:
+        return {**self._motors_ft, **self._cameras_ft}
+
+    @property
+    def _cameras_ft(self) -> dict[str, tuple[int, int, int]]:
+        return {
+            cam: (self.cameras[cam].height, self.cameras[cam].width, 3)
+            for cam in self.cameras
+        }
+
+    def calibrate(self) -> None:
+        pass
+
+    @property
+    def is_calibrated(self) -> bool:
+        return self.is_connected
+
+    def configure(self) -> None:
+        pass

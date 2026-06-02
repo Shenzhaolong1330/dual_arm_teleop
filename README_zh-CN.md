@@ -6,7 +6,7 @@
   <img src="docs/images/supported_robots.jpg" alt="Supported robot systems" width="900">
 </p>
 
-上图中的机器人适配器已在当前注册表中支持：Dobot 双臂、AgileX Nero 双臂、ARX 双臂，以及 Franka 单臂/双臂。对应的 `robot_type` 分别是 `dobot_dual_arm`、`nero_dual_arm`、`arx_dual_arm`、`franka` 和 `franka_dual_arm`。
+当前注册表支持以下机器人适配器：Dobot 双臂、AgileX Nero 双臂、ARX 双臂、Franka 单臂/双臂，以及 Flexiv Rizon4s 双臂。对应的 `robot_type` 分别是 `dobot_dual_arm`、`nero_dual_arm`、`arx_dual_arm`、`franka`、`franka_dual_arm` 和 `flexiv_dual_arm`。
 
 ## 仓库获取与环境配置
 
@@ -127,6 +127,7 @@ robots
 - `nero_dual_arm`
 - `arx_dual_arm`
 - `franka_dual_arm`
+- `flexiv_dual_arm`
 
 脚本不会直接实例化某个具体机器人类，而是根据配置中的 `robot_type` 调用：
 
@@ -137,7 +138,7 @@ create_robot(robot_type, robot_config)
 
 本包的 `robot-*` 命令使用仓库内自己的 `robots` 和 `teleoperators` 注册表。现在不再保留 `lerobot_robot_*` 或 `lerobot_teleoperator_*` 这类顶层 LeRobot 插件 shim 包，因此不提供上游 LeRobot CLI `register_third_party_devices()` 的自动发现别名。
 
-具体机器人类负责实现 LeRobot 期望的机器人接口，例如 `connect()`、`reset()`、`send_action()`、相机初始化、观测字段和动作字段定义。以 `nero_dual_arm` 为例，`robots/dual_agilex_nero/nero_dual_arm.py` 通过 `NeroDualArmClient` 连接双臂 zerorpc 服务，并把双臂末端位姿、关节状态、夹爪命令和 RealSense 相机组织成 LeRobot 可记录的数据结构。
+具体机器人类负责实现 LeRobot 期望的机器人接口，例如 `connect()`、`reset()`、`send_action()`、相机初始化、观测字段和动作字段定义。以 `nero_dual_arm` 为例，`robots/dual_agilex_nero/nero_dual_arm.py` 通过 `NeroDualArmClient` 连接双臂 zerorpc 服务，并把双臂末端位姿、关节状态、夹爪命令和 RealSense 相机组织成 LeRobot 可记录的数据结构。`robots/dual_flexiv_rizon4s/flexiv_dual_arm.py` 通过 Flexiv RDK 支持 Flexiv Rizon4s 双臂，会从 `scripts/config/robots/flexiv_config.yaml` 读取左右机械臂序列号、Flexiv 夹爪/工具名称、笛卡尔运动限制、home 关节角和 RealSense 相机配置。
 
 硬件相关参数不建议直接写在运行脚本里，而是放在：
 
@@ -151,8 +152,9 @@ scripts/config/robots
 - `nero_dual_arm`：`scripts/config/robots/nero_cofig.yaml`
 - `arx_dual_arm`：`scripts/config/robots/arx_config.yaml`
 - `franka`、`franka_dual_arm`：`scripts/config/robots/franka_config.yaml`
+- `flexiv_dual_arm`：`scripts/config/robots/flexiv_config.yaml`
 
-每个文件定义对应硬件的机器人 IP、端口、夹爪参数、Oculus 映射和相机序列号。`run_record.py`、`run_replay.py`、`reset_robot.py` 会根据 `record.robot_type` 自动加载对应机器人配置；也可以在 `record_cfg.yaml` 中通过 `das_config_path` 显式指定。
+每个文件定义对应硬件的连接信息、夹爪参数、Oculus 映射和相机序列号。`run_record.py`、`run_replay.py`、`reset_robot.py` 会根据 `record.robot_type` 自动加载对应机器人配置；也可以在 `record_cfg.yaml` 中通过 `das_config_path` 显式指定。
 
 ### 工具脚本、数采系统与策略配置
 
@@ -256,7 +258,7 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 采集前通常需要修改 `scripts/config/record_cfg.yaml`：
 
 - `record.repo_id`：数据集名称，建议使用 `<robot_task<num>_step<num>/<description>`，例如 `nero_task3_step1/2mL_empty_right`。
-- `record.robot_type`：选择 `nero_dual_arm`、`franka_dual_arm` 等机器人类型。
+- `record.robot_type`：选择 `nero_dual_arm`、`franka_dual_arm`、`flexiv_dual_arm` 等机器人类型。
 - `record.run_mode`：选择 `run_record`、`run_policy` 或 `run_mix`。
 - `record.policy.type`、`config_path`、`pretrained_path`：仅在 `run_policy` 或 `run_mix` 时需要确认。
 - `record.task`：任务描述、episode 数量、是否 resume、是否记录 success。
@@ -267,7 +269,8 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 
 - `teleop.oculus_config.ip`：Oculus Quest IP。
 - `teleop.oculus_config.*_pose_scaler` 和 `*_channel_signs`：左右手柄到机器人动作的映射。
-- `robot.robot_ip`、`robot.robot_port`：机器人服务地址。
+- `robot.robot_ip`、`robot.robot_port`：基于 RPC 的机器人服务地址。
+- 对于 `flexiv_dual_arm`，需要在 `scripts/config/robots/flexiv_config.yaml` 中填写 `robot.left_robot_sn`、`robot.right_robot_sn`、Flexiv 夹爪/工具名称、home 关节角和笛卡尔安全限制。真实硬件控制还要求当前 Python 环境安装 `flexivrdk` 和 `spdlog`。
 - `robot.use_gripper` 和夹爪参数：夹爪启用、开合阈值、最大开口和力。
 - `cameras.*_serial`、`width`、`height`：RealSense 序列号和分辨率。
 
@@ -313,7 +316,7 @@ adb install -r teleop-debug.apk
 
 ### 配置 Oculus 遥操作
 
-在所选机器人配置中设置 Oculus IP 和映射参数，例如 `scripts/config/robots/nero_cofig.yaml`：
+在所选机器人配置中设置 Oculus IP 和映射参数，例如 `scripts/config/robots/nero_cofig.yaml` 或 `scripts/config/robots/flexiv_config.yaml`：
 
 ```yaml
 teleop:

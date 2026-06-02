@@ -25,6 +25,11 @@ class OculusTeleopConfig(TeleoperatorConfig):
     # Right controller (controls right arm)
     right_pose_scaler: List[float] = field(default_factory=lambda: [1.0, 1.0])
     right_channel_signs: List[int] = field(default_factory=lambda: [1, 1, 1, 1, 1, 1])
+
+    # Optional output-axis remapping after Oculus-to-robot conversion.
+    # Values are output axes selecting from input axes: [1, 0, 2] swaps X/Y.
+    position_axis_order: List[int] = field(default_factory=lambda: [0, 1, 2])
+    rotation_axis_order: List[int] = field(default_factory=lambda: [0, 1, 2])
     
     # Gripper control
     use_gripper: bool = True

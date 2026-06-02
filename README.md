@@ -6,7 +6,7 @@ This project provides dual-arm teleoperation, data acquisition, replay/visualiza
   <img src="docs/images/supported_robots.jpg" alt="Supported robot systems" width="900">
 </p>
 
-The robot adapters shown above are supported by the current registry: Dobot dual arm, AgileX Nero dual arm, ARX dual arm, and Franka single/dual arm. The exact `robot_type` values are `dobot_dual_arm`, `nero_dual_arm`, `arx_dual_arm`, `franka`, and `franka_dual_arm`.
+The current registry supports these robot adapters: Dobot dual arm, AgileX Nero dual arm, ARX dual arm, Franka single/dual arm, and Flexiv Rizon4s dual arm. The exact `robot_type` values are `dobot_dual_arm`, `nero_dual_arm`, `arx_dual_arm`, `franka`, `franka_dual_arm`, and `flexiv_dual_arm`.
 
 ## Repository Setup and Environment
 
@@ -128,6 +128,7 @@ robots
 - `nero_dual_arm`
 - `arx_dual_arm`
 - `franka_dual_arm`
+- `flexiv_dual_arm`
 
 Scripts do not instantiate a concrete robot class directly. Instead, they use the configured `robot_type` to call:
 
@@ -138,7 +139,7 @@ create_robot(robot_type, robot_config)
 
 This package uses its own `robots` and `teleoperators` registries in the `robot-*` commands. It no longer ships top-level LeRobot plugin shim packages such as `lerobot_robot_*` or `lerobot_teleoperator_*`, so upstream LeRobot CLI auto-discovery aliases from `register_third_party_devices()` are not provided here.
 
-Each concrete robot class implements the robot interface expected by LeRobot, such as `connect()`, `reset()`, `send_action()`, camera initialization, observation fields, and action fields. For example, `robots/dual_agilex_nero/nero_dual_arm.py` connects to the dual-arm zerorpc service through `NeroDualArmClient`, then organizes dual-arm end-effector poses, joint states, gripper commands, and RealSense cameras into a LeRobot-compatible data structure.
+Each concrete robot class implements the robot interface expected by LeRobot, such as `connect()`, `reset()`, `send_action()`, camera initialization, observation fields, and action fields. For example, `robots/dual_agilex_nero/nero_dual_arm.py` connects to the dual-arm zerorpc service through `NeroDualArmClient`, then organizes dual-arm end-effector poses, joint states, gripper commands, and RealSense cameras into a LeRobot-compatible data structure. `robots/dual_flexiv_rizon4s/flexiv_dual_arm.py` supports a dual Flexiv Rizon4s setup through Flexiv RDK, using the left/right robot serial numbers, Flexiv gripper/tool names, Cartesian limits, home joints, and RealSense cameras from `scripts/config/robots/flexiv_config.yaml`.
 
 Hardware-specific parameters should usually live in config files instead of runtime scripts:
 
@@ -152,8 +153,9 @@ The default robot config mapping is:
 - `nero_dual_arm`: `scripts/config/robots/nero_cofig.yaml`
 - `arx_dual_arm`: `scripts/config/robots/arx_config.yaml`
 - `franka`, `franka_dual_arm`: `scripts/config/robots/franka_config.yaml`
+- `flexiv_dual_arm`: `scripts/config/robots/flexiv_config.yaml`
 
-Each file defines the robot IP, port, gripper parameters, Oculus mapping, and camera serial numbers for that hardware profile. `run_record.py`, `run_replay.py`, and `reset_robot.py` automatically load the corresponding robot config based on `record.robot_type`. You can also explicitly set `das_config_path` in `record_cfg.yaml`.
+Each file defines the hardware connection details, gripper parameters, Oculus mapping, and camera serial numbers for that hardware profile. `run_record.py`, `run_replay.py`, and `reset_robot.py` automatically load the corresponding robot config based on `record.robot_type`. You can also explicitly set `das_config_path` in `record_cfg.yaml`.
 
 ### Tool Scripts, Data Collection, and Policy Configs
 
@@ -257,7 +259,7 @@ Run dataset tools inside the same Le-nero/lerobot environment used for recording
 Before data collection, usually edit `scripts/config/record_cfg.yaml`:
 
 - `record.repo_id`: dataset name. Recommended format: `<robot_task<num>_step<num>/<description>`, for example `nero_task3_step1/2mL_empty_right`.
-- `record.robot_type`: choose a robot type such as `nero_dual_arm` or `franka_dual_arm`.
+- `record.robot_type`: choose a robot type such as `nero_dual_arm`, `franka_dual_arm`, or `flexiv_dual_arm`.
 - `record.run_mode`: choose `run_record`, `run_policy`, or `run_mix`.
 - `record.policy.type`, `config_path`, `pretrained_path`: required only for `run_policy` or `run_mix`.
 - `record.task`: task description, number of episodes, resume behavior, and whether to record success labels.
@@ -268,7 +270,8 @@ Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
 
 - `teleop.oculus_config.ip`: Oculus Quest IP.
 - `teleop.oculus_config.*_pose_scaler` and `*_channel_signs`: mapping from left/right controllers to robot actions.
-- `robot.robot_ip`, `robot.robot_port`: robot service address.
+- `robot.robot_ip`, `robot.robot_port`: robot service address for RPC-backed robots.
+- For `flexiv_dual_arm`, set `robot.left_robot_sn`, `robot.right_robot_sn`, Flexiv gripper/tool names, home joints, and Cartesian safety limits in `scripts/config/robots/flexiv_config.yaml`. Flexiv hardware control also requires `flexivrdk` and `spdlog` in the active Python environment.
 - `robot.use_gripper` and gripper parameters: enable grippers, close/open thresholds, max opening width, and force.
 - `cameras.*_serial`, `width`, `height`: RealSense serial numbers and resolution.
 
@@ -314,7 +317,7 @@ After installation, the app appears in the Oculus Quest library under **Unknown 
 
 ### Configure Oculus Teleoperation
 
-Set the Oculus IP and mapping in the selected robot config, for example `scripts/config/robots/nero_cofig.yaml`:
+Set the Oculus IP and mapping in the selected robot config, for example `scripts/config/robots/nero_cofig.yaml` or `scripts/config/robots/flexiv_config.yaml`:
 
 ```yaml
 teleop:

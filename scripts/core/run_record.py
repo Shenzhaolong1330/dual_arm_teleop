@@ -121,6 +121,7 @@ ROBOT_DETAIL_CONFIG_FILES = {
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
     "arx_dual_arm": "arx_config.yaml",
+    "flexiv_dual_arm": "flexiv_config.yaml",
 }
 ROBOT_CONFIG_DIR = Path("config") / "robots"
 LEGACY_ROBOT_CONFIG_DIR = Path("DAS_config")
@@ -424,6 +425,8 @@ class RecordConfig:
             self.action_spike_translation = oculus_cfg.get("action_spike_translation")
             self.action_spike_rotation = oculus_cfg.get("action_spike_rotation")
             self.mirror_teleop = oculus_cfg.get("mirror_teleop", False)
+            self.position_axis_order = oculus_cfg.get("position_axis_order", [0, 1, 2])
+            self.rotation_axis_order = oculus_cfg.get("rotation_axis_order", [0, 1, 2])
             if self.dual_arm:
                 self.left_pose_scaler = oculus_cfg.get("left_pose_scaler", self.pose_scaler)
                 self.right_pose_scaler = oculus_cfg.get("right_pose_scaler", self.pose_scaler)
@@ -477,6 +480,8 @@ class RecordConfig:
                     action_spike_translation=self.action_spike_translation,
                     action_spike_rotation=self.action_spike_rotation,
                     mirror_teleop=self.mirror_teleop,
+                    position_axis_order=self.position_axis_order,
+                    rotation_axis_order=self.rotation_axis_order,
                     visualize_placo=self.visualize_placo,
                 )
             return OculusTeleopConfig(

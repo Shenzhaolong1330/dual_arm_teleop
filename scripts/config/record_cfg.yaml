@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "franka_dual_arm/left_right_pick_chp_rollout"
+  repo_id: &repo_id "flexiv_dual_arm/oculus_smoke_test"
   # repo_id: &repo_id "nero_task3_step1/2mL_empty_right"
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
   # <description>: https://github.com/wbcdcompetition/wbcd_tasks/tree/main/track-3-lab-experiments
@@ -17,14 +17,14 @@ record:
 
   debug:
     robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
-  user_notes: "Franka template; replace TODO values before real collection."
+  user_notes: "Flexiv Rizon4s dual-arm Oculus teleop template; fill serial numbers and cameras before real collection."
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_policy" # run_record | run_policy | run_mix
+  run_mode: "run_record" # run_record | run_policy | run_mix
 
-  # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, franka.
+  # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
-  robot_type: &robot_type "franka_dual_arm"
+  robot_type: &robot_type "flexiv_dual_arm"
   # robot_type: &robot_type "nero_dual_arm"
 
   # Optional explicit override if you do not want the robot_type default mapping:

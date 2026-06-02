@@ -61,6 +61,8 @@ class OculusDualArmRobot(Robot):
         left_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
         right_pose_scaler: Sequence[float] = [1.0, 1.0],
         right_channel_signs: Sequence[int] = [1, 1, 1, 1, 1, 1],
+        position_axis_order: Sequence[int] = [0, 1, 2],
+        rotation_axis_order: Sequence[int] = [0, 1, 2],
         action_smoothing_alpha: float = 0.35,
         action_deadband_translation: float = 0.0,
         action_deadband_rotation: float = 0.0,
@@ -79,6 +81,8 @@ class OculusDualArmRobot(Robot):
         # Right arm configuration
         self._right_pose_scaler = right_pose_scaler
         self._right_channel_signs = right_channel_signs
+        self._position_axis_order = self._validate_axis_order(position_axis_order, "position_axis_order")
+        self._rotation_axis_order = self._validate_axis_order(rotation_axis_order, "rotation_axis_order")
         
         # State tracking - left arm
         self._left_prev_transform = None
@@ -121,6 +125,20 @@ class OculusDualArmRobot(Robot):
             return None
         value_float = float(value)
         return value_float if value_float > 0.0 else None
+
+    @staticmethod
+    def _validate_axis_order(axis_order: Sequence[int], name: str) -> tuple[int, int, int]:
+        order = tuple(int(axis) for axis in axis_order)
+        if len(order) != 3 or set(order) != {0, 1, 2}:
+            raise ValueError(f"{name} must be a permutation of [0, 1, 2], got {list(axis_order)}")
+        return order
+
+    def _remap_delta_axes(self, delta_pose: np.ndarray) -> np.ndarray:
+        """Apply configurable XYZ/RPY axis ordering before scaling and signs."""
+        remapped = np.asarray(delta_pose, dtype=float).copy()
+        remapped[:3] = remapped[:3][list(self._position_axis_order)]
+        remapped[3:] = remapped[3:][list(self._rotation_axis_order)]
+        return remapped
 
     def _ema_smooth(self, current: np.ndarray, prev: Optional[np.ndarray]) -> np.ndarray:
         """Apply EMA smoothing to a 6D delta vector."""
@@ -283,6 +301,7 @@ class OculusDualArmRobot(Robot):
             
             if lg_pressed:
                 delta_left = self._compute_delta_pose(left_transform, self._left_prev_transform)
+                delta_left = self._remap_delta_axes(delta_left)
                 scaled_left = self._apply_scaling(delta_left, self._left_pose_scaler, self._left_channel_signs)
                 filtered_left, left_spike_rejected = self._filter_delta_pose("left", scaled_left)
                 if left_spike_rejected or not np.any(filtered_left):
@@ -306,6 +325,7 @@ class OculusDualArmRobot(Robot):
             
             if rg_pressed:
                 delta_right = self._compute_delta_pose(right_transform, self._right_prev_transform)
+                delta_right = self._remap_delta_axes(delta_right)
                 scaled_right = self._apply_scaling(delta_right, self._right_pose_scaler, self._right_channel_signs)
                 filtered_right, right_spike_rejected = self._filter_delta_pose("right", scaled_right)
                 if right_spike_rejected or not np.any(filtered_right):
