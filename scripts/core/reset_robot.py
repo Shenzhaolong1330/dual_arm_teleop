@@ -36,6 +36,20 @@ def _apply_reset_runtime_overrides(robot_type: str, robot_cfg: Dict[str, Any]) -
         return
 
     robot_cfg["stop_grippers_on_disconnect"] = False
+    if robot_cfg.get("go_home_on_connect", False):
+        robot_cfg["go_home_on_connect"] = False
+        logging.info("[FLEXIV] robot-reset skips go_home_on_connect; reset() will home arms and grippers.")
+    logging.info(
+        "[FLEXIV] robot-reset gripper config: min_width=%s max_open=%s "
+        "speed=%s home_uses=max_open init_timeout=%s init_settle=%s "
+        "command_epsilon=%s",
+        robot_cfg.get("gripper_min_width"),
+        robot_cfg.get("gripper_max_open"),
+        robot_cfg.get("gripper_speed"),
+        robot_cfg.get("gripper_init_timeout_sec"),
+        robot_cfg.get("gripper_init_settle_sec"),
+        robot_cfg.get("gripper_command_epsilon"),
+    )
 
     if robot_cfg.get("use_cartesian_servo_thread", False):
         robot_cfg["use_cartesian_servo_thread"] = False

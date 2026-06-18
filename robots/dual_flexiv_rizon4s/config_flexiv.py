@@ -36,8 +36,10 @@ class FlexivDualArmConfig(RobotConfig):
     close_threshold: float = 0.5
     gripper_max_open: float = 0.085
     gripper_force: float = 10.0
-    gripper_speed: float = 0.1
+    gripper_speed: float = 0.2
     gripper_command_epsilon: float = 0.002
+    gripper_init_timeout_sec: float = 30.0
+    gripper_init_settle_sec: float = 0.5
     stop_grippers_on_disconnect: bool = False
     action_debug: bool = True
     action_debug_every_n: int = 30
@@ -57,7 +59,6 @@ class FlexivDualArmConfig(RobotConfig):
     home_plan_name: str = "PLAN-Home"
     left_home_joints: list[float] = field(default_factory=list)
     right_home_joints: list[float] = field(default_factory=list)
-    home_gripper_open_fraction: float = 1.0
     home_joint_max_vel: float = 1.0
     home_joint_max_acc: float = 2.0
     home_joint_tolerance: float = 0.01

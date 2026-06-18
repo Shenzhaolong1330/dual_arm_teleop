@@ -156,6 +156,15 @@ class FlexivDualArm(Robot):
         for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
             self._prepare_robot(side, robot)
 
+        self._initialize_grippers_on_connect()
+
+        if self.config.go_home_on_connect:
+            self._execute_home_for_sides(("left", "right"))
+            self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
+
+        for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
+            self._finish_prepare_robot(side, robot)
+
         self._refresh_cached_poses()
         self._connect_cameras()
         self.is_connected = True
@@ -178,10 +187,7 @@ class FlexivDualArm(Robot):
         if self.config.use_gripper and not self.config.debug:
             self._prepare_gripper(side, robot)
 
-        if self.config.go_home_on_connect:
-            self._execute_home(side, robot)
-            self._open_home_gripper(side)
-
+    def _finish_prepare_robot(self, side: str, robot: Any) -> None:
         if self.config.zero_ft_sensor_on_connect:
             self._zero_ft_sensor(side, robot)
 
@@ -217,10 +223,6 @@ class FlexivDualArm(Robot):
             tool = self._flexivrdk.Tool(robot)
             tool.Switch(gripper_name)
 
-        if self.config.initialize_gripper_on_connect:
-            logger.info("[FLEXIV] Initializing %s gripper", side)
-            gripper.Init()
-
         try:
             params = gripper.params()
             width = float(gripper.states().width)
@@ -246,6 +248,40 @@ class FlexivDualArm(Robot):
             self._right_tool = tool
             self._right_gripper_width = width
 
+    def _initialize_grippers_on_connect(self) -> None:
+        if (
+            not self.config.use_gripper
+            or self.config.debug
+            or not self.config.initialize_gripper_on_connect
+        ):
+            return
+
+        grippers = {
+            side: gripper
+            for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper))
+            if gripper is not None
+        }
+        if not grippers:
+            return
+
+        def make_init_call(side: str, gripper: Any) -> tuple[str, Any]:
+            def init() -> None:
+                logger.info("[FLEXIV] Initializing %s gripper", side)
+                gripper.Init()
+
+            return side, init
+
+        init_calls = tuple(
+            make_init_call(side, gripper)
+            for side, gripper in grippers.items()
+        )
+        if len(init_calls) > 1:
+            self._run_parallel_robot_calls(init_calls)
+        else:
+            init_calls[0][1]()
+
+        self._wait_grippers_idle_after_init(grippers)
+
     def _execute_home_plan(self, side: str, robot: Any) -> None:
         logger.info("[FLEXIV] Moving %s arm with plan %s", side, self.config.home_plan_name)
         robot.SwitchMode(self._flexivrdk.Mode.NRT_PLAN_EXECUTION)
@@ -263,6 +299,21 @@ class FlexivDualArm(Robot):
             self._execute_joint_home(side, robot, home_joints)
         else:
             self._execute_home_plan(side, robot)
+
+    def _execute_home_for_sides(self, sides: tuple[str, ...]) -> None:
+        calls: list[tuple[str, Any]] = []
+        for side in sides:
+            robot = self._left_robot if side == "left" else self._right_robot
+            if robot is None:
+                raise DeviceNotConnectedError(f"{side} Flexiv arm is not connected.")
+            calls.append((side, lambda side=side, robot=robot: self._execute_home(side, robot)))
+
+        if self.config.send_arms_parallel and len(calls) > 1:
+            self._run_parallel_robot_calls(tuple(calls))
+            return
+
+        for _, call in calls:
+            call()
 
     def _execute_joint_home(self, side: str, robot: Any, target_joints: list[float]) -> None:
         if len(target_joints) != self._num_joints_per_arm:
@@ -292,16 +343,6 @@ class FlexivDualArm(Robot):
             side,
             float(self.config.home_joint_timeout_sec),
         )
-
-    def _open_home_gripper(self, side: str) -> None:
-        if not self.config.use_gripper:
-            return
-        open_fraction = float(np.clip(self.config.home_gripper_open_fraction, 0.0, 1.0))
-        if side == "left":
-            self._left_gripper_cmd = open_fraction
-        else:
-            self._right_gripper_cmd = open_fraction
-        self._move_gripper_if_needed(side, open_fraction)
 
     def _zero_ft_sensor(self, side: str, robot: Any) -> None:
         logger.info("[FLEXIV] Zeroing %s arm force-torque sensor", side)
@@ -358,10 +399,8 @@ class FlexivDualArm(Robot):
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
         self._stop_cartesian_servo_thread()
         if self.config.reset_go_home:
-            self._execute_home("left", self._left_robot)
-            self._execute_home("right", self._right_robot)
-            self._open_home_gripper("left")
-            self._open_home_gripper("right")
+            self._execute_home_for_sides(("left", "right"))
+            self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
             if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
                 self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
                 self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
@@ -678,10 +717,10 @@ class FlexivDualArm(Robot):
         right = self._gripper_value_from_action(action, "right")
         if left is not None:
             self._left_gripper_cmd = self._normalize_gripper(float(left))
-            self._move_gripper_if_needed("left", self._left_gripper_cmd)
+            self._move_gripper_command_if_needed("left", self._left_gripper_cmd)
         if right is not None:
             self._right_gripper_cmd = self._normalize_gripper(float(right))
-            self._move_gripper_if_needed("right", self._right_gripper_cmd)
+            self._move_gripper_command_if_needed("right", self._right_gripper_cmd)
 
     @staticmethod
     def _gripper_value_from_action(action: dict[str, Any], side: str) -> Any:
@@ -697,45 +736,383 @@ class FlexivDualArm(Robot):
             value = 1.0 - value
         return value
 
-    def _gripper_width_from_cmd(self, open_fraction: float) -> float:
-        width = float(
-            self.config.gripper_min_width
-            + open_fraction * (self.config.gripper_max_open - self.config.gripper_min_width)
-        )
-        return float(np.clip(width, self.config.gripper_min_width, self.config.gripper_max_open))
+    def _gripper_width_limits(self) -> tuple[float, float]:
+        min_width = float(self.config.gripper_min_width)
+        max_width = max(min_width, float(self.config.gripper_max_open))
+        return min_width, max_width
 
-    def _move_gripper_if_needed(self, side: str, open_fraction: float) -> None:
+    def _clip_gripper_width(self, width: float) -> float:
+        min_width, max_width = self._gripper_width_limits()
+        return float(np.clip(float(width), min_width, max_width))
+
+    def _gripper_width_from_cmd(self, command: float) -> float:
+        min_width, max_width = self._gripper_width_limits()
+        command = float(np.clip(command, 0.0, 1.0))
+        width = float(
+            min_width
+            + command * (max_width - min_width)
+        )
+        return self._clip_gripper_width(width)
+
+    def _gripper_command_from_width(self, width: float) -> float:
+        min_width, max_width = self._gripper_width_limits()
+        span = max_width - min_width
+        if span <= 1e-12:
+            return 0.0
+        return float(np.clip((float(width) - min_width) / span, 0.0, 1.0))
+
+    def move_gripper_width(self, width_m: float, side: str = "both", wait: bool = True) -> None:
+        if not self.config.use_gripper:
+            return
+
+        side = side.lower().strip()
+        if side == "both":
+            sides = ("left", "right")
+        elif side in ("left", "right"):
+            sides = (side,)
+        else:
+            raise ValueError("side must be 'left', 'right', or 'both'.")
+
+        pending: dict[str, tuple[Any, float, float, float]] = {}
+        move_calls: list[tuple[str, Any]] = []
+        tolerance = max(0.0, float(self.config.gripper_command_epsilon))
+
+        for current_side in sides:
+            gripper = self._left_gripper if current_side == "left" else self._right_gripper
+            if gripper is None:
+                continue
+
+            command = self._gripper_command_from_width(width_m)
+            if current_side == "left":
+                self._left_gripper_cmd = command
+            else:
+                self._right_gripper_cmd = command
+
+            prepared = self._prepare_gripper_move(current_side, gripper, width_m)
+            if prepared is None:
+                continue
+            target_width, velocity, force_limit = prepared
+            width, is_moving, force = self._read_gripper_state(gripper)
+            if width is not None and abs(width - target_width) <= tolerance and is_moving is False:
+                logger.info(
+                    "[FLEXIV] %s gripper already settled near target width=%.4f target=%.4f moving=%s",
+                    current_side,
+                    width,
+                    target_width,
+                    is_moving,
+                )
+                self._set_cached_gripper_width(current_side, width)
+                continue
+
+            logger.info(
+                "[FLEXIV] %s gripper Move width=%.4f command=%.3f velocity=%.3f force=%.1f "
+                "current_width=%s moving=%s current_force=%s",
+                current_side,
+                target_width,
+                command,
+                velocity,
+                force_limit,
+                "unknown" if width is None else f"{width:.4f}",
+                is_moving,
+                "unknown" if force is None else f"{force:.2f}",
+            )
+            pending[current_side] = (gripper, target_width, velocity, force_limit)
+
+            def move(
+                gripper: Any = gripper,
+                target_width: float = target_width,
+                velocity: float = velocity,
+                force_limit: float = force_limit,
+            ) -> None:
+                gripper.Move(target_width, velocity, force_limit)
+
+            move_calls.append((current_side, move))
+
+        if len(move_calls) > 1:
+            self._run_parallel_robot_calls(tuple(move_calls))
+        elif move_calls:
+            move_calls[0][1]()
+
+        if wait and pending:
+            self._wait_grippers_width(pending)
+        elif not wait:
+            for current_side, (_, target_width, _, _) in pending.items():
+                self._set_cached_gripper_width(current_side, target_width)
+
+    def _move_gripper_command_if_needed(self, side: str, command: float) -> None:
+        self._move_gripper_to_width_if_needed(
+            side,
+            self._gripper_width_from_cmd(command),
+            command=command,
+        )
+
+    def _prepare_gripper_move(
+        self,
+        side: str,
+        gripper: Any,
+        width: float,
+    ) -> tuple[float, float, float] | None:
+        min_width, _ = self._gripper_width_limits()
+        requested_width = max(min_width, float(width))
+        target_width = requested_width
+        try:
+            params = gripper.params()
+            target_width = float(np.clip(target_width, params.min_width, params.max_width))
+            requested_velocity = float(self.config.gripper_speed)
+            velocity = float(np.clip(requested_velocity, params.min_vel, params.max_vel))
+            force_limit = float(np.clip(self.config.gripper_force, params.min_force, params.max_force))
+            if abs(velocity - requested_velocity) >= self.config.gripper_command_epsilon:
+                logger.info(
+                    "[FLEXIV] %s gripper velocity %.4f clipped by RDK range [%.4f, %.4f] to %.4f",
+                    side,
+                    requested_velocity,
+                    float(params.min_vel),
+                    float(params.max_vel),
+                    velocity,
+                )
+            if abs(target_width - requested_width) >= self.config.gripper_command_epsilon:
+                logger.warning(
+                    "[FLEXIV] %s gripper target width %.4f clipped by hardware range "
+                    "[%.4f, %.4f] to %.4f",
+                    side,
+                    requested_width,
+                    float(params.min_width),
+                    float(params.max_width),
+                    target_width,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FLEXIV] %s gripper params unavailable before Move: %s", side, exc)
+            velocity = float(self.config.gripper_speed)
+            force_limit = float(self.config.gripper_force)
+        return target_width, velocity, force_limit
+
+    def _move_gripper_to_width_if_needed(
+        self,
+        side: str,
+        width: float,
+        command: float | None = None,
+    ) -> None:
         gripper = self._left_gripper if side == "left" else self._right_gripper
         if gripper is None:
             return
 
-        target_width = self._gripper_width_from_cmd(open_fraction)
+        prepared = self._prepare_gripper_move(side, gripper, width)
+        if prepared is None:
+            return
+        target_width, velocity, force_limit = prepared
+
         last_width = self._left_gripper_width if side == "left" else self._right_gripper_width
         if last_width is not None and abs(target_width - last_width) < self.config.gripper_command_epsilon:
             return
 
-        try:
-            params = gripper.params()
-            target_width = float(np.clip(target_width, params.min_width, params.max_width))
-            velocity = float(np.clip(self.config.gripper_speed, params.min_vel, params.max_vel))
-            force = float(np.clip(self.config.gripper_force, params.min_force, params.max_force))
-        except Exception:  # noqa: BLE001
-            velocity = self.config.gripper_speed
-            force = self.config.gripper_force
-
         logger.info(
-            "[FLEXIV] %s gripper Move width=%.4f open_fraction=%.3f velocity=%.3f force=%.1f",
+            "[FLEXIV] %s gripper Move width=%.4f command=%s velocity=%.3f force=%.1f",
             side,
             target_width,
-            open_fraction,
+            "direct" if command is None else f"{float(command):.3f}",
             velocity,
-            force,
+            force_limit,
         )
-        gripper.Move(target_width, velocity, force)
+        gripper.Move(target_width, velocity, force_limit)
+        self._set_cached_gripper_width(side, target_width)
+
+    @staticmethod
+    def _read_gripper_state(gripper: Any) -> tuple[float | None, bool | None, float | None]:
+        try:
+            states = gripper.states()
+            return (
+                float(states.width),
+                bool(states.is_moving),
+                float(states.force),
+            )
+        except Exception:  # noqa: BLE001
+            return None, None, None
+
+    def _wait_grippers_idle_after_init(self, grippers: dict[str, Any]) -> None:
+        timeout_sec = max(0.0, float(self.config.gripper_init_timeout_sec))
+        settle_sec = max(0.0, float(self.config.gripper_init_settle_sec))
+        deadline = None if timeout_sec <= 0.0 else time.monotonic() + timeout_sec
+        next_log_time = {side: time.monotonic() + 1.0 for side in grippers}
+        stable_since: dict[str, float | None] = {side: None for side in grippers}
+        last_states: dict[str, tuple[float | None, bool | None, float | None]] = {
+            side: (None, None, None) for side in grippers
+        }
+        settled: set[str] = set()
+
+        logger.info(
+            "[FLEXIV] Waiting for gripper init to settle sides=%s timeout=%.1fs settle=%.1fs",
+            ",".join(grippers),
+            timeout_sec,
+            settle_sec,
+        )
+        while len(settled) < len(grippers):
+            now = time.monotonic()
+            for side, gripper in grippers.items():
+                if side in settled:
+                    continue
+
+                width, is_moving, force = self._read_gripper_state(gripper)
+                last_states[side] = (width, is_moving, force)
+
+                if is_moving is False:
+                    if stable_since[side] is None:
+                        stable_since[side] = now
+                    if now - stable_since[side] >= settle_sec:
+                        logger.info(
+                            "[FLEXIV] %s gripper init settled width=%s moving=%s force=%s",
+                            side,
+                            "unknown" if width is None else f"{width:.4f}",
+                            is_moving,
+                            "unknown" if force is None else f"{force:.2f}",
+                        )
+                        if width is not None:
+                            self._set_cached_gripper_width(side, width)
+                        settled.add(side)
+                        continue
+                else:
+                    stable_since[side] = None
+
+                if now >= next_log_time[side]:
+                    logger.info(
+                        "[FLEXIV] waiting for %s gripper init width=%s moving=%s force=%s",
+                        side,
+                        "unknown" if width is None else f"{width:.4f}",
+                        is_moving,
+                        "unknown" if force is None else f"{force:.2f}",
+                    )
+                    next_log_time[side] = now + 1.0
+
+            if deadline is not None and now >= deadline:
+                break
+
+            time.sleep(0.05)
+
+        if len(settled) == len(grippers):
+            return
+
+        pending_desc = ", ".join(
+            f"{side}: width={'unknown' if width is None else f'{width:.4f}'} "
+            f"moving={is_moving} force={'unknown' if force is None else f'{force:.2f}'}"
+            for side, (width, is_moving, force) in last_states.items()
+            if side not in settled
+        )
+        raise TimeoutError(
+            f"gripper init did not settle within {timeout_sec:.1f}s: {pending_desc}"
+        )
+
+    def _wait_grippers_width(
+        self,
+        targets: dict[str, tuple[Any, float, float, float]],
+    ) -> None:
+        timeout_sec = max(0.0, float(self.config.gripper_init_timeout_sec))
+        retry_interval_sec = max(1.0, float(self.config.gripper_init_settle_sec))
+        tolerance = max(0.0, float(self.config.gripper_command_epsilon))
+        settle_sec = max(0.0, float(self.config.gripper_init_settle_sec))
+        deadline = None if timeout_sec <= 0.0 else time.monotonic() + timeout_sec
+        next_log_time = {side: time.monotonic() + 1.0 for side in targets}
+        next_retry_time = {side: time.monotonic() + retry_interval_sec for side in targets}
+        last_widths: dict[str, float | None] = {side: None for side in targets}
+        stable_since: dict[str, float | None] = {side: None for side in targets}
+        reached: set[str] = set()
+
+        while len(reached) < len(targets):
+            now = time.monotonic()
+            for side, (gripper, target_width, velocity, force_limit) in targets.items():
+                if side in reached:
+                    continue
+
+                width, is_moving, force = self._read_gripper_state(gripper)
+                if width is not None:
+                    last_widths[side] = width
+                    near_target = abs(width - target_width) <= tolerance
+                    settled = near_target and is_moving is False
+                    if settled:
+                        if stable_since[side] is None:
+                            stable_since[side] = now
+                        if now - stable_since[side] >= settle_sec:
+                            logger.info(
+                                "[FLEXIV] %s gripper settled at width=%.4f target=%.4f moving=%s",
+                                side,
+                                width,
+                                target_width,
+                                is_moving,
+                            )
+                            self._set_cached_gripper_width(side, width)
+                            reached.add(side)
+                            continue
+                    else:
+                        stable_since[side] = None
+
+                    if near_target and is_moving is not False and now >= next_log_time[side]:
+                        logger.info(
+                            "[FLEXIV] %s gripper width near target but still moving width=%.4f target=%.4f moving=%s",
+                            side,
+                            width,
+                            target_width,
+                            is_moving,
+                        )
+                        next_log_time[side] = now + 1.0
+
+                if (
+                    is_moving is False
+                    and width is not None
+                    and abs(width - target_width) > tolerance
+                    and now >= next_retry_time[side]
+                ):
+                    logger.warning(
+                        "[FLEXIV] %s gripper stopped before home; retry Move "
+                        "target=%.4f width=%.4f force=%s",
+                        side,
+                        target_width,
+                        width,
+                        "unknown" if force is None else f"{force:.2f}",
+                    )
+                    gripper.Move(target_width, velocity, force_limit)
+                    next_retry_time[side] = now + retry_interval_sec
+
+                if now >= next_log_time[side]:
+                    logger.info(
+                        "[FLEXIV] waiting for %s gripper home target=%.4f width=%s moving=%s force=%s",
+                        side,
+                        target_width,
+                        "unknown" if width is None else f"{width:.4f}",
+                        is_moving,
+                        "unknown" if force is None else f"{force:.2f}",
+                    )
+                    next_log_time[side] = now + 1.0
+
+            if deadline is not None and now >= deadline:
+                break
+
+            time.sleep(0.05)
+
+        if len(reached) == len(targets):
+            return
+
+        pending = [
+            (
+                side,
+                targets[side][1],
+                last_widths.get(side),
+            )
+            for side in targets
+            if side not in reached
+        ]
+        pending_desc = ", ".join(
+            f"{side}: target={target_width:.4f} last="
+            f"{'unknown' if width is None else f'{width:.4f}'}"
+            for side, target_width, width in pending
+        )
+        logger.warning("[FLEXIV] gripper home wait timeout after %.1fs: %s", timeout_sec, pending_desc)
+        raise TimeoutError(
+            f"gripper home wait timeout after {timeout_sec:.1f}s: {pending_desc}"
+        )
+
+    def _set_cached_gripper_width(self, side: str, width: float) -> None:
         if side == "left":
-            self._left_gripper_width = target_width
+            self._left_gripper_width = width
         else:
-            self._right_gripper_width = target_width
+            self._right_gripper_width = width
 
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
