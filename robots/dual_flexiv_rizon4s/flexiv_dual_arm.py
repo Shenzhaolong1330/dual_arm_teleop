@@ -311,19 +311,36 @@ class FlexivDualArm(Robot):
             time.sleep(0.2)
 
     def disconnect(self) -> None:
-        if not self.is_connected:
+        if (
+            not self.is_connected
+            and self._left_robot is None
+            and self._right_robot is None
+            and self._left_gripper is None
+            and self._right_gripper is None
+        ):
             return
         self._stop_cartesian_servo_thread()
-        self._stop_cameras()
-        for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
-            if gripper is not None:
-                try:
-                    gripper.Stop()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[FLEXIV] %s gripper stop failed during disconnect: %s", side, exc)
+        if self._camera_threads:
+            self._stop_cameras()
+        if self.config.stop_grippers_on_disconnect:
+            for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
+                if gripper is not None:
+                    try:
+                        gripper.Stop()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[FLEXIV] %s gripper stop failed during disconnect: %s", side, exc)
         for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
             if robot is not None:
                 try:
+                    if robot.fault():
+                        logger.warning("[FLEXIV] %s arm faulted; skip Stop during disconnect", side)
+                        continue
+                    if not robot.operational():
+                        logger.warning(
+                            "[FLEXIV] %s arm is not operational; skip Stop during disconnect",
+                            side,
+                        )
+                        continue
                     robot.Stop()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[FLEXIV] %s arm stop failed during disconnect: %s", side, exc)

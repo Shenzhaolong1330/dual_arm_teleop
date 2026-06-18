@@ -38,6 +38,7 @@ class FlexivDualArmConfig(RobotConfig):
     gripper_force: float = 10.0
     gripper_speed: float = 0.1
     gripper_command_epsilon: float = 0.002
+    stop_grippers_on_disconnect: bool = False
     action_debug: bool = True
     action_debug_every_n: int = 30
     timing_debug: bool = False

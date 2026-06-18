@@ -4,7 +4,7 @@ teleop:
   control_mode: "oculus"
   dual_arm: true
   oculus_config:
-    ip: "192.168.110.40"
+    ip: null
     use_gripper: true
     left_pose_scaler: [0.7, 0.5]
     left_channel_signs: [-1, 1, 1, 1, -1, 1]
