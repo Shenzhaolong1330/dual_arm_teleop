@@ -29,6 +29,8 @@ class FlexivDualArmConfig(RobotConfig):
     use_gripper: bool = False
     left_gripper_name: str = ""
     right_gripper_name: str = ""
+    left_tool_name: str = ""
+    right_tool_name: str = ""
     switch_tool_on_connect: bool = True
     initialize_gripper_on_connect: bool = False
     gripper_min_width: float = 0.0

@@ -36,8 +36,12 @@ robot:
   # Full device names from Flexiv Elements -> Settings -> Device.
   left_gripper_name: "Flexiv-GN01"
   right_gripper_name: "Flexiv-GN01"
-  switch_tool_on_connect: true
-  initialize_gripper_on_connect: false # true: initialize gripper by opening and closing in slow speed
+  # Optional robot tool/TCP names from Flexiv Elements/RDK.
+  # Leave empty unless you know the exact tool name configured on the controller.
+  left_tool_name: "Flexiv-GN01-rs"
+  right_tool_name: "Flexiv-GN01-rs"
+  switch_tool_on_connect: false
+  initialize_gripper_on_connect: true # true: initialize gripper by opening and closing in slow speed
   gripper_min_width: 0.0
   gripper_max_open: 0.1 # meters; normalized command 1.0 maps to this width
   gripper_speed: 0.2 # Flexiv-GN01 RDK reports max_vel=0.2; higher values are clipped/rejected

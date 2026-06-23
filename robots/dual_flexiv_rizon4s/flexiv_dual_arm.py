@@ -207,10 +207,17 @@ class FlexivDualArm(Robot):
         gripper_name = (
             self.config.left_gripper_name if side == "left" else self.config.right_gripper_name
         )
+        tool_name = self.config.left_tool_name if side == "left" else self.config.right_tool_name
         if not gripper_name:
             raise ValueError(
                 f"`{side}_gripper_name` is required when `use_gripper: true`. "
                 "Find the full name in Flexiv Elements -> Settings -> Device."
+            )
+        if self.config.switch_tool_on_connect and not tool_name:
+            raise ValueError(
+                f"`{side}_tool_name` is required when `switch_tool_on_connect: true`. "
+                "Use the exact robot tool/TCP name from Flexiv Elements, or set "
+                "`switch_tool_on_connect: false` to keep the controller's current tool."
             )
 
         logger.info("[FLEXIV] Enabling %s gripper: %s", side, gripper_name)
@@ -219,9 +226,18 @@ class FlexivDualArm(Robot):
 
         tool = None
         if self.config.switch_tool_on_connect:
-            logger.info("[FLEXIV] Switching %s arm tool to %s", side, gripper_name)
+            logger.info("[FLEXIV] Switching %s arm tool to %s", side, tool_name)
             tool = self._flexivrdk.Tool(robot)
-            tool.Switch(gripper_name)
+            try:
+                tool.Switch(tool_name)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Failed to switch {side} Flexiv arm tool to {tool_name!r}. "
+                    f"Keep `{side}_gripper_name` as the gripper device name from Flexiv "
+                    f"Elements Settings -> Device. Set `{side}_tool_name` only to the exact "
+                    "robot tool/TCP name if it differs, or set `switch_tool_on_connect: false` "
+                    "if the correct tool is already selected on the controller."
+                ) from exc
 
         try:
             params = gripper.params()
