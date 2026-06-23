@@ -19,6 +19,7 @@ from .config_flexiv import FlexivDualArmConfig
 logger = logging.getLogger(__name__)
 
 AXES = ("x", "y", "z", "rx", "ry", "rz")
+GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
 
 
 def _as_np(values: Any, length: int) -> np.ndarray:
@@ -156,11 +157,15 @@ class FlexivDualArm(Robot):
         for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
             self._prepare_robot(side, robot)
 
-        self._initialize_grippers_on_connect()
-
         if self.config.go_home_on_connect:
             self._execute_home_for_sides(("left", "right"))
-            self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
+            self._stop_arms_for_sides(("left", "right"))
+
+        if self._should_setup_grippers_on_connect():
+            self._prepare_grippers()
+            self._initialize_grippers()
+            if self.config.go_home_on_connect:
+                self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
 
         for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
             self._finish_prepare_robot(side, robot)
@@ -184,9 +189,6 @@ class FlexivDualArm(Robot):
                 time.sleep(0.2)
             logger.info("[FLEXIV] %s arm operational", side)
 
-        if self.config.use_gripper and not self.config.debug:
-            self._prepare_gripper(side, robot)
-
     def _finish_prepare_robot(self, side: str, robot: Any) -> None:
         if self.config.zero_ft_sensor_on_connect:
             self._zero_ft_sensor(side, robot)
@@ -202,6 +204,27 @@ class FlexivDualArm(Robot):
                     "`switch_cartesian_mode_on_connect: false` in flexiv_config.yaml."
                 ) from exc
             robot.SetForceControlAxis([False, False, False, False, False, False])
+
+    def _should_setup_grippers_on_connect(self) -> bool:
+        if not self.config.use_gripper or self.config.debug:
+            return False
+        if self.config.reset_go_home and not self.config.go_home_on_connect:
+            return False
+        return True
+
+    def _prepare_grippers(self) -> None:
+        if not self.config.use_gripper or self.config.debug:
+            return
+
+        for side, robot, gripper in (
+            ("left", self._left_robot, self._left_gripper),
+            ("right", self._right_robot, self._right_gripper),
+        ):
+            if gripper is not None:
+                continue
+            if robot is None:
+                raise DeviceNotConnectedError(f"{side} Flexiv arm is not connected.")
+            self._prepare_gripper(side, robot)
 
     def _prepare_gripper(self, side: str, robot: Any) -> None:
         gripper_name = (
@@ -264,7 +287,7 @@ class FlexivDualArm(Robot):
             self._right_tool = tool
             self._right_gripper_width = width
 
-    def _initialize_grippers_on_connect(self) -> None:
+    def _initialize_grippers(self) -> None:
         if (
             not self.config.use_gripper
             or self.config.debug
@@ -323,6 +346,35 @@ class FlexivDualArm(Robot):
             if robot is None:
                 raise DeviceNotConnectedError(f"{side} Flexiv arm is not connected.")
             calls.append((side, lambda side=side, robot=robot: self._execute_home(side, robot)))
+
+        if self.config.send_arms_parallel and len(calls) > 1:
+            self._run_parallel_robot_calls(tuple(calls))
+            return
+
+        for _, call in calls:
+            call()
+
+    def _stop_arms_for_sides(self, sides: tuple[str, ...]) -> None:
+        calls: list[tuple[str, Any]] = []
+        for side in sides:
+            robot = self._left_robot if side == "left" else self._right_robot
+            if robot is None:
+                continue
+
+            def stop(side: str = side, robot: Any = robot) -> None:
+                if robot.fault():
+                    logger.warning("[FLEXIV] %s arm faulted; skip Stop before gripper setup", side)
+                    return
+                if not robot.operational():
+                    logger.warning(
+                        "[FLEXIV] %s arm is not operational; skip Stop before gripper setup",
+                        side,
+                    )
+                    return
+                logger.info("[FLEXIV] Stopping %s arm before gripper setup", side)
+                robot.Stop()
+
+            calls.append((side, stop))
 
         if self.config.send_arms_parallel and len(calls) > 1:
             self._run_parallel_robot_calls(tuple(calls))
@@ -416,6 +468,9 @@ class FlexivDualArm(Robot):
         self._stop_cartesian_servo_thread()
         if self.config.reset_go_home:
             self._execute_home_for_sides(("left", "right"))
+            self._stop_arms_for_sides(("left", "right"))
+            self._prepare_grippers()
+            self._initialize_grippers()
             self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
             if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
                 self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
@@ -1022,7 +1077,10 @@ class FlexivDualArm(Robot):
     ) -> None:
         timeout_sec = max(0.0, float(self.config.gripper_init_timeout_sec))
         retry_interval_sec = max(1.0, float(self.config.gripper_init_settle_sec))
-        tolerance = max(0.0, float(self.config.gripper_command_epsilon))
+        tolerance = max(
+            GRIPPER_WAIT_TOLERANCE_FLOOR,
+            float(self.config.gripper_command_epsilon),
+        )
         settle_sec = max(0.0, float(self.config.gripper_init_settle_sec))
         deadline = None if timeout_sec <= 0.0 else time.monotonic() + timeout_sec
         next_log_time = {side: time.monotonic() + 1.0 for side in targets}
@@ -1031,6 +1089,13 @@ class FlexivDualArm(Robot):
         stable_since: dict[str, float | None] = {side: None for side in targets}
         reached: set[str] = set()
 
+        logger.info(
+            "[FLEXIV] Waiting for gripper home sides=%s timeout=%.1fs tolerance=%.4f settle=%.1fs",
+            ",".join(targets),
+            timeout_sec,
+            tolerance,
+            settle_sec,
+        )
         while len(reached) < len(targets):
             now = time.monotonic()
             for side, (gripper, target_width, velocity, force_limit) in targets.items():

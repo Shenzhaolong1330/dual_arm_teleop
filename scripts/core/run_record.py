@@ -103,6 +103,32 @@ BASE_ROBOT_CONFIG_KEYS = {
     "gripper_speed",
 }
 
+
+class ResetHomeOnRequestRobot:
+    """Route teleop reset_requested edges to robot.reset() from the record layer."""
+
+    def __init__(self, robot: Any):
+        self._robot = robot
+        self._reset_requested_latch = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._robot, name)
+
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        reset_pressed = bool(action.get("reset_requested", False))
+        reset_edge = reset_pressed and not self._reset_requested_latch
+        self._reset_requested_latch = reset_pressed
+
+        if reset_edge:
+            logging.info("[record] reset_requested from teleop; calling robot.reset()")
+            self._robot.reset()
+            return action
+        if reset_pressed:
+            return action
+
+        return self._robot.send_action(action)
+
+
 def _default_scripts_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -1540,6 +1566,7 @@ def run_record(record_cfg: RecordConfig):
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        loop_robot = ResetHomeOnRequestRobot(robot) if teleop is not None else robot
 
         episode_idx = 0
         run_mix_episode_stats: list[dict[str, Any]] = []
@@ -1548,7 +1575,7 @@ def run_record(record_cfg: RecordConfig):
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
             if record_cfg.run_mode == RUN_MODE_MIX:
                 mix_stats = run_mix_record_loop(
-                    robot=robot,
+                    robot=loop_robot,
                     teleop=teleop,
                     policy=policy,
                     preprocessor=preprocessor,
@@ -1578,7 +1605,7 @@ def run_record(record_cfg: RecordConfig):
                 )
             else:
                 record_loop(
-                    robot=robot,
+                    robot=loop_robot,
                     events=events,
                     fps=record_cfg.fps,
                     teleop=teleop,
@@ -1668,7 +1695,7 @@ def run_record(record_cfg: RecordConfig):
 
                 logging.info("====== [RESET] Resetting the environment ======")
                 record_loop(
-                    robot=robot,
+                    robot=loop_robot,
                     events=events,
                     fps=record_cfg.fps,
                     teleop=teleop,

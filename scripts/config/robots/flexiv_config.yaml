@@ -6,9 +6,9 @@ teleop:
   oculus_config:
     ip: null
     use_gripper: true
-    left_pose_scaler: [0.7, 0.5]
+    left_pose_scaler: [1.0, 1.0]
     left_channel_signs: [-1, 1, 1, 1, -1, 1]
-    right_pose_scaler: [0.7, 0.5]
+    right_pose_scaler: [1.0, 1.0]
     right_channel_signs: [1, -1, 1, -1, 1, 1]
     position_axis_order: [1, 0, 2]
     rotation_axis_order: [1, 0, 2]
@@ -40,13 +40,13 @@ robot:
   # Leave empty unless you know the exact tool name configured on the controller.
   left_tool_name: "Flexiv-GN01-rs"
   right_tool_name: "Flexiv-GN01-rs"
-  switch_tool_on_connect: false
+  switch_tool_on_connect: true
   initialize_gripper_on_connect: true # true: initialize gripper by opening and closing in slow speed
   gripper_min_width: 0.0
   gripper_max_open: 0.1 # meters; normalized command 1.0 maps to this width
   gripper_speed: 0.2 # Flexiv-GN01 RDK reports max_vel=0.2; higher values are clipped/rejected
   gripper_force: 10.0
-  gripper_command_epsilon: 0.002
+  gripper_command_epsilon: 0.001 # GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001 from flexiv_dual_arm
   gripper_init_timeout_sec: 10.0 # used for both RDK Init settle and gripper home wait
   gripper_init_settle_sec: 0.5 # used for both RDK Init settle and gripper home settle
   action_debug: false
