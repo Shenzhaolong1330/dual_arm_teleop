@@ -457,6 +457,8 @@ class RecordConfig:
             self.action_deadband_rotation = oculus_cfg.get("action_deadband_rotation", 0.0)
             self.action_spike_translation = oculus_cfg.get("action_spike_translation")
             self.action_spike_rotation = oculus_cfg.get("action_spike_rotation")
+            self.gripper_trigger_deadzone = oculus_cfg.get("gripper_trigger_deadzone", 0.02)
+            self.gripper_trigger_gamma = oculus_cfg.get("gripper_trigger_gamma", 1.0)
             self.oculus_timing_debug = bool(oculus_cfg.get("timing_debug", False))
             self.oculus_timing_debug_every_n = int(oculus_cfg.get("timing_debug_every_n", 30))
             self.oculus_timing_warn_ms = float(oculus_cfg.get("timing_warn_ms", 33.0))
@@ -522,6 +524,8 @@ class RecordConfig:
                     action_deadband_rotation=self.action_deadband_rotation,
                     action_spike_translation=self.action_spike_translation,
                     action_spike_rotation=self.action_spike_rotation,
+                    gripper_trigger_deadzone=self.gripper_trigger_deadzone,
+                    gripper_trigger_gamma=self.gripper_trigger_gamma,
                     timing_debug=self.oculus_timing_debug,
                     timing_debug_every_n=self.oculus_timing_debug_every_n,
                     timing_warn_ms=self.oculus_timing_warn_ms,
@@ -543,6 +547,8 @@ class RecordConfig:
                 action_smoothing_d_cutoff=self.action_smoothing_d_cutoff,
                 action_missing_hold_frames=self.action_missing_hold_frames,
                 action_missing_decay=self.action_missing_decay,
+                gripper_trigger_deadzone=self.gripper_trigger_deadzone,
+                gripper_trigger_gamma=self.gripper_trigger_gamma,
                 timing_debug=self.oculus_timing_debug,
                 timing_debug_every_n=self.oculus_timing_debug_every_n,
                 timing_warn_ms=self.oculus_timing_warn_ms,

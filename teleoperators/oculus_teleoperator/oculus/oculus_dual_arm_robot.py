@@ -139,11 +139,15 @@ class OculusDualArmRobot(Robot):
         action_deadband_rotation: float = 0.0,
         action_spike_translation: Optional[float] = None,
         action_spike_rotation: Optional[float] = None,
+        gripper_trigger_deadzone: float = 0.02,
+        gripper_trigger_gamma: float = 1.0,
         mirror_teleop: bool = False,
     ):
         self._oculus_reader = OculusReader(ip_address=ip)
         self._use_gripper = use_gripper
         self._mirror_teleop = bool(mirror_teleop)
+        self._gripper_trigger_deadzone = float(np.clip(gripper_trigger_deadzone, 0.0, 0.45))
+        self._gripper_trigger_gamma = self._positive_float(gripper_trigger_gamma, 1.0)
         
         # Left arm configuration
         self._left_pose_scaler = left_pose_scaler
@@ -226,6 +230,22 @@ class OculusDualArmRobot(Robot):
         if len(order) != 3 or set(order) != {0, 1, 2}:
             raise ValueError(f"{name} must be a permutation of [0, 1, 2], got {list(axis_order)}")
         return order
+
+    def _shape_trigger_value(self, value: float) -> float:
+        """Map raw analog trigger travel into a stable [0, 1] control value."""
+        raw = float(np.clip(value, 0.0, 1.0))
+        deadzone = self._gripper_trigger_deadzone
+        if raw <= deadzone:
+            return 0.0
+
+        upper = 1.0 - deadzone
+        if raw >= upper:
+            return 1.0
+
+        span = max(1e-6, upper - deadzone)
+        normalized = (raw - deadzone) / span
+        shaped = normalized ** self._gripper_trigger_gamma
+        return float(np.clip(shaped, 0.0, 1.0))
 
     def _remap_delta_axes(self, delta_pose: np.ndarray) -> np.ndarray:
         """Apply configurable XYZ/RPY axis ordering before scaling and signs."""
@@ -499,23 +519,29 @@ class OculusDualArmRobot(Robot):
             # Left gripper: Left Trigger
             left_trigger = buttons.get('leftTrig', (0.0,))
             if isinstance(left_trigger, tuple) and len(left_trigger) > 0:
-                lt_value = left_trigger[0]
+                lt_raw_value = float(left_trigger[0])
             else:
-                lt_value = 0.0
-            left_trigger_value = float(lt_value)
-            left_trigger_pressed = bool(buttons.get('LTr', False)) or left_trigger_value > 0.05
-            left_gripper = 1.0 - lt_value  # Invert: trigger pressed = closed (0.0)
+                lt_raw_value = 0.0
+            left_trigger_value = self._shape_trigger_value(lt_raw_value)
+            left_trigger_pressed = (
+                bool(buttons.get('LTr', False))
+                or float(np.clip(lt_raw_value, 0.0, 1.0)) > self._gripper_trigger_deadzone
+            )
+            left_gripper = 1.0 - left_trigger_value  # Invert: trigger pressed = closed (0.0)
             self._left_last_gripper_position = left_gripper
             
             # Right gripper: Right Trigger
             right_trigger = buttons.get('rightTrig', (0.0,))
             if isinstance(right_trigger, tuple) and len(right_trigger) > 0:
-                rt_value = right_trigger[0]
+                rt_raw_value = float(right_trigger[0])
             else:
-                rt_value = 0.0
-            right_trigger_value = float(rt_value)
-            right_trigger_pressed = bool(buttons.get('RTr', False)) or right_trigger_value > 0.05
-            right_gripper = 1.0 - rt_value  # Invert: trigger pressed = closed (0.0)
+                rt_raw_value = 0.0
+            right_trigger_value = self._shape_trigger_value(rt_raw_value)
+            right_trigger_pressed = (
+                bool(buttons.get('RTr', False))
+                or float(np.clip(rt_raw_value, 0.0, 1.0)) > self._gripper_trigger_deadzone
+            )
+            right_gripper = 1.0 - right_trigger_value  # Invert: trigger pressed = closed (0.0)
             self._right_last_gripper_position = right_gripper
 
         if self._mirror_teleop:

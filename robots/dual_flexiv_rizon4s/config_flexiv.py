@@ -39,7 +39,7 @@ class FlexivDualArmConfig(RobotConfig):
     gripper_max_open: float = 0.085
     gripper_force: float = 10.0
     gripper_speed: float = 0.2
-    gripper_command_epsilon: float = 0.002
+    gripper_command_epsilon: float = 0.0005
     gripper_init_timeout_sec: float = 30.0
     gripper_init_settle_sec: float = 0.5
     stop_grippers_on_disconnect: bool = False

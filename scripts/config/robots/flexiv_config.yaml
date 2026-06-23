@@ -24,6 +24,8 @@ teleop:
     action_deadband_rotation: 0.003
     action_spike_translation: 0.05
     action_spike_rotation: 0.10
+    gripper_trigger_deadzone: 0.0
+    gripper_trigger_gamma: 0.7 # 1.0 linear; <1.0 closes earlier, >1.0 closes later
     mirror_teleop: true
     visualize_placo: false
 
@@ -46,7 +48,7 @@ robot:
   gripper_max_open: 0.1 # meters; normalized command 1.0 maps to this width
   gripper_speed: 0.2 # Flexiv-GN01 RDK reports max_vel=0.2; higher values are clipped/rejected
   gripper_force: 10.0
-  gripper_command_epsilon: 0.001 # GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001 from flexiv_dual_arm
+  gripper_command_epsilon: 0.0005 # realtime command deadband; home wait still has a 0.001m floor
   gripper_init_timeout_sec: 10.0 # used for both RDK Init settle and gripper home wait
   gripper_init_settle_sec: 0.5 # used for both RDK Init settle and gripper home settle
   action_debug: false

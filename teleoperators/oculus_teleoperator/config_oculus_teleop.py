@@ -35,6 +35,10 @@ class OculusTeleopConfig(TeleoperatorConfig):
     use_gripper: bool = True
     # Left gripper: Left Trigger (LTr)
     # Right gripper: Right Trigger (RTr)
+    # Trims noisy analog trigger endpoints before mapping trigger to gripper.
+    gripper_trigger_deadzone: float = 0.02
+    # 1.0 is linear; values below 1.0 close earlier, values above 1.0 close later.
+    gripper_trigger_gamma: float = 1.0
 
     # Action smoothing for 6D delta pose per arm.
     # one_euro is adaptive and usually feels more responsive than EMA for delta actions.

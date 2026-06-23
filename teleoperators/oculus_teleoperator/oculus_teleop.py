@@ -103,6 +103,8 @@ class OculusTeleop(Teleoperator):
             action_deadband_rotation=self.cfg.action_deadband_rotation,
             action_spike_translation=self.cfg.action_spike_translation,
             action_spike_rotation=self.cfg.action_spike_rotation,
+            gripper_trigger_deadzone=self.cfg.gripper_trigger_deadzone,
+            gripper_trigger_gamma=self.cfg.gripper_trigger_gamma,
             mirror_teleop=self.cfg.mirror_teleop,
         )
         

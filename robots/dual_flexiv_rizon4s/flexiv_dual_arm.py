@@ -115,6 +115,8 @@ class FlexivDualArm(Robot):
         self._right_gripper_cmd = 1.0
         self._left_gripper_width: float | None = None
         self._right_gripper_width: float | None = None
+        self._left_gripper_params: dict[str, float] | None = None
+        self._right_gripper_params: dict[str, float] | None = None
         self._camera_stop_event = threading.Event()
         self._camera_threads: dict[str, threading.Thread] = {}
         self._frame_lock = threading.Lock()
@@ -264,6 +266,7 @@ class FlexivDualArm(Robot):
 
         try:
             params = gripper.params()
+            self._set_cached_gripper_params(side, params)
             width = float(gripper.states().width)
             logger.info(
                 "[FLEXIV] %s gripper params min_width=%.4f max_width=%.4f min_vel=%.4f max_vel=%.4f min_force=%.2f max_force=%.2f",
@@ -459,6 +462,8 @@ class FlexivDualArm(Robot):
         self._right_gripper = None
         self._left_tool = None
         self._right_tool = None
+        self._left_gripper_params = None
+        self._right_gripper_params = None
         self.is_connected = False
         logger.info("[FLEXIV] %s disconnected", self.name)
 
@@ -917,6 +922,31 @@ class FlexivDualArm(Robot):
             command=command,
         )
 
+    @staticmethod
+    def _params_to_dict(params: Any) -> dict[str, float]:
+        return {
+            "min_width": float(params.min_width),
+            "max_width": float(params.max_width),
+            "min_vel": float(params.min_vel),
+            "max_vel": float(params.max_vel),
+            "min_force": float(params.min_force),
+            "max_force": float(params.max_force),
+        }
+
+    def _set_cached_gripper_params(self, side: str, params: Any) -> dict[str, float]:
+        cached = self._params_to_dict(params)
+        if side == "left":
+            self._left_gripper_params = cached
+        else:
+            self._right_gripper_params = cached
+        return cached
+
+    def _get_gripper_params(self, side: str, gripper: Any) -> dict[str, float]:
+        cached = self._left_gripper_params if side == "left" else self._right_gripper_params
+        if cached is not None:
+            return cached
+        return self._set_cached_gripper_params(side, gripper.params())
+
     def _prepare_gripper_move(
         self,
         side: str,
@@ -927,18 +957,18 @@ class FlexivDualArm(Robot):
         requested_width = max(min_width, float(width))
         target_width = requested_width
         try:
-            params = gripper.params()
-            target_width = float(np.clip(target_width, params.min_width, params.max_width))
+            params = self._get_gripper_params(side, gripper)
+            target_width = float(np.clip(target_width, params["min_width"], params["max_width"]))
             requested_velocity = float(self.config.gripper_speed)
-            velocity = float(np.clip(requested_velocity, params.min_vel, params.max_vel))
-            force_limit = float(np.clip(self.config.gripper_force, params.min_force, params.max_force))
+            velocity = float(np.clip(requested_velocity, params["min_vel"], params["max_vel"]))
+            force_limit = float(np.clip(self.config.gripper_force, params["min_force"], params["max_force"]))
             if abs(velocity - requested_velocity) >= self.config.gripper_command_epsilon:
                 logger.info(
                     "[FLEXIV] %s gripper velocity %.4f clipped by RDK range [%.4f, %.4f] to %.4f",
                     side,
                     requested_velocity,
-                    float(params.min_vel),
-                    float(params.max_vel),
+                    params["min_vel"],
+                    params["max_vel"],
                     velocity,
                 )
             if abs(target_width - requested_width) >= self.config.gripper_command_epsilon:
@@ -947,8 +977,8 @@ class FlexivDualArm(Robot):
                     "[%.4f, %.4f] to %.4f",
                     side,
                     requested_width,
-                    float(params.min_width),
-                    float(params.max_width),
+                    params["min_width"],
+                    params["max_width"],
                     target_width,
                 )
         except Exception as exc:  # noqa: BLE001
