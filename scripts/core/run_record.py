@@ -16,13 +16,13 @@ from teleoperators import (
 )
 from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
-from lerobot.scripts.lerobot_record import record_loop
 from lerobot.processor import make_default_processors
 from lerobot.utils.visualization_utils import init_rerun
 from lerobot.utils.control_utils import init_keyboard_listener
 # from send2trash import send2trash
 import shutil
 import termios, sys
+import threading
 import time
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -88,6 +88,7 @@ RUN_MODE_POLICY = "run_policy"
 RUN_MODE_MIX = "run_mix"
 POLICY_RUN_MODES = {RUN_MODE_POLICY, RUN_MODE_MIX}
 VALID_RUN_MODES = {RUN_MODE_RECORD, RUN_MODE_POLICY, RUN_MODE_MIX}
+RESET_REQUEST_KEY = "reset_requested"
 GRIPPER_COMMAND_KEY_CANDIDATES = {
     "left": ("left_gripper_cmd", "left_gripper_cmd_bin"),
     "right": ("right_gripper_cmd", "right_gripper_cmd_bin"),
@@ -572,8 +573,8 @@ def _is_arm_override_active(
 ) -> tuple[bool, str]:
     """Detect if teleop currently provides an arm/body override signal."""
 
-    if bool(teleop_raw_action.get("reset_requested", False)):
-        return True, "reset_requested"
+    if bool(teleop_raw_action.get(RESET_REQUEST_KEY, False)):
+        return True, RESET_REQUEST_KEY
 
     if bool(teleop_raw_action.get("left_grip_pressed", False)):
         return True, "left_grip_pressed"
@@ -583,7 +584,7 @@ def _is_arm_override_active(
         return True, "is_expert_override"
 
     for key, value in teleop_raw_action.items():
-        if key == "reset_requested":
+        if key == RESET_REQUEST_KEY:
             continue
         try:
             num = float(value)
@@ -792,8 +793,8 @@ def _copy_arm_channels(target_action: dict[str, Any], expert_action: dict[str, A
                 target_action[key] = expert_action[key]
                 copied.add(key)
 
-    if expert_action.get("reset_requested", False):
-        target_action["reset_requested"] = True
+    if expert_action.get(RESET_REQUEST_KEY, False):
+        target_action[RESET_REQUEST_KEY] = True
 
     return copied
 
@@ -1103,7 +1104,7 @@ def run_mix_record_loop(
         expert_action = _complete_action_dict(expert_action_raw, action_names, fallback_action={})
         last_action_source = action_source
 
-        reset_requested = bool(teleop_raw_action.get("reset_requested", False))
+        reset_requested = bool(teleop_raw_action.get(RESET_REQUEST_KEY, False))
         waiting_only = bool(override_reasons) and all("waiting" in reason for reason in override_reasons)
         expert_label_complete = (
             bool(is_expert)
@@ -1140,7 +1141,7 @@ def run_mix_record_loop(
             ",".join(override_reasons) if override_reasons else "no_channel_override_signal",
             teleop_raw_action.get("left_grip_pressed", False),
             teleop_raw_action.get("right_grip_pressed", False),
-            teleop_raw_action.get("reset_requested", False),
+            teleop_raw_action.get(RESET_REQUEST_KEY, False),
         )
 
         last_teleop_raw_action = teleop_raw_action
@@ -1151,6 +1152,34 @@ def run_mix_record_loop(
             _complete_action_dict(dict(robot_action_to_send), action_names, fallback_action=exec_action),
             gripper_action_keys,
         )
+        if reset_requested:
+            sent_action[RESET_REQUEST_KEY] = True
+            sent_action, reset_saved_steps = _record_run_mix_reset_motion(
+                robot=robot,
+                dataset=dataset,
+                sent_action=sent_action,
+                policy_action_processed=policy_action_processed,
+                expert_action=expert_action,
+                action_source=action_source,
+                is_expert=is_expert,
+                frame_segment_id=frame_segment_id,
+                expert_action_missing_names=expert_action_missing_names,
+                robot_observation_processor=robot_observation_processor,
+                fps=fps,
+                single_task=single_task,
+                display_data=display_data,
+                success_policy=success_policy,
+                initial_obs_processed=obs_processed,
+            )
+            last_exec_action = dict(sent_action)
+            saved_steps += reset_saved_steps
+            if action_source in {"expert", "mixed"}:
+                expert_exec_steps += reset_saved_steps
+            else:
+                policy_exec_steps += reset_saved_steps
+            timestamp_s = time.perf_counter() - start_episode_t
+            continue
+
         sent_action_raw = robot.send_action(sent_action)
         sent_action = normalize_gripper_command_keys(
             _complete_action_dict(
@@ -1268,6 +1297,330 @@ def _set_episode_success_annotation(
             np.array([inferred_from_recorded_episode], dtype=np.bool_)
             for _ in range(size)
         ]
+
+
+def _is_reset_requested_action(action: dict[str, Any] | None) -> bool:
+    return isinstance(action, dict) and bool(action.get(RESET_REQUEST_KEY, False))
+
+
+def _clear_robot_observation_cache(robot) -> None:
+    if hasattr(robot, "clear_observation_cache"):
+        robot.clear_observation_cache()
+    elif hasattr(robot, "_cached_rpc_state"):
+        robot._cached_rpc_state = None
+
+
+def _start_robot_action_thread(robot, action: dict[str, Any]) -> tuple[threading.Thread, dict[str, Any]]:
+    result: dict[str, Any] = {"sent_action": None, "error": None}
+
+    def worker() -> None:
+        try:
+            if _is_reset_requested_action(action) and hasattr(robot, "send_action_for_recorded_reset"):
+                result["sent_action"] = robot.send_action_for_recorded_reset(action)
+            else:
+                result["sent_action"] = robot.send_action(action)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=worker, name="recorded_reset_action", daemon=True)
+    thread.start()
+    return thread, result
+
+
+def _raise_action_thread_error(result: dict[str, Any]) -> None:
+    error = result.get("error")
+    if error is not None:
+        raise error
+
+
+def _add_standard_record_frame(
+    *,
+    dataset: LeRobotDataset | None,
+    dataset_features: dict[str, Any],
+    obs_processed: dict[str, Any],
+    action_values: dict[str, Any],
+    single_task: str,
+) -> None:
+    if dataset is None:
+        return
+    observation_frame = build_dataset_frame(dataset_features, obs_processed, prefix=OBS_STR)
+    action_frame = build_dataset_frame(dataset_features, action_values, prefix=ACTION)
+    dataset.add_frame({**observation_frame, **action_frame, "task": single_task})
+
+
+def _add_run_mix_record_frame(
+    *,
+    dataset: LeRobotDataset | None,
+    obs_processed: dict[str, Any],
+    sent_action: dict[str, Any],
+    policy_action_processed: dict[str, Any],
+    expert_action: dict[str, Any],
+    action_source: str,
+    is_expert: bool,
+    frame_segment_id: int,
+    frame_role: str,
+    expert_label_complete: bool,
+    expert_action_missing_names: list[str],
+    single_task: str,
+    success_policy: str,
+) -> None:
+    if dataset is None:
+        return
+
+    observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+    action_frame = build_dataset_frame(dataset.features, sent_action, prefix=ACTION)
+    policy_action_frame = build_dataset_frame(
+        dataset.features,
+        policy_action_processed,
+        prefix="policy_action",
+    )
+    expert_action_frame = build_dataset_frame(
+        dataset.features,
+        expert_action,
+        prefix="expert_action",
+    )
+    sent_action_frame = build_dataset_frame(dataset.features, sent_action, prefix="sent_action")
+    frame = {
+        **observation_frame,
+        **action_frame,
+        **policy_action_frame,
+        **expert_action_frame,
+        **sent_action_frame,
+        "action_source": action_source,
+        "is_expert": np.array([is_expert], dtype=np.bool_),
+        "intervention_segment_id": np.array([frame_segment_id], dtype=np.int64),
+        "frame_role": frame_role,
+        "expert_label_complete": np.array([expert_label_complete], dtype=np.bool_),
+        "expert_action_missing": ",".join(expert_action_missing_names),
+        "task": single_task,
+    }
+    if "success" in dataset.features:
+        frame["success"] = np.array([False], dtype=np.bool_)
+    if "success_policy" in dataset.features:
+        frame["success_policy"] = success_policy
+    if "success_inferred_from_recorded_episode" in dataset.features:
+        frame["success_inferred_from_recorded_episode"] = np.array([False], dtype=np.bool_)
+    dataset.add_frame(frame)
+
+
+def _record_run_mix_reset_motion(
+    *,
+    robot,
+    dataset: LeRobotDataset | None,
+    sent_action: dict[str, Any],
+    policy_action_processed: dict[str, Any],
+    expert_action: dict[str, Any],
+    action_source: str,
+    is_expert: bool,
+    frame_segment_id: int,
+    expert_action_missing_names: list[str],
+    robot_observation_processor,
+    fps: int,
+    single_task: str,
+    display_data: bool,
+    success_policy: str,
+    initial_obs_processed: dict[str, Any],
+) -> tuple[dict[str, Any], int]:
+    logging.info("[run_mix] Quest A pressed: recording go-home motion frames.")
+
+    saved_steps = 0
+
+    def add_frame(obs_processed: dict[str, Any]) -> None:
+        nonlocal saved_steps
+        _add_run_mix_record_frame(
+            dataset=dataset,
+            obs_processed=obs_processed,
+            sent_action=sent_action,
+            policy_action_processed=policy_action_processed,
+            expert_action=expert_action,
+            action_source=action_source,
+            is_expert=is_expert,
+            frame_segment_id=frame_segment_id,
+            frame_role="reset",
+            expert_label_complete=False,
+            expert_action_missing_names=expert_action_missing_names,
+            single_task=single_task,
+            success_policy=success_policy,
+        )
+        saved_steps += 1
+        if display_data:
+            log_rerun_data(observation=obs_processed, action=sent_action)
+
+    add_frame(initial_obs_processed)
+    thread, result = _start_robot_action_thread(robot, sent_action)
+    while thread.is_alive():
+        loop_start_t = time.perf_counter()
+        _clear_robot_observation_cache(robot)
+        obs = robot.get_observation()
+        obs_processed = robot_observation_processor(obs)
+        add_frame(obs_processed)
+        busy_wait(1 / fps - (time.perf_counter() - loop_start_t))
+
+    thread.join()
+    _raise_action_thread_error(result)
+
+    _clear_robot_observation_cache(robot)
+    final_obs = robot.get_observation()
+    final_obs_processed = robot_observation_processor(final_obs)
+    add_frame(final_obs_processed)
+
+    return dict(result.get("sent_action") or sent_action), saved_steps
+
+
+def _record_standard_reset_motion(
+    *,
+    robot,
+    dataset: LeRobotDataset | None,
+    dataset_features: dict[str, Any],
+    action_values: dict[str, Any],
+    robot_action_to_send: dict[str, Any],
+    robot_observation_processor,
+    fps: int,
+    single_task: str,
+    display_data: bool,
+    initial_obs_processed: dict[str, Any],
+) -> dict[str, Any]:
+    logging.info("[RECORD] Quest A pressed: recording go-home motion frames.")
+    _add_standard_record_frame(
+        dataset=dataset,
+        dataset_features=dataset_features,
+        obs_processed=initial_obs_processed,
+        action_values=action_values,
+        single_task=single_task,
+    )
+    if display_data:
+        log_rerun_data(observation=initial_obs_processed, action=action_values)
+
+    thread, result = _start_robot_action_thread(robot, robot_action_to_send)
+    while thread.is_alive():
+        loop_start_t = time.perf_counter()
+        _clear_robot_observation_cache(robot)
+        obs = robot.get_observation()
+        obs_processed = robot_observation_processor(obs)
+        _add_standard_record_frame(
+            dataset=dataset,
+            dataset_features=dataset_features,
+            obs_processed=obs_processed,
+            action_values=action_values,
+            single_task=single_task,
+        )
+        if display_data:
+            log_rerun_data(observation=obs_processed, action=action_values)
+        busy_wait(1 / fps - (time.perf_counter() - loop_start_t))
+
+    thread.join()
+    _raise_action_thread_error(result)
+
+    _clear_robot_observation_cache(robot)
+    final_obs = robot.get_observation()
+    final_obs_processed = robot_observation_processor(final_obs)
+    _add_standard_record_frame(
+        dataset=dataset,
+        dataset_features=dataset_features,
+        obs_processed=final_obs_processed,
+        action_values=action_values,
+        single_task=single_task,
+    )
+    if display_data:
+        log_rerun_data(observation=final_obs_processed, action=action_values)
+
+    sent_action = result.get("sent_action")
+    return dict(sent_action or robot_action_to_send)
+
+
+def record_loop_with_recorded_resets(
+    robot,
+    events: dict,
+    fps: int,
+    teleop_action_processor,
+    robot_action_processor,
+    robot_observation_processor,
+    dataset: LeRobotDataset | None = None,
+    teleop=None,
+    policy=None,
+    preprocessor=None,
+    postprocessor=None,
+    control_time_s: int | float | None = None,
+    single_task: str | None = None,
+    display_data: bool = False,
+) -> None:
+    if dataset is not None and dataset.fps != fps:
+        raise ValueError(f"The dataset fps should be equal to requested fps ({dataset.fps} != {fps}).")
+
+    if policy is not None and preprocessor is not None and postprocessor is not None:
+        policy.reset()
+        preprocessor.reset()
+        postprocessor.reset()
+
+    timestamp = 0.0
+    start_episode_t = time.perf_counter()
+    while control_time_s is None or timestamp < control_time_s:
+        start_loop_t = time.perf_counter()
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        obs = robot.get_observation()
+        obs_processed = robot_observation_processor(obs)
+
+        if policy is not None or dataset is not None:
+            observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
+        else:
+            observation_frame = None
+
+        if policy is not None and preprocessor is not None and postprocessor is not None:
+            action_values = predict_action(
+                observation=observation_frame,
+                policy=policy,
+                device=get_safe_torch_device(policy.config.device),
+                preprocessor=preprocessor,
+                postprocessor=postprocessor,
+                use_amp=policy.config.use_amp,
+                task=single_task,
+                robot_type=robot.robot_type,
+            )
+            action_values = make_robot_action(action_values, dataset.features)
+        elif teleop is not None:
+            raw_action = teleop.get_action()
+            action_values = teleop_action_processor((raw_action, obs))
+        else:
+            logging.info(
+                "No policy or teleoperator provided, skipping action generation. "
+                "The robot won't be controlled in this loop."
+            )
+            busy_wait(1 / fps - (time.perf_counter() - start_loop_t))
+            timestamp = time.perf_counter() - start_episode_t
+            continue
+
+        robot_action_to_send = robot_action_processor((action_values, obs))
+
+        if _is_reset_requested_action(action_values) or _is_reset_requested_action(robot_action_to_send):
+            if _is_reset_requested_action(action_values):
+                robot_action_to_send = dict(robot_action_to_send)
+                robot_action_to_send[RESET_REQUEST_KEY] = True
+            _record_standard_reset_motion(
+                robot=robot,
+                dataset=dataset,
+                dataset_features=dataset.features if dataset is not None else {},
+                action_values=action_values,
+                robot_action_to_send=robot_action_to_send,
+                robot_observation_processor=robot_observation_processor,
+                fps=fps,
+                single_task=single_task,
+                display_data=display_data,
+                initial_obs_processed=obs_processed,
+            )
+        else:
+            robot.send_action(robot_action_to_send)
+            if dataset is not None:
+                action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
+                dataset.add_frame({**observation_frame, **action_frame, "task": single_task})
+            if display_data:
+                log_rerun_data(observation=obs_processed, action=action_values)
+
+        busy_wait(1 / fps - (time.perf_counter() - start_loop_t))
+        timestamp = time.perf_counter() - start_episode_t
 
 
 def _wait_for_next_episode_with_teleop(
@@ -1598,7 +1951,7 @@ def run_record(record_cfg: RecordConfig):
                     mix_stats["complete_expert_label_steps"],
                 )
             else:
-                record_loop(
+                record_loop_with_recorded_resets(
                     robot=robot,
                     events=events,
                     fps=record_cfg.fps,

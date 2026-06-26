@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import logging
+import json
 import threading
+import time
 from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 import numpy as np
@@ -72,6 +76,20 @@ def _unique(keys: list[str]) -> list[str]:
     return result
 
 
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    return repr(value)
+
+
 def _robot_state_from_side(side_state: Mapping[str, Any]) -> Mapping[str, Any]:
     robot_state = side_state.get("robot_state")
     return _as_mapping(robot_state) if robot_state is not None else side_state
@@ -137,6 +155,7 @@ class FrankaDualArm(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
         self._is_connected = False
         self._robot: Optional[FrankaDualArmClient] = None
+        self._observation_robot: Optional[FrankaDualArmClient] = None
         self._prev_observation: Optional[dict[str, Any]] = None
         self._cached_rpc_state: Optional[dict[str, Any]] = None
         self._num_joints_per_arm = int(config.num_joints_per_arm)
@@ -151,6 +170,9 @@ class FrankaDualArm(Robot):
         self._action_debug_enabled = False
         self._action_debug_every_n = 30
         self._action_debug_count = 0
+        self._action_state_log_file: Optional[Any] = None
+        self._action_state_log_path: Optional[Path] = None
+        self._action_state_log_count = 0
         self._camera_stop_event = threading.Event()
         self._camera_threads: dict[str, threading.Thread] = {}
         self._frame_lock = threading.Lock()
@@ -177,6 +199,11 @@ class FrankaDualArm(Robot):
             raise DeviceAlreadyConnectedError(f"{self.name} is already connected.")
 
         logger.info("[FRANKA] Connecting to dual-arm server %s:%s", self.config.robot_ip, self.config.robot_port)
+        self._observation_robot = FrankaDualArmClient(
+            ip=self.config.robot_ip,
+            port=self.config.robot_port,
+            timeout=self.config.rpc_timeout_sec,
+        )
         self._robot = FrankaDualArmClient(
             ip=self.config.robot_ip,
             port=self.config.robot_port,
@@ -192,23 +219,48 @@ class FrankaDualArm(Robot):
             if self.config.open_grippers_on_connect:
                 self._open_both_grippers(blocking=True)
 
-        for cam_name, cam in self.cameras.items():
-            cam.connect()
-            logger.info("[CAM] %s connected", cam_name)
-            self._start_camera_thread(cam_name, cam)
+        try:
+            for cam_name, cam in self.cameras.items():
+                cam.connect()
+                logger.info("[CAM] %s connected", cam_name)
 
-        self._is_connected = True
-        logger.info("[FRANKA] %s connected", self.name)
+            for cam_name, cam in self.cameras.items():
+                self._start_camera_thread(cam_name, cam)
+
+            self._is_connected = True
+            self._open_action_state_log()
+            logger.info("[FRANKA] %s connected", self.name)
+        except Exception:
+            self.disconnect()
+            raise
 
     def disconnect(self) -> None:
-        if not self.is_connected:
+        has_camera_threads = bool(self._camera_threads)
+        has_connected_cameras = any(getattr(cam, "is_connected", False) for cam in self.cameras.values())
+        has_rpc_client = self._robot is not None or self._observation_robot is not None
+        if not (self.is_connected or has_camera_threads or has_connected_cameras or has_rpc_client):
             return
+
+        self._close_action_state_log()
         self._stop_camera_threads()
         for cam in self.cameras.values():
-            cam.disconnect()
+            try:
+                if getattr(cam, "is_connected", False):
+                    cam.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CAM] Failed to disconnect camera cleanly: %s", exc)
         if self._robot is not None:
-            self._robot.close()
+            try:
+                self._robot.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[FRANKA] Failed to close RPC client cleanly: %s", exc)
             self._robot = None
+        if self._observation_robot is not None:
+            try:
+                self._observation_robot.close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[FRANKA] Failed to close observation RPC client cleanly: %s", exc)
+            self._observation_robot = None
         self._is_connected = False
         self._cached_rpc_state = None
         self._prev_observation = None
@@ -240,6 +292,53 @@ class FrankaDualArm(Robot):
             self.config.go_home_rate_hz,
         )
         self._cached_rpc_state = None
+
+    def send_action_for_recorded_reset(self, action: dict[str, Any]) -> dict[str, Any]:
+        """Run a reset action from a worker thread without reusing main-thread ZeroRPC clients."""
+        if not self.is_connected:
+            raise DeviceNotConnectedError(f"{self.name} is not connected.")
+
+        sent_action = dict(action)
+        if not sent_action.get("reset_requested", False):
+            return self.send_action(sent_action)
+
+        client = FrankaDualArmClient(
+            ip=self.config.robot_ip,
+            port=self.config.robot_port,
+            timeout=self.config.rpc_timeout_sec,
+        )
+        try:
+            if self.config.reset_go_home:
+                logger.info("[FRANKA] Moving both arms to server home pose")
+                client.go_home(
+                    "both",
+                    self.config.go_home_duration_sec,
+                    self.config.go_home_rate_hz,
+                )
+            else:
+                logger.info("[FRANKA] Resetting target poses to current poses")
+                client.reset()
+
+            if self.config.use_gripper and self.config.reset_opens_grippers:
+                client.left_gripper_goto(
+                    width=self.config.gripper_max_open,
+                    speed=self.config.gripper_speed,
+                    force=self.config.gripper_force,
+                    blocking=True,
+                )
+                client.right_gripper_goto(
+                    width=self.config.gripper_max_open,
+                    speed=self.config.gripper_speed,
+                    force=self.config.gripper_force,
+                    blocking=True,
+                )
+                self._last_left_gripper_open = 1.0
+                self._last_right_gripper_open = 1.0
+        finally:
+            client.close()
+
+        self._cached_rpc_state = None
+        return sent_action
 
     def _open_both_grippers(self, blocking: bool = True) -> None:
         if self._robot is None:
@@ -274,6 +373,8 @@ class FrankaDualArm(Robot):
 
         server_action: dict[str, Any] = {}
         gripper_updates: list[tuple[str, float]] = []
+        rpc_steps: list[dict[str, Any]] = []
+        state_before = self._compact_rpc_state(self._cached_rpc_state)
 
         has_cartesian_action = self._has_cartesian_action(action)
         if not self.config.debug:
@@ -301,8 +402,15 @@ class FrankaDualArm(Robot):
                 if source_key is not None:
                     sent_action[source_key] = sent_value
 
+        if has_cartesian_action and not self._server_action_has_motion(server_action):
+            rpc_action: dict[str, Any] = {}
+            step_result = self._robot.step(rpc_action)
+            rpc_steps.append({"action": rpc_action, "result": self._summarize_step_result(step_result)})
+            self._update_cached_rpc_state_from_step(step_result)
+
         if server_action:
             step_result = self._robot.step(server_action)
+            rpc_steps.append({"action": dict(server_action), "result": self._summarize_step_result(step_result)})
             self._update_cached_rpc_state_from_step(step_result)
             for side, open_fraction in gripper_updates:
                 if side == "left":
@@ -311,12 +419,131 @@ class FrankaDualArm(Robot):
                     self._last_right_gripper_open = open_fraction
 
         self._log_action_debug(sent_action)
+        self._log_action_state(action, sent_action, server_action, rpc_steps, state_before, has_cartesian_action)
         return sent_action
 
     def set_action_debug(self, enabled: bool, every_n: int = 30) -> None:
         self._action_debug_enabled = bool(enabled)
         self._action_debug_every_n = max(1, int(every_n))
         self._action_debug_count = 0
+
+    def _open_action_state_log(self) -> None:
+        if not self.config.action_state_log_enabled or self._action_state_log_file is not None:
+            return
+
+        log_dir = Path(self.config.action_state_log_dir).expanduser()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self._action_state_log_path = log_dir / f"franka_action_state_{timestamp}.jsonl"
+        self._action_state_log_file = self._action_state_log_path.open("a", encoding="utf-8", buffering=1)
+        self._action_state_log_count = 0
+        logger.info("[FRANKA LOG] action/state JSONL: %s", self._action_state_log_path)
+
+    def _close_action_state_log(self) -> None:
+        if self._action_state_log_file is None:
+            return
+        try:
+            self._action_state_log_file.flush()
+            self._action_state_log_file.close()
+        finally:
+            self._action_state_log_file = None
+
+    def _summarize_step_result(self, step_result: Any) -> Any:
+        if not isinstance(step_result, Mapping):
+            return _jsonable(step_result)
+
+        summary: dict[str, Any] = {"keys": list(step_result.keys())}
+        if "observation" in step_result:
+            summary["observation"] = self._compact_rpc_state(step_result.get("observation"))
+        for key in ("reward", "done", "info", "ok", "status"):
+            if key in step_result:
+                summary[key] = _jsonable(step_result.get(key))
+        if self.config.action_state_log_raw_rpc:
+            summary["raw"] = _jsonable(step_result)
+        return summary
+
+    def _compact_rpc_state(self, state: Any) -> dict[str, Any] | None:
+        if not isinstance(state, Mapping):
+            return None
+
+        compact: dict[str, Any] = {}
+        for side in ("left", "right"):
+            side_key = f"{side}_arm"
+            side_state = _as_mapping(state.get(side_key, {}))
+            robot_state = _robot_state_from_side(side_state)
+            if not side_state and not robot_state:
+                compact[side] = None
+                continue
+
+            compact_side: dict[str, Any] = {
+                "ee_pose": _ee_pose_from_side(side_state).tolist(),
+                "joint_positions": _as_np(
+                    robot_state.get("joint_positions"),
+                    self._num_joints_per_arm,
+                ).tolist(),
+                "keys": list(side_state.keys()),
+            }
+            if self.config.use_gripper:
+                compact_side["gripper_open_fraction"] = _gripper_open_fraction_from_side(
+                    side_state,
+                    self._left_gripper_state if side == "left" else self._right_gripper_state,
+                )
+            compact[side] = compact_side
+        return compact
+
+    def _action_state_summary(
+        self,
+        sent_action: dict[str, Any],
+        server_action: dict[str, Any],
+        has_cartesian_action: bool,
+    ) -> dict[str, Any]:
+        left_delta, right_delta = self._cartesian_deltas_from_action(sent_action)
+        summary: dict[str, Any] = {"has_cartesian_action": has_cartesian_action}
+        for side, delta in (("left", left_delta), ("right", right_delta)):
+            side_action = _as_mapping(server_action.get(f"{side}_arm", {}))
+            summary[side] = {
+                "translation_norm": float(np.linalg.norm(delta[:3])),
+                "rotation_norm": float(np.linalg.norm(delta[3:])),
+                "delta": delta.tolist(),
+                "motion_sent": "motion" in side_action,
+                "gripper_sent": "gripper" in side_action,
+            }
+        return summary
+
+    def _log_action_state(
+        self,
+        raw_action: dict[str, Any],
+        sent_action: dict[str, Any],
+        server_action: dict[str, Any],
+        rpc_steps: list[dict[str, Any]],
+        state_before: dict[str, Any] | None,
+        has_cartesian_action: bool,
+    ) -> None:
+        if self._action_state_log_file is None:
+            return
+
+        self._action_state_log_count += 1
+        every_n = max(1, int(self.config.action_state_log_every_n))
+        if self._action_state_log_count > 5 and self._action_state_log_count % every_n != 0:
+            return
+
+        record = {
+            "index": self._action_state_log_count,
+            "time_wall": datetime.now().isoformat(timespec="milliseconds"),
+            "time_monotonic": time.monotonic(),
+            "raw_action": raw_action,
+            "sent_action": sent_action,
+            "server_action": server_action,
+            "rpc_steps": rpc_steps,
+            "summary": self._action_state_summary(sent_action, server_action, has_cartesian_action),
+            "state_before": state_before,
+            "state_after": self._compact_rpc_state(self._cached_rpc_state),
+        }
+
+        try:
+            self._action_state_log_file.write(json.dumps(_jsonable(record), separators=(",", ":")) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[FRANKA LOG] Failed to write action/state log: %s", exc)
 
     def _log_action_debug(self, action: dict[str, Any]) -> None:
         if not self._action_debug_enabled:
@@ -433,6 +660,13 @@ class FrankaDualArm(Robot):
             for right_key in self._cartesian_action_keys("right", axis):
                 if right_key in source_action:
                     sent_action[right_key] = float(right_delta[index])
+
+    @staticmethod
+    def _server_action_has_motion(server_action: dict[str, Any]) -> bool:
+        for side_action in server_action.values():
+            if isinstance(side_action, Mapping) and "motion" in side_action:
+                return True
+        return False
 
     def _has_cartesian_action(self, action: dict[str, Any]) -> bool:
         for side in ("left", "right"):
@@ -654,11 +888,15 @@ class FrankaDualArm(Robot):
     def _get_cached_or_live_state(self) -> dict[str, Any]:
         if self._cached_rpc_state is not None:
             return self._cached_rpc_state
-        state = self._robot.get_full_state()
+        state_client = self._observation_robot or self._robot
+        state = state_client.get_full_state()
         if not isinstance(state, Mapping):
             raise RuntimeError(f"Unexpected state payload from RPC server: {type(state)!r}")
         self._cached_rpc_state = dict(state)
         return self._cached_rpc_state
+
+    def clear_observation_cache(self) -> None:
+        self._cached_rpc_state = None
 
     def _start_camera_thread(self, cam_name: str, cam: Any) -> None:
         thread = threading.Thread(
