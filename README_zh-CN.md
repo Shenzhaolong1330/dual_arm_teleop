@@ -467,7 +467,7 @@ merge_datasets:
     dataset_name: "merged_dataset"
 ```
 
-该工具使用 `LeRobotDataset.create`、`add_frame`、`save_episode` 和 `finalize`，不会直接手改 parquet。它会保留 episode 边界和 task 文本，默认校验 fps、features 和 robot type，并在输出数据集写入 `meta/merge_summary.json`。
+该工具默认使用 LeRobot 的 `aggregate_datasets` 快路径：直接合并 parquet 元数据并复制/拼接视频文件，避免逐帧解码和重编码。只有指定 `episodes`、`max_episodes` 或关闭严格 schema/robot 校验时，才会回退到 `LeRobotDataset.create`、`add_frame`、`save_episode` 和 `finalize` 的逐帧写入路径。它会保留 episode 边界和 task 文本，并在输出数据集写入 `meta/merge_summary.json`。
 
 如果只是合并或重命名单个数据集内部的 task prompt，使用 `scripts/tools/merge_lerobot_tasks.py` 或 `scripts/tools/rename_lerobot_task.py`。
 
@@ -525,8 +525,7 @@ robot-record --config scripts/config/record_cfg.yaml
 
 采集时常用按键约定：
 
-- 右箭头：停止当前 episode 并保存。
+- 右箭头：停止当前 episode 并保存；在 episode 间等待时开始录制下一条。
 - 左箭头：丢弃当前 episode。
 - Esc：停止整个录制任务。
-- Enter：继续下一段遥操作或下一条 episode。
 - Ctrl+C：中断并清理未完成数据集。

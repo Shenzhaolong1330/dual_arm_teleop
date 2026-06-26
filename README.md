@@ -468,7 +468,7 @@ merge_datasets:
     dataset_name: "merged_dataset"
 ```
 
-The tool uses `LeRobotDataset.create`, `add_frame`, `save_episode`, and `finalize` instead of directly editing parquet files. It preserves episode boundaries and task strings, validates fps/features/robot type by default, and writes `meta/merge_summary.json` in the output dataset.
+By default, the tool uses LeRobot's `aggregate_datasets` fast path, which merges parquet metadata and copies/concatenates video files without decoding and re-encoding every frame. It falls back to the `LeRobotDataset.create`, `add_frame`, `save_episode`, and `finalize` frame writer path only when `episodes` or `max_episodes` is set, or when strict schema/robot validation is disabled. It preserves episode boundaries and task strings, and writes `meta/merge_summary.json` in the output dataset.
 
 To merge or rename task prompts inside a single dataset, use `scripts/tools/merge_lerobot_tasks.py` or `scripts/tools/rename_lerobot_task.py`.
 
@@ -526,8 +526,7 @@ When using `recorded_is_success`, the operator must be strict about deleting any
 
 Common key controls during collection:
 
-- Right arrow: stop the current episode and save it.
+- Right arrow: stop the current episode and save it; during the inter-episode wait, start the next episode.
 - Left arrow: discard the current episode.
 - Esc: stop the recording session.
-- Enter: continue to the next teleoperation segment or next episode.
 - Ctrl+C: interrupt and clean up the incomplete dataset.

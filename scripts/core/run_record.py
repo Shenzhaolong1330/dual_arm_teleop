@@ -1270,10 +1270,67 @@ def _set_episode_success_annotation(
         ]
 
 
+def _wait_for_next_episode_with_teleop(
+    *,
+    robot,
+    teleop,
+    events: dict,
+    fps: int,
+    teleop_action_processor,
+    robot_action_processor,
+    robot_observation_processor,
+    display_data: bool,
+) -> None:
+    logging.info("====== [WAIT] Press Right arrow to start the next episode ======")
+    if teleop is None:
+        logging.info("[WAIT] No teleop device is connected; waiting for Right arrow without robot control.")
+        while not events["stop_recording"]:
+            if events["rerecord_episode"]:
+                logging.info("[WAIT] Left arrow is ignored while waiting; press Right arrow to continue or Esc to stop.")
+                events["rerecord_episode"] = False
+                events["exit_early"] = False
+            if events["exit_early"]:
+                events["exit_early"] = False
+                break
+            busy_wait(0.05)
+        return
+
+    while not events["stop_recording"]:
+        loop_start_t = time.perf_counter()
+
+        if events["rerecord_episode"]:
+            logging.info("[WAIT] Left arrow is ignored while waiting; press Right arrow to continue or Esc to stop.")
+            events["rerecord_episode"] = False
+            events["exit_early"] = False
+
+        if events["exit_early"]:
+            events["exit_early"] = False
+            break
+
+        obs = robot.get_observation()
+        obs_processed = robot_observation_processor(obs)
+        action_values = None
+
+        if teleop is not None:
+            act = teleop.get_action()
+            action_values = teleop_action_processor((act, obs))
+            robot_action_to_send = robot_action_processor((action_values, obs))
+            robot.send_action(robot_action_to_send)
+
+        if display_data and action_values is not None:
+            log_rerun_data(observation=obs_processed, action=action_values)
+
+        dt_s = time.perf_counter() - loop_start_t
+        busy_wait(1 / fps - dt_s)
+
+
 def run_record(record_cfg: RecordConfig):
     print("====== [START] Starting recording ======")
     dataset_name = None
     dataset_root = None
+    dataset = None
+    robot = None
+    teleop = None
     try:
         if record_cfg.dataset_name is not None:
             dataset_name = record_cfg.dataset_name
@@ -1622,25 +1679,16 @@ def run_record(record_cfg: RecordConfig):
 
             # Reset the environment between episodes, and also before a re-record attempt.
             if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or rerecord_requested):
-                while True:
-                    termios.tcflush(sys.stdin, termios.TCIFLUSH)
-                    user_input = input("====== [WAIT] Press Enter to reset the environment ======")
-                    if user_input == "":
-                        break  
-                    else:
-                        logging.info("====== [WARNING] Please press only Enter to continue ======")
-
-                logging.info("====== [RESET] Resetting the environment ======")
-                record_loop(
+                logging.info("====== [RESET] Resetting robot to home ======")
+                robot.reset()
+                _wait_for_next_episode_with_teleop(
                     robot=robot,
+                    teleop=teleop,
                     events=events,
                     fps=record_cfg.fps,
-                    teleop=teleop,
                     teleop_action_processor=teleop_action_processor,
                     robot_action_processor=robot_action_processor,
                     robot_observation_processor=robot_observation_processor,
-                    control_time_s=record_cfg.reset_time_sec,
-                    single_task=record_cfg.task_description,
                     display_data=record_cfg.display,
                 )
 
@@ -1697,12 +1745,42 @@ def run_record(record_cfg: RecordConfig):
 
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
+        if teleop is not None:
+            try:
+                teleop.disconnect()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] teleop.disconnect failed: %s", cleanup_err)
+        if robot is not None:
+            try:
+                robot.disconnect()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] robot.disconnect failed: %s", cleanup_err)
+        if dataset is not None:
+            try:
+                dataset.finalize()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
+        if teleop is not None:
+            try:
+                teleop.disconnect()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] teleop.disconnect failed: %s", cleanup_err)
+        if robot is not None:
+            try:
+                robot.disconnect()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] robot.disconnect failed: %s", cleanup_err)
+        if dataset is not None:
+            try:
+                dataset.finalize()
+            except Exception as cleanup_err:  # noqa: BLE001
+                logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
