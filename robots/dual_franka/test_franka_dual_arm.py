@@ -11,6 +11,7 @@ robot wrapper's behavior.
 
 from __future__ import annotations
 
+import math
 import unittest
 
 import numpy as np
@@ -22,6 +23,7 @@ from robots.dual_agilex_nero.config_nero import NeroDualArmConfig
 from robots.dual_agilex_nero.nero_dual_arm import NeroDualArm
 from robots.dual_franka.config_franka import FrankaDualArmConfig
 from robots.dual_franka import franka_dual_arm as franka_mod
+from robots.dual_franka.dual_franka_robotiq_rpc_client import DualFrankaRobotiqRpcClient
 from robots.dual_franka.franka_dual_arm import FrankaDualArm, NERO_COMPAT_ACTION_KEYS
 from scripts.core.run_record import resolve_gripper_command_keys
 
@@ -118,6 +120,28 @@ class FakeFrankaClient:
                 "gripper": 0.75,
             },
         }
+
+
+class FakeRpcEndpoint:
+    def __init__(self, observation: dict | None = None) -> None:
+        self.observation = observation or {}
+        self.calls: list[tuple] = []
+
+    def get_observation(self) -> dict:
+        self.calls.append(("get_observation",))
+        return self.observation
+
+    def step(self, action: dict | None = None) -> dict:
+        self.calls.append(("step", action))
+        return {"ok": True, "observation": self.observation}
+
+
+def make_rpc_client(endpoint: FakeRpcEndpoint) -> DualFrankaRobotiqRpcClient:
+    client = DualFrankaRobotiqRpcClient.__new__(DualFrankaRobotiqRpcClient)
+    client.server = "fake"
+    client.timeout = 1.0
+    client._client = endpoint
+    return client
 
 
 def make_robot(**kwargs) -> FrankaDualArm:
@@ -444,6 +468,77 @@ class FrankaDualArmTest(unittest.TestCase):
         self.assertEqual(
             resolve_gripper_command_keys(["left_gripper_cmd_bin", "right_gripper_cmd_bin"]),
             {"left": "left_gripper_cmd_bin", "right": "right_gripper_cmd_bin"},
+        )
+
+
+class DualFrankaRobotiqRpcClientTest(unittest.TestCase):
+    def test_delta_true_move_to_ee_pose_keeps_existing_step_action(self) -> None:
+        endpoint = FakeRpcEndpoint()
+        client = make_rpc_client(endpoint)
+
+        result = client.dual_robot_move_to_ee_pose(
+            [0.01, 0.02, 0.03, 0.04, 0.05, 0.06],
+            [-0.01, -0.02, -0.03, -0.04, -0.05, -0.06],
+            delta=True,
+            wait=False,
+        )
+
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(len(endpoint.calls), 1)
+        self.assertEqual(endpoint.calls[0][0], "step")
+        action = endpoint.calls[0][1]
+        self.assertEqual(action["left_arm"]["motion"]["translation"], [0.01, 0.02, 0.03])
+        self.assertEqual(action["left_arm"]["motion"]["rotation_rotvec"], [0.04, 0.05, 0.06])
+        self.assertEqual(action["right_arm"]["motion"]["translation"], [-0.01, -0.02, -0.03])
+        self.assertEqual(action["right_arm"]["motion"]["rotation_rotvec"], [-0.04, -0.05, -0.06])
+
+    def test_delta_false_move_to_ee_pose_converts_absolute_pose_to_delta_step(self) -> None:
+        endpoint = FakeRpcEndpoint(
+            {
+                "left_arm": {
+                    "end_pose": [0.1, 0.2, 0.3, 0.0, 0.0, 0.0],
+                },
+                "right_arm": {
+                    "robot_state": {
+                        "eef_pose": {
+                            "position": [0.4, 0.5, 0.6],
+                            "orientation_xyzw": [0.0, 0.0, 0.0, 1.0],
+                        },
+                    },
+                },
+            }
+        )
+        client = make_rpc_client(endpoint)
+
+        client.dual_robot_move_to_ee_pose(
+            [0.15, 0.25, 0.2, 0.0, 0.0, math.pi / 2.0],
+            [0.35, 0.5, 0.62, math.pi / 4.0, 0.0, 0.0],
+            delta=False,
+            wait=False,
+            smooth=False,
+        )
+
+        self.assertEqual([call[0] for call in endpoint.calls], ["get_observation", "step"])
+        action = endpoint.calls[1][1]
+        np.testing.assert_allclose(
+            action["left_arm"]["motion"]["translation"],
+            [0.05, 0.05, -0.1],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            action["left_arm"]["motion"]["rotation_rotvec"],
+            [0.0, 0.0, math.pi / 2.0],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            action["right_arm"]["motion"]["translation"],
+            [-0.05, 0.0, 0.02],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            action["right_arm"]["motion"]["rotation_rotvec"],
+            [math.pi / 4.0, 0.0, 0.0],
+            atol=1e-12,
         )
 
 
