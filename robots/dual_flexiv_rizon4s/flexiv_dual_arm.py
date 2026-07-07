@@ -905,6 +905,20 @@ class FlexivDualArm(Robot):
             return 0.0
         return float(np.clip((float(width) - min_width) / span, 0.0, 1.0))
 
+    def _gripper_state_norm_from_width(self, width: float) -> float:
+        return self._gripper_command_from_width(width)
+
+    def _observed_gripper_width(self, side: str, gripper: Any, fallback_command: float) -> float:
+        try:
+            width = float(gripper.states().width)
+            self._set_cached_gripper_width(side, width)
+            return width
+        except Exception:  # noqa: BLE001
+            cached_width = self._left_gripper_width if side == "left" else self._right_gripper_width
+            if cached_width is not None:
+                return float(cached_width)
+            return self._gripper_width_from_cmd(fallback_command)
+
     def move_gripper_width(self, width_m: float, side: str = "both", wait: bool = True) -> None:
         if not self.config.use_gripper:
             return
@@ -1341,14 +1355,12 @@ class FlexivDualArm(Robot):
 
         if self.config.use_gripper:
             cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
-            obs[f"{side}_gripper_state_norm"] = float(cmd)
-            obs[f"{side}_gripper_cmd"] = float(cmd)
             gripper = self._left_gripper if side == "left" else self._right_gripper
             if gripper is not None:
-                try:
-                    obs[f"{side}_gripper_width"] = float(gripper.states().width)
-                except Exception:  # noqa: BLE001
-                    obs[f"{side}_gripper_width"] = self._gripper_width_from_cmd(cmd)
+                width = self._observed_gripper_width(side, gripper, cmd)
+            else:
+                width = self._gripper_width_from_cmd(cmd)
+            obs[f"{side}_gripper_state_norm"] = self._gripper_state_norm_from_width(width)
 
     def _refresh_cached_poses(self) -> None:
         if self._left_robot is not None:
@@ -1546,8 +1558,6 @@ class FlexivDualArm(Robot):
                 features[f"{side}_ee_pose.{axis}"] = float
             if self.config.use_gripper:
                 features[f"{side}_gripper_state_norm"] = float
-                features[f"{side}_gripper_cmd"] = float
-                features[f"{side}_gripper_width"] = float
         return features
 
     @property
