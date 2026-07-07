@@ -1338,10 +1338,53 @@ def _set_episode_success_annotation(
         ]
 
 
+def _safe_cleanup_call(label: str, func: Any) -> bool:
+    try:
+        func()
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("[cleanup] %s failed: %s", label, exc)
+        return False
+
+
+def _stop_robot_cameras(robot: Any | None) -> bool:
+    if robot is None:
+        return False
+    target_robot = getattr(robot, "_robot", robot)
+    stop_cameras = getattr(target_robot, "stop_cameras", None)
+    if not callable(stop_cameras):
+        return False
+    return _safe_cleanup_call("stop robot cameras", stop_cameras)
+
+
+def _release_robot_without_stop(robot: Any | None) -> bool:
+    if robot is None:
+        return False
+    target_robot = getattr(robot, "_robot", robot)
+    release = getattr(target_robot, "release", None)
+    if callable(release):
+        return _safe_cleanup_call("robot release", release)
+    return _stop_robot_cameras(robot)
+
+
+def _disconnect_robot(robot: Any | None) -> bool:
+    if robot is None:
+        return False
+    return _safe_cleanup_call("robot disconnect", robot.disconnect)
+
+
+def _disconnect_teleop(teleop: Any | None) -> bool:
+    if teleop is None:
+        return False
+    return _safe_cleanup_call("teleop disconnect", teleop.disconnect)
+
+
 def run_record(record_cfg: RecordConfig):
     print("====== [START] Starting recording ======")
     dataset_name = None
     dataset_root = None
+    robot = None
+    teleop = None
     try:
         if record_cfg.dataset_name is not None:
             dataset_name = record_cfg.dataset_name
@@ -1730,12 +1773,15 @@ def run_record(record_cfg: RecordConfig):
 
         # Optional disconnect. For Nero, disconnect triggers client.close() -> robot_stop on server.
         if record_cfg.disconnect_on_finish:
-            robot.disconnect()
+            _disconnect_robot(robot)
         else:
+            if _release_robot_without_stop(robot):
+                logging.info(
+                    "[INFO] Released robot resources without robot.disconnect()/arm Stop."
+                )
             logging.info("[INFO] Skip robot.disconnect() to avoid stop/e-stop at session end.")
 
-        if teleop is not None:
-            teleop.disconnect()
+        _disconnect_teleop(teleop)
         dataset.finalize()
 
         update_dataset_info(record_cfg, dataset_name, data_version)
@@ -1766,12 +1812,16 @@ def run_record(record_cfg: RecordConfig):
 
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
+        _release_robot_without_stop(robot)
+        _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
+        _release_robot_without_stop(robot)
+        _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         handle_incomplete_dataset(dataset_path)
         sys.exit(1)

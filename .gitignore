@@ -23,3 +23,6 @@ dist/
 
 outputs/
 oculus_reader/
+
+# Local NVMe stress-test artifacts
+.nvme0n1p2_io_stress/

@@ -78,10 +78,24 @@ robot:
   cartesian_max_angular_vel: 1.2
   cartesian_max_linear_acc: 3.0
   cartesian_max_angular_acc: 6.0
-  left_mount_yaw_deg: 45.0
-  right_mount_yaw_deg: -45.0
-  camera_read_timeout_ms: 1000
-  camera_warmup_attempts: 5
+  # Physical mount angles. raw_deg is roll about the mount X axis; pitch_deg is
+  # about mount Y; yaw_deg is about mount Z. The adapter maps these physical
+  # axes into the current teleop/Flexiv delta convention internally.
+  left_mount_raw_deg: 45.0
+  left_mount_pitch_deg: 0.0
+  left_mount_yaw_deg: 0.0
+  right_mount_raw_deg: -45.0
+  right_mount_pitch_deg: 0.0
+  right_mount_yaw_deg: 0.0
+  camera_read_timeout_ms: 2000
+  camera_warmup_attempts: 15
+  # Optional RealSense hardware reset through librealsense. Keep connect-time
+  # reset off during normal recording because these cameras can take too long
+  # to re-enumerate after reset and block robot-record startup.
+  camera_hardware_reset_on_connect: false
+  camera_hardware_reset_on_release: true
+  camera_reset_settle_sec: 6.0
+  camera_reset_timeout_sec: 20.0
 
 cameras:
   # Replace with the RealSense serial numbers for this Flexiv station.

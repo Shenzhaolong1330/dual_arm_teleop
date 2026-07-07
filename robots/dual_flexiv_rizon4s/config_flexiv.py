@@ -73,6 +73,12 @@ class FlexivDualArmConfig(RobotConfig):
     cartesian_max_angular_vel: float = 1.2
     cartesian_max_linear_acc: float = 3.0
     cartesian_max_angular_acc: float = 6.0
+    left_mount_raw_deg: float = 0.0
+    right_mount_raw_deg: float = 0.0
+    left_mount_roll_deg: float = 0.0
+    right_mount_roll_deg: float = 0.0
+    left_mount_pitch_deg: float = 0.0
+    right_mount_pitch_deg: float = 0.0
     left_mount_yaw_deg: float = 0.0
     right_mount_yaw_deg: float = 0.0
 
@@ -80,6 +86,10 @@ class FlexivDualArmConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     camera_read_timeout_ms: int = 1000
     camera_warmup_attempts: int = 10
+    camera_hardware_reset_on_connect: bool = False
+    camera_hardware_reset_on_release: bool = False
+    camera_reset_settle_sec: float = 6.0
+    camera_reset_timeout_sec: float = 20.0
 
     # Compatibility fields accepted from the generic record config parser.
     robot_ip: str = "localhost"

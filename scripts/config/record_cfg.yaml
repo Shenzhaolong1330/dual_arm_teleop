@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "flexiv_dual_arm/oculus_smoke_test"
+  repo_id: &repo_id "flexiv_dual_arm_test/pick_place"
   # repo_id: &repo_id "nero_task3_step1/2mL_empty_right"
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
   # <description>: https://github.com/wbcdcompetition/wbcd_tasks/tree/main/track-3-lab-experiments
@@ -20,7 +20,7 @@ record:
   user_notes: "Flexiv Rizon4s dual-arm Oculus teleop template; fill serial numbers and cameras before real collection."
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_record" # run_record | run_policy | run_mix
+  run_mode: "run_policy" # run_record | run_policy | run_mix
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
@@ -39,14 +39,14 @@ record:
 
     # Franka:
     # For ACT:
-    # type: "act"
-    # config_path: scripts/config/policies/act_reason_config.yaml
-    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    type: "act"
+    config_path: scripts/config/policies/act_reason_config.yaml
+    pretrained_path: "/home/deepcybo/flexiv_ws/dual_arm_teleop/outputs/train/franka_dual_arm_test/pick_place_20260703_E10/checkpoints/008000/pretrained_model"
 
     # For diffusion:
-    type: "diffusion"
-    config_path: scripts/config/policies/diffusion_reason_config.yaml
-    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260529_E150/checkpoints/last/pretrained_model"
+    # type: "diffusion"
+    # config_path: scripts/config/policies/diffusion_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260529_E150/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:
@@ -61,7 +61,7 @@ record:
 
   task:
     description: "pick up small vials and insert them in the empty rack" # task description
-    num_episodes: 50 # number of episodes to record
+    num_episodes: 10 # number of episodes to record
     display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: # dataset to resume from if resume is true
@@ -79,16 +79,16 @@ record:
     push_to_hub: false # whether to push the dataset to your HuggingFace repo after recording
 
 replay:
-  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  dataset_name: flexiv_dual_arm_test/pick_place_20260703_v02
   # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
-  episode_idx: 0 # episode index to replay
+  episode_idx: 9 # episode index to replay
   # episode_idx: 15
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
   robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
-  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  dataset_name: flexiv_dual_arm_test/pick_place_20260703_v02
   # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
   episode_index: 0 # episode index to visualize
   # episode_index: 15

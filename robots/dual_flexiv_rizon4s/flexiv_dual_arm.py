@@ -119,6 +119,7 @@ class FlexivDualArm(Robot):
         self._right_gripper_params: dict[str, float] | None = None
         self._camera_stop_event = threading.Event()
         self._camera_threads: dict[str, threading.Thread] = {}
+        self._connected_cameras: set[str] = set()
         self._frame_lock = threading.Lock()
         self._latest_frames: dict[str, Any] = {}
         self._action_debug_count = 0
@@ -173,6 +174,8 @@ class FlexivDualArm(Robot):
             self._finish_prepare_robot(side, robot)
 
         self._refresh_cached_poses()
+        if self.config.camera_hardware_reset_on_connect:
+            self._hardware_reset_cameras("connect")
         self._connect_cameras()
         self.is_connected = True
         self._start_cartesian_servo_thread()
@@ -429,11 +432,12 @@ class FlexivDualArm(Robot):
             and self._right_robot is None
             and self._left_gripper is None
             and self._right_gripper is None
+            and not self._camera_threads
+            and not self._connected_cameras
         ):
             return
         self._stop_cartesian_servo_thread()
-        if self._camera_threads:
-            self._stop_cameras()
+        self._stop_cameras()
         if self.config.stop_grippers_on_disconnect:
             for side, gripper in (("left", self._left_gripper), ("right", self._right_gripper)):
                 if gripper is not None:
@@ -456,6 +460,29 @@ class FlexivDualArm(Robot):
                     robot.Stop()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[FLEXIV] %s arm stop failed during disconnect: %s", side, exc)
+        self._release_handles()
+        logger.info("[FLEXIV] %s disconnected", self.name)
+
+    def release(self) -> None:
+        """Release camera and RDK Python handles without commanding robot Stop()."""
+        if (
+            not self.is_connected
+            and self._left_robot is None
+            and self._right_robot is None
+            and self._left_gripper is None
+            and self._right_gripper is None
+            and not self._camera_threads
+            and not self._connected_cameras
+        ):
+            return
+        self._stop_cartesian_servo_thread()
+        self._stop_cameras()
+        if self.config.camera_hardware_reset_on_release:
+            self._hardware_reset_cameras("release")
+        self._release_handles()
+        logger.info("[FLEXIV] %s released without arm Stop", self.name)
+
+    def _release_handles(self) -> None:
         self._left_robot = None
         self._right_robot = None
         self._left_gripper = None
@@ -464,8 +491,8 @@ class FlexivDualArm(Robot):
         self._right_tool = None
         self._left_gripper_params = None
         self._right_gripper_params = None
+        self._flexivrdk = None
         self.is_connected = False
-        logger.info("[FLEXIV] %s disconnected", self.name)
 
     def reset(self) -> None:
         if not self.is_connected:
@@ -512,8 +539,18 @@ class FlexivDualArm(Robot):
     def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
         left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
-        left_delta = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
-        right_delta = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
+        left_delta = self._apply_mount_rotation(
+            left_delta,
+            self._mount_raw_deg("left"),
+            self.config.left_mount_pitch_deg,
+            self.config.left_mount_yaw_deg,
+        )
+        right_delta = self._apply_mount_rotation(
+            right_delta,
+            self._mount_raw_deg("right"),
+            self.config.right_mount_pitch_deg,
+            self.config.right_mount_yaw_deg,
+        )
         left_delta[:3] = _clip_norm(left_delta[:3], self.config.max_cartesian_delta)
         right_delta[:3] = _clip_norm(right_delta[:3], self.config.max_cartesian_delta)
         left_delta[3:] = _clip_norm(left_delta[3:], self.config.max_rotation_delta)
@@ -602,8 +639,18 @@ class FlexivDualArm(Robot):
 
         left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
-        left_mapped = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
-        right_mapped = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
+        left_mapped = self._apply_mount_rotation(
+            left_delta,
+            self._mount_raw_deg("left"),
+            self.config.left_mount_pitch_deg,
+            self.config.left_mount_yaw_deg,
+        )
+        right_mapped = self._apply_mount_rotation(
+            right_delta,
+            self._mount_raw_deg("right"),
+            self.config.right_mount_pitch_deg,
+            self.config.right_mount_yaw_deg,
+        )
         left_grip = self._gripper_value_from_action(action, "left")
         right_grip = self._gripper_value_from_action(action, "right")
         logger.info(
@@ -767,14 +814,35 @@ class FlexivDualArm(Robot):
         out[3:7] = _scipy_quat_xyzw_to_rdk_wxyz(step_rot.as_quat())
         return out
 
+    def _mount_raw_deg(self, side: str) -> float:
+        raw_deg = float(getattr(self.config, f"{side}_mount_raw_deg", 0.0))
+        roll_deg = float(getattr(self.config, f"{side}_mount_roll_deg", 0.0))
+        return raw_deg if abs(raw_deg) >= 1e-12 else roll_deg
+
     @staticmethod
-    def _apply_mount_yaw(delta: np.ndarray, yaw_deg: float) -> np.ndarray:
-        if abs(float(yaw_deg)) < 1e-12:
+    def _apply_mount_rotation(
+        delta: np.ndarray,
+        raw_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> np.ndarray:
+        if (
+            abs(float(raw_deg)) < 1e-12
+            and abs(float(pitch_deg)) < 1e-12
+            and abs(float(yaw_deg)) < 1e-12
+        ):
             return delta
-        rot_z = Rotation.from_euler("z", float(yaw_deg), degrees=True)
+        # Config angles describe the physical mount intuition. In this station's
+        # teleop convention, mount X/Y/Z correspond to delta-frame Z/X/Y.
+        # This keeps raw/roll=+45 equivalent to the previous yaw=+45 mapping.
+        mount_rot = (
+            Rotation.from_euler("y", float(yaw_deg), degrees=True)
+            * Rotation.from_euler("x", float(pitch_deg), degrees=True)
+            * Rotation.from_euler("z", float(raw_deg), degrees=True)
+        )
         out = delta.copy()
-        out[:3] = rot_z.apply(out[:3])
-        out[3:] = rot_z.apply(out[3:])
+        out[:3] = mount_rot.apply(out[:3])
+        out[3:] = mount_rot.apply(out[3:])
         return out
 
     def _send_joint_positions(self, action: dict[str, Any]) -> None:
@@ -1296,25 +1364,104 @@ class FlexivDualArm(Robot):
             return
         self._camera_stop_event.clear()
         warmed_cameras: list[tuple[str, Any]] = []
-        for cam_name, cam in self.cameras.items():
-            # LeRobot's default RealSense connect() warmup reads with a fixed
-            # 200 ms timeout, which is too tight when three D435 pipelines start
-            # together. Disable that warmup and use the configurable one below.
-            cam.connect(warmup=False)
-            self._warmup_camera(cam_name, cam)
-            warmed_cameras.append((cam_name, cam))
-            logger.info("[CAM] %s warmed up", cam_name)
+        try:
+            for cam_name, cam in self.cameras.items():
+                # LeRobot's default RealSense connect() warmup reads with a fixed
+                # 200 ms timeout, which is too tight when three D435 pipelines start
+                # together. Disable that warmup and use the configurable one below.
+                cam.connect(warmup=False)
+                self._connected_cameras.add(cam_name)
+                self._warmup_camera(cam_name, cam)
+                warmed_cameras.append((cam_name, cam))
+                logger.info("[CAM] %s warmed up", cam_name)
 
-        for cam_name, cam in warmed_cameras:
-            thread = threading.Thread(
-                target=self._camera_read_loop,
-                args=(cam_name, cam),
-                name=f"flexiv_cam_{cam_name}",
-                daemon=True,
+            for cam_name, cam in warmed_cameras:
+                thread = threading.Thread(
+                    target=self._camera_read_loop,
+                    args=(cam_name, cam),
+                    name=f"flexiv_cam_{cam_name}",
+                    daemon=True,
+                )
+                thread.start()
+                self._camera_threads[cam_name] = thread
+                logger.info("[CAM] %s connected", cam_name)
+        except Exception:
+            logger.warning("[CAM] Camera startup failed; closing opened RealSense pipelines")
+            self._stop_cameras()
+            raise
+
+    def _configured_camera_serials(self) -> set[str]:
+        serials: set[str] = set()
+        for camera_cfg in self.config.cameras.values():
+            serial = str(getattr(camera_cfg, "serial_number_or_name", "") or "").strip()
+            if serial:
+                serials.add(serial)
+        return serials
+
+    def _hardware_reset_cameras(self, reason: str) -> None:
+        target_serials = self._configured_camera_serials()
+        if not target_serials:
+            return
+        try:
+            import pyrealsense2 as rs  # noqa: PLC0415
+        except ImportError as exc:
+            logger.warning("[CAM] skip hardware reset on %s; pyrealsense2 import failed: %s", reason, exc)
+            return
+
+        try:
+            devices = list(rs.context().query_devices())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CAM] skip hardware reset on %s; query_devices failed: %s", reason, exc)
+            return
+
+        reset_serials: set[str] = set()
+        for device in devices:
+            try:
+                serial = str(device.get_info(rs.camera_info.serial_number))
+            except Exception:  # noqa: BLE001
+                serial = ""
+            if serial not in target_serials:
+                continue
+            try:
+                logger.info("[CAM] hardware reset %s on %s", serial, reason)
+                device.hardware_reset()
+                reset_serials.add(serial)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CAM] hardware reset failed for %s on %s: %s", serial, reason, exc)
+
+        missing_serials = sorted(target_serials - reset_serials)
+        if missing_serials:
+            logger.warning(
+                "[CAM] hardware reset on %s could not see configured camera serial(s): %s. "
+                "If a camera is wedged in USB/UVC, run tools-reset-rs --mode sysfs --all with sudo.",
+                reason,
+                missing_serials,
             )
-            thread.start()
-            self._camera_threads[cam_name] = thread
-            logger.info("[CAM] %s connected", cam_name)
+        if not reset_serials:
+            return
+
+        time.sleep(max(float(self.config.camera_reset_settle_sec), 0.0))
+        self._wait_for_realsense_serials(reset_serials, timeout_sec=self.config.camera_reset_timeout_sec)
+
+    @staticmethod
+    def _wait_for_realsense_serials(serials: set[str], timeout_sec: float) -> None:
+        try:
+            import pyrealsense2 as rs  # noqa: PLC0415
+        except ImportError:
+            return
+        deadline = time.monotonic() + max(float(timeout_sec), 0.0)
+        while time.monotonic() < deadline:
+            try:
+                current = {
+                    str(device.get_info(rs.camera_info.serial_number))
+                    for device in rs.context().query_devices()
+                }
+            except Exception:  # noqa: BLE001
+                current = set()
+            if serials.issubset(current):
+                return
+            time.sleep(0.5)
+        logger.warning("[CAM] timed out waiting for RealSense serial(s) after reset: %s", sorted(serials))
 
     def _warmup_camera(self, cam_name: str, cam: Any) -> None:
         attempts = max(int(self.config.camera_warmup_attempts), 1)
@@ -1337,16 +1484,34 @@ class FlexivDualArm(Robot):
             "other camera users, then replug this RealSense if needed."
         ) from last_error
 
+    def stop_cameras(self) -> None:
+        """Stop camera reader threads and release RealSense pipelines."""
+        self._stop_cameras()
+
     def _stop_cameras(self) -> None:
+        if not self.cameras:
+            return
         self._camera_stop_event.set()
-        for cam_name, thread in self._camera_threads.items():
-            thread.join(timeout=2.0)
+        join_timeout = max(float(self.config.camera_read_timeout_ms) / 1000.0 + 1.0, 2.0)
+        for cam_name, thread in list(self._camera_threads.items()):
+            thread.join(timeout=join_timeout)
             if thread.is_alive():
                 logger.warning("[CAM] %s thread did not stop cleanly", cam_name)
         self._camera_threads.clear()
-        self._latest_frames.clear()
-        for cam in self.cameras.values():
-            cam.disconnect()
+        with self._frame_lock:
+            self._latest_frames.clear()
+        for cam_name, cam in self.cameras.items():
+            is_connected_attr = getattr(cam, "is_connected", False)
+            is_connected = bool(is_connected_attr() if callable(is_connected_attr) else is_connected_attr)
+            if cam_name not in self._connected_cameras and not is_connected:
+                continue
+            try:
+                cam.disconnect()
+                logger.info("[CAM] %s disconnected", cam_name)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[CAM] %s disconnect failed: %s", cam_name, exc)
+            finally:
+                self._connected_cameras.discard(cam_name)
 
     def _camera_read_loop(self, cam_name: str, cam: Any) -> None:
         timeout_ms = max(int(self.config.camera_read_timeout_ms), 200)
