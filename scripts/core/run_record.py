@@ -432,6 +432,15 @@ class RecordConfig:
         self.head_cam_serial: str = cam["head_cam_serial"]
         self.cam_width: int = cam["width"]
         self.cam_height: int = cam["height"]
+        self.save_depth_sidecar: bool = bool(cfg.get("save_depth_sidecar", True))
+        self.save_ir_sidecar: bool = bool(cfg.get("save_ir_sidecar", True))
+        self.save_rgbd_timestamps: bool = bool(cfg.get("save_rgbd_timestamps", True))
+        self.rgb_camera_name_mode: str = str(cfg.get("rgb_camera_name_mode", "rgb")).strip().lower()
+        if self.rgb_camera_name_mode not in {"rgb", "legacy_image"}:
+            raise ValueError(
+                "`record.rgb_camera_name_mode` must be 'rgb' or 'legacy_image'. "
+                f"Got: {self.rgb_camera_name_mode!r}"
+            )
         
         # Storage config
         self.push_to_hub: bool = storage.get("push_to_hub", False)
@@ -1408,7 +1417,8 @@ def run_record(record_cfg: RecordConfig):
                                         width=record_cfg.cam_width,
                                         height=record_cfg.cam_height,
                                         color_mode=ColorMode.RGB,
-                                        use_depth=False,
+                                        use_depth=record_cfg.save_depth_sidecar,
+                                        use_ir=record_cfg.save_ir_sidecar,
                                         rotation=Cv2Rotation.NO_ROTATION)
 
         right_wrist_image_cfg = RealSenseCameraConfig(
@@ -1417,7 +1427,8 @@ def run_record(record_cfg: RecordConfig):
                                         width=record_cfg.cam_width,
                                         height=record_cfg.cam_height,
                                         color_mode=ColorMode.RGB,
-                                        use_depth=False,
+                                        use_depth=record_cfg.save_depth_sidecar,
+                                        use_ir=record_cfg.save_ir_sidecar,
                                         rotation=Cv2Rotation.NO_ROTATION)
 
         head_image_cfg = RealSenseCameraConfig(
@@ -1426,15 +1437,23 @@ def run_record(record_cfg: RecordConfig):
                                         width=record_cfg.cam_width,
                                         height=record_cfg.cam_height,
                                         color_mode=ColorMode.RGB,
-                                        use_depth=False,
+                                        use_depth=record_cfg.save_depth_sidecar,
+                                        use_ir=record_cfg.save_ir_sidecar,
                                         rotation=Cv2Rotation.NO_ROTATION)
 
         # Create the robot and teleoperator configurations
-        camera_config = {
-            "left_wrist_image": left_wrist_image_cfg,
-            "right_wrist_image": right_wrist_image_cfg,
-            "head_image": head_image_cfg,
-        }
+        if record_cfg.rgb_camera_name_mode == "legacy_image":
+            camera_config = {
+                "left_wrist_image": left_wrist_image_cfg,
+                "right_wrist_image": right_wrist_image_cfg,
+                "head_image": head_image_cfg,
+            }
+        else:
+            camera_config = {
+                "left_wrist_rgb": left_wrist_image_cfg,
+                "right_wrist_rgb": right_wrist_image_cfg,
+                "head_rgb": head_image_cfg,
+            }
         
         # Create teleop config using the new method
         teleop_config = record_cfg.create_teleop_config()
@@ -1452,6 +1471,9 @@ def run_record(record_cfg: RecordConfig):
             "close_threshold": record_cfg.close_threshold,
             "gripper_reverse": record_cfg.gripper_reverse,
             "control_mode": record_cfg.control_mode,
+            "save_depth_sidecar": record_cfg.save_depth_sidecar,
+            "save_ir_sidecar": record_cfg.save_ir_sidecar,
+            "save_rgbd_timestamps": record_cfg.save_rgbd_timestamps,
             **record_cfg.robot_extra_config,
         }
         robot_config = create_robot_config(
@@ -1466,6 +1488,7 @@ def run_record(record_cfg: RecordConfig):
         action_features = hw_to_dataset_features(robot.action_features, "action")
         obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)
         dataset_features = {**action_features, **obs_features}
+        dataset_features.update(getattr(robot, "dataset_extra_features", {}))
         if record_cfg.run_mode == RUN_MODE_MIX:
             # Extend dataset schema for DAgger mixed collection metadata.
             action_feature = dataset_features[ACTION]

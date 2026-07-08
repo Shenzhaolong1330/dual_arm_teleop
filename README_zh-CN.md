@@ -260,6 +260,8 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - `record.repo_id`：数据集名称，建议使用 `<robot_task<num>_step<num>/<description>`，例如 `nero_task3_step1/2mL_empty_right`。
 - `record.robot_type`：选择 `nero_dual_arm`、`franka_dual_arm`、`flexiv_dual_arm` 等机器人类型。
 - `record.run_mode`：选择 `run_record`、`run_policy` 或 `run_mix`。
+- `record.save_depth_sidecar`、`record.save_ir_sidecar`、`record.save_rgbd_timestamps`：把 RealSense 原生 depth、左右 IR、`global_frame_index`、`robot_timestamp` 和每个相机的 RGB-D timestamp 保存为非 image 的 parquet sidecar 字段。
+- `record.rgb_camera_name_mode`：`rgb` 会把 RGB 视频保存为 `observation.images.head_rgb`、`observation.images.left_wrist_rgb`、`observation.images.right_wrist_rgb`；只有旧 checkpoint 仍依赖历史 `*_image` key 时才改成 `legacy_image`。
 - `record.policy.type`、`config_path`、`pretrained_path`：仅在 `run_policy` 或 `run_mix` 时需要确认。
 - `record.task`：任务描述、episode 数量、是否 resume、是否记录 success。
 - `record.time`：episode 最大时长、reset 时长和 metadata 保存周期。
@@ -273,6 +275,8 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - 对于 `flexiv_dual_arm`，需要在 `scripts/config/robots/flexiv_config.yaml` 中填写 `robot.left_robot_sn`、`robot.right_robot_sn`、Flexiv 夹爪/工具名称、home 关节角和笛卡尔安全限制。真实硬件控制还要求当前 Python 环境安装 `flexivrdk` 和 `spdlog`。
 - `robot.use_gripper` 和夹爪参数：夹爪启用、开合阈值、最大开口和力。
 - `cameras.*_serial`、`width`、`height`：RealSense 序列号和分辨率。
+
+RGB-D sidecar 采集方式是：RGB 保持为标准 LeRobot video 字段，depth/IR 保存为 `sidecar.head_depth`、`sidecar.head_left_ir`、`sidecar.head_right_ir` 等 parquet 数组字段。Flexiv 相机后台线程读失败时会复用上一组有效 RGB-D/IR frameset，并在对应 `*_rgbd_reused` 字段标记；如果启动阶段从未读到有效 frameset，则直接失败，不写空帧。
 
 训练前通常需要修改 `scripts/config/train_cfg.yaml`：
 
@@ -402,6 +406,9 @@ robot-record --config scripts/config/record_cfg.yaml
 # 5. 可视化或回放数据
 robot-visualize --config scripts/config/record_cfg.yaml
 robot-replay --config scripts/config/record_cfg.yaml
+
+# 检查 RGB-D/IR sidecar 字段
+python scripts/check_rgbd_sidecar_dataset.py --repo-id <your_repo_id>
 
 # 6. 训练策略
 robot-train --config scripts/config/train_cfg.yaml

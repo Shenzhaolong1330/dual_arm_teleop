@@ -20,7 +20,11 @@ record:
   user_notes: "Flexiv Rizon4s dual-arm Oculus teleop template; fill serial numbers and cameras before real collection."
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_policy" # run_record | run_policy | run_mix
+  run_mode: "run_record" # run_record | run_policy | run_mix
+  save_depth_sidecar: true # save native RealSense depth as sidecar.* parquet arrays
+  save_ir_sidecar: true # save left/right RealSense IR as sidecar.* parquet arrays
+  save_rgbd_timestamps: true # save global_frame_index, robot_timestamp, and per-camera RealSense timestamps
+  rgb_camera_name_mode: "rgb" # rgb -> head_rgb/left_wrist_rgb/right_wrist_rgb; legacy_image keeps old *_image keys for old checkpoints
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.

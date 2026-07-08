@@ -261,6 +261,8 @@ Before data collection, usually edit `scripts/config/record_cfg.yaml`:
 - `record.repo_id`: dataset name. Recommended format: `<robot_task<num>_step<num>/<description>`, for example `nero_task3_step1/2mL_empty_right`.
 - `record.robot_type`: choose a robot type such as `nero_dual_arm`, `franka_dual_arm`, or `flexiv_dual_arm`.
 - `record.run_mode`: choose `run_record`, `run_policy`, or `run_mix`.
+- `record.save_depth_sidecar`, `record.save_ir_sidecar`, `record.save_rgbd_timestamps`: save native RealSense depth, left/right IR, `global_frame_index`, `robot_timestamp`, and per-camera RGB-D timestamps as non-image parquet sidecar fields.
+- `record.rgb_camera_name_mode`: `rgb` records RGB video as `observation.images.head_rgb`, `observation.images.left_wrist_rgb`, and `observation.images.right_wrist_rgb`; use `legacy_image` only when an old checkpoint expects the previous `*_image` keys.
 - `record.policy.type`, `config_path`, `pretrained_path`: required only for `run_policy` or `run_mix`.
 - `record.task`: task description, number of episodes, resume behavior, and whether to record success labels.
 - `record.time`: max episode duration, reset duration, and metadata save period.
@@ -274,6 +276,8 @@ Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
 - For `flexiv_dual_arm`, set `robot.left_robot_sn`, `robot.right_robot_sn`, Flexiv gripper/tool names, home joints, and Cartesian safety limits in `scripts/config/robots/flexiv_config.yaml`. Flexiv hardware control also requires `flexivrdk` and `spdlog` in the active Python environment.
 - `robot.use_gripper` and gripper parameters: enable grippers, close/open thresholds, max opening width, and force.
 - `cameras.*_serial`, `width`, `height`: RealSense serial numbers and resolution.
+
+RGB-D sidecar recording keeps RGB in the normal LeRobot video fields and stores depth/IR as parquet arrays such as `sidecar.head_depth`, `sidecar.head_left_ir`, and `sidecar.head_right_ir`. Flexiv camera reader threads reuse the last valid RGB-D/IR frameset after a read failure and mark the corresponding `*_rgbd_reused` field; startup still fails if no valid frameset has ever been captured.
 
 Before training, usually edit `scripts/config/train_cfg.yaml`:
 
@@ -403,6 +407,9 @@ robot-record --config scripts/config/record_cfg.yaml
 # 5. Visualize or replay data
 robot-visualize --config scripts/config/record_cfg.yaml
 robot-replay --config scripts/config/record_cfg.yaml
+
+# Check RGB-D/IR sidecar fields
+python scripts/check_rgbd_sidecar_dataset.py --repo-id <your_repo_id>
 
 # 6. Train a policy
 robot-train --config scripts/config/train_cfg.yaml

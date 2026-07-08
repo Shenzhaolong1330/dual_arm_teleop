@@ -122,6 +122,7 @@ class FlexivDualArm(Robot):
         self._connected_cameras: set[str] = set()
         self._frame_lock = threading.Lock()
         self._latest_frames: dict[str, Any] = {}
+        self._global_frame_index = 0
         self._action_debug_count = 0
         self._timing_debug_counts: dict[str, int] = {}
 
@@ -1320,6 +1321,9 @@ class FlexivDualArm(Robot):
             right_start_t = time.perf_counter()
             self._add_arm_observation(obs, "right", self._right_robot)
             timing["right_state_ms"] = (time.perf_counter() - right_start_t) * 1000.0
+            if self.config.save_rgbd_timestamps:
+                obs["global_frame_index"] = self._next_global_frame_index()
+                obs["robot_timestamp"] = time.time()
             camera_start_t = time.perf_counter()
             self._add_camera_observations(obs)
             timing["camera_ms"] = (time.perf_counter() - camera_start_t) * 1000.0
@@ -1330,8 +1334,23 @@ class FlexivDualArm(Robot):
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FLEXIV] get_observation failed: %s", exc)
             if self._prev_observation is not None:
-                return self._prev_observation
+                return self._mark_reused_observation(dict(self._prev_observation))
             raise
+
+    def _next_global_frame_index(self) -> int:
+        frame_index = self._global_frame_index
+        self._global_frame_index += 1
+        return frame_index
+
+    def _mark_reused_observation(self, obs: dict[str, Any]) -> dict[str, Any]:
+        if not self.config.save_rgbd_timestamps:
+            return obs
+        obs["global_frame_index"] = self._next_global_frame_index()
+        obs["robot_timestamp"] = time.time()
+        for cam_name in self.cameras:
+            base_name = self._camera_base_name(cam_name)
+            obs[f"{base_name}_rgbd_reused"] = True
+        return obs
 
     def _add_arm_observation(self, obs: dict[str, Any], side: str, robot: Any) -> None:
         robot_lock = self._left_robot_lock if side == "left" else self._right_robot_lock
@@ -1481,7 +1500,7 @@ class FlexivDualArm(Robot):
         last_error: Exception | None = None
         for attempt in range(1, attempts + 1):
             try:
-                frame = cam.read(timeout_ms=timeout_ms)
+                frame = self._capture_camera_frame(cam)
                 with self._frame_lock:
                     self._latest_frames[cam_name] = frame
                 if attempt > 1:
@@ -1529,24 +1548,70 @@ class FlexivDualArm(Robot):
         timeout_ms = max(int(self.config.camera_read_timeout_ms), 200)
         while not self._camera_stop_event.is_set():
             try:
-                frame = cam.read(timeout_ms=timeout_ms)
+                frame = self._capture_camera_frame(cam, timeout_ms=timeout_ms)
                 with self._frame_lock:
                     self._latest_frames[cam_name] = frame
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[CAM] %s read failed: %s", cam_name, exc)
+                self._mark_latest_camera_frame_reused(cam_name)
                 self._camera_stop_event.wait(timeout=0.1)
+
+    def _capture_camera_frame(self, cam: Any, timeout_ms: int | None = None) -> Any:
+        timeout = max(int(timeout_ms or self.config.camera_read_timeout_ms), 200)
+        needs_rgbd_frame = self.config.save_depth_sidecar or self.config.save_ir_sidecar or self.config.save_rgbd_timestamps
+        if needs_rgbd_frame and hasattr(cam, "read_rgbd_ir"):
+            return cam.read_rgbd_ir(timeout_ms=timeout)
+        return cam.read(timeout_ms=timeout)
+
+    def _mark_latest_camera_frame_reused(self, cam_name: str) -> None:
+        with self._frame_lock:
+            frame = self._latest_frames.get(cam_name)
+            if isinstance(frame, dict):
+                reused = dict(frame)
+                reused["reused"] = True
+                self._latest_frames[cam_name] = reused
 
     def _add_camera_observations(self, obs: dict[str, Any]) -> None:
         if not self.cameras:
             return
         with self._frame_lock:
-            for cam_name in self.cameras:
-                if cam_name in self._latest_frames:
-                    obs[cam_name] = self._latest_frames[cam_name]
-                else:
-                    obs[cam_name] = self.cameras[cam_name].read(
-                        timeout_ms=max(int(self.config.camera_read_timeout_ms), 200)
-                    )
+            latest_frames = {cam_name: self._latest_frames.get(cam_name) for cam_name in self.cameras}
+        for cam_name, cam in self.cameras.items():
+            frame = latest_frames.get(cam_name)
+            if frame is None:
+                frame = self._capture_camera_frame(cam)
+            self._add_camera_frame_observation(obs, cam_name, frame)
+
+    @staticmethod
+    def _camera_base_name(cam_name: str) -> str:
+        if cam_name.endswith("_rgb"):
+            return cam_name.removesuffix("_rgb")
+        if cam_name.endswith("_image"):
+            return cam_name.removesuffix("_image")
+        return cam_name
+
+    def _add_camera_frame_observation(self, obs: dict[str, Any], cam_name: str, frame: Any) -> None:
+        if not isinstance(frame, dict):
+            obs[cam_name] = frame
+            return
+
+        base_name = self._camera_base_name(cam_name)
+        obs[cam_name] = frame["rgb"]
+
+        if self.config.save_depth_sidecar:
+            if frame.get("depth") is None:
+                raise RuntimeError(f"Camera {cam_name} did not provide a depth frame.")
+            obs[f"sidecar.{base_name}_depth"] = frame["depth"]
+
+        if self.config.save_ir_sidecar:
+            if frame.get("left_ir") is None or frame.get("right_ir") is None:
+                raise RuntimeError(f"Camera {cam_name} did not provide both IR frames.")
+            obs[f"sidecar.{base_name}_left_ir"] = frame["left_ir"]
+            obs[f"sidecar.{base_name}_right_ir"] = frame["right_ir"]
+
+        if self.config.save_rgbd_timestamps:
+            obs[f"{base_name}_rgbd_timestamp"] = float(frame["timestamp"])
+            obs[f"{base_name}_rgbd_reused"] = bool(frame.get("reused", False))
 
     @property
     def _motors_ft(self) -> dict[str, type]:
@@ -1579,6 +1644,47 @@ class FlexivDualArm(Robot):
     @property
     def observation_features(self) -> dict[str, Any]:
         return {**self._motors_ft, **self._cameras_ft}
+
+    @property
+    def dataset_extra_features(self) -> dict[str, dict[str, Any]]:
+        features: dict[str, dict[str, Any]] = {}
+        for cam_name, cam in self.cameras.items():
+            base_name = self._camera_base_name(cam_name)
+            shape = (int(cam.height), int(cam.width))
+            if self.config.save_depth_sidecar:
+                features[f"sidecar.{base_name}_depth"] = {
+                    "dtype": "uint16",
+                    "shape": shape,
+                    "names": ["height", "width"],
+                }
+            if self.config.save_ir_sidecar:
+                features[f"sidecar.{base_name}_left_ir"] = {
+                    "dtype": "uint8",
+                    "shape": shape,
+                    "names": ["height", "width"],
+                }
+                features[f"sidecar.{base_name}_right_ir"] = {
+                    "dtype": "uint8",
+                    "shape": shape,
+                    "names": ["height", "width"],
+                }
+            if self.config.save_rgbd_timestamps:
+                features[f"{base_name}_rgbd_timestamp"] = {
+                    "dtype": "float64",
+                    "shape": (1,),
+                    "names": None,
+                }
+                features[f"{base_name}_rgbd_reused"] = {
+                    "dtype": "bool",
+                    "shape": (1,),
+                    "names": None,
+                }
+
+        if self.config.save_rgbd_timestamps:
+            features["global_frame_index"] = {"dtype": "int64", "shape": (1,), "names": None}
+            features["robot_timestamp"] = {"dtype": "float64", "shape": (1,), "names": None}
+
+        return features
 
     @property
     def _cameras_ft(self) -> dict[str, tuple[int, int, int]]:

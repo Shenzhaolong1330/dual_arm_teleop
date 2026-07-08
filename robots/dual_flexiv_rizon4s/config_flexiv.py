@@ -90,6 +90,9 @@ class FlexivDualArmConfig(RobotConfig):
     camera_hardware_reset_on_release: bool = False
     camera_reset_settle_sec: float = 6.0
     camera_reset_timeout_sec: float = 20.0
+    save_depth_sidecar: bool = False
+    save_ir_sidecar: bool = False
+    save_rgbd_timestamps: bool = False
 
     # Compatibility fields accepted from the generic record config parser.
     robot_ip: str = "localhost"

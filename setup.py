@@ -40,6 +40,7 @@ setup(
             # tools commands (helper tools)
             "tools-check-dataset = scripts.tools.check_dataset_info:main",
             "tools-check-dagger-dataset = scripts.tools.check_dagger_dataset:main",
+            "tools-check-rgbd-sidecar = scripts.check_rgbd_sidecar_dataset:main",
             "tools-check-rs = scripts.tools.rs_devices:main",
             "tools-reset-rs = scripts.tools.reset_realsense_usb:main",
             "tools-preprocess-dataset = scripts.tools.preprocess_dataset:main",
