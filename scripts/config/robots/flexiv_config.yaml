@@ -102,5 +102,5 @@ cameras:
   left_wrist_cam_serial: "347622074728"
   right_wrist_cam_serial: "346522076690"
   head_cam_serial: "344522070241"
-  width: 424
-  height: 240
+  width: 640
+  height: 480

@@ -1388,6 +1388,53 @@ def _disconnect_teleop(teleop: Any | None) -> bool:
     return _safe_cleanup_call("teleop disconnect", teleop.disconnect)
 
 
+def _save_realsense_calibration_for_session(
+    record_cfg: RecordConfig,
+    robot: Any,
+    dataset_root: Path,
+    dataset_name: str,
+) -> None:
+    target_robot = getattr(robot, "_robot", robot)
+    cameras = getattr(target_robot, "cameras", None)
+    if not cameras:
+        return
+
+    try:
+        from scripts.tools.export_realsense_calibration import (  # noqa: PLC0415
+            export_connected_realsense_calibrations,
+        )
+
+        calibration_dir = Path(dataset_root) / "meta" / "calibration"
+        manifest_path = Path(dataset_root) / "meta" / "realsense_calibration.json"
+        written = export_connected_realsense_calibrations(
+            cameras,
+            output_dir=calibration_dir,
+            manifest_path=manifest_path,
+            session_metadata={
+                "source": "robot_record",
+                "repo_id": dataset_name,
+                "dataset_root": str(dataset_root),
+                "robot_type": record_cfg.robot_type,
+                "camera_profile": {
+                    "width": int(record_cfg.cam_width),
+                    "height": int(record_cfg.cam_height),
+                    "fps": int(record_cfg.fps),
+                },
+                "logical_cameras": list(cameras.keys()),
+            },
+        )
+        logging.info("[CALIB] saved RealSense calibration manifest: %s", manifest_path)
+        for logical_name, path in sorted(written.items()):
+            if logical_name == "manifest":
+                continue
+            logging.info("[CALIB] saved %s calibration: %s", logical_name, path)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "[CALIB] failed to export RealSense calibration; recording will continue: %s",
+            exc,
+        )
+
+
 def run_record(record_cfg: RecordConfig):
     print("====== [START] Starting recording ======")
     dataset_name = None
@@ -1636,6 +1683,7 @@ def run_record(record_cfg: RecordConfig):
             )
 
         robot.connect()
+        _save_realsense_calibration_for_session(record_cfg, robot, dataset_root, dataset_name)
         if teleop is not None:
             teleop.connect()
         loop_robot = ResetHomeOnRequestRobot(robot) if teleop is not None else robot
