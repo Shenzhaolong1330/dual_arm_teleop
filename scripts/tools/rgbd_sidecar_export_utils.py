@@ -100,6 +100,11 @@ def scalar_or_none(value: Any) -> float | int | bool | None:
     return item
 
 
+def raw_hf_sample(dataset: LeRobotDataset, dataset_index: int) -> dict[str, Any]:
+    """Read one row without the dataset-wide torch format that downcasts timestamps."""
+    return dataset.hf_dataset.with_format(None)[dataset_index]
+
+
 def rgb_to_uint8_hwc(value: Any) -> np.ndarray:
     image = as_numpy(value)
     if image.ndim != 3:

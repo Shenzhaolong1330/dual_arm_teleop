@@ -19,6 +19,7 @@ from scripts.tools.rgbd_sidecar_export_utils import (
     grayscale_to_uint8,
     require_keys,
     resolve_dataset,
+    raw_hf_sample,
     rgb_to_uint8_hwc,
     sanitize_name,
     scalar_or_none,
@@ -56,7 +57,7 @@ def main() -> None:
 
     dataset_index = global_index_for_episode_frame(dataset, args.episode, args.frame_index)
     sample = dataset[dataset_index]
-    raw_sample = dataset.hf_dataset[dataset_index]
+    raw_sample = raw_hf_sample(dataset, dataset_index)
 
     out_dir = args.output_dir or default_output_dir(dataset, "rgbd_sidecar_preview")
     prefix = (

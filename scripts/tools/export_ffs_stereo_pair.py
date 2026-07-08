@@ -17,6 +17,7 @@ from scripts.tools.rgbd_sidecar_export_utils import (
     grayscale_to_uint8,
     require_keys,
     resolve_dataset,
+    raw_hf_sample,
     sanitize_name,
     scalar_or_none,
     sidecar_keys,
@@ -45,7 +46,7 @@ def main() -> None:
     require_keys(dataset.features, [sidecar["left_ir"], sidecar["right_ir"]])
 
     dataset_index = global_index_for_episode_frame(dataset, args.episode, args.frame_index)
-    raw_sample = dataset.hf_dataset[dataset_index]
+    raw_sample = raw_hf_sample(dataset, dataset_index)
 
     out_dir = args.output_dir or default_output_dir(dataset, "ffs_stereo_pair")
     prefix = (
