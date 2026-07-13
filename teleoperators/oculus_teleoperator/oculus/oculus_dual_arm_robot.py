@@ -195,6 +195,8 @@ class OculusDualArmRobot(Robot):
         
         # Reset request
         self._reset_requested = False
+        self._x_button_pressed = False
+        self._y_button_pressed = False
         self._left_grip_pressed = False
         self._right_grip_pressed = False
         self._left_trigger_value = 0.0
@@ -452,10 +454,14 @@ class OculusDualArmRobot(Robot):
         lg_pressed = buttons.get('LG', False)
         rg_pressed = buttons.get('RG', False)
         a_pressed = buttons.get('A', False)
+        x_pressed = buttons.get('X', False)
+        y_pressed = buttons.get('Y', False)
         left_release_requested = bool(buttons.get('Y', False))
         right_release_requested = bool(buttons.get('B', False))
         
         self._reset_requested = bool(a_pressed)
+        self._x_button_pressed = bool(x_pressed)
+        self._y_button_pressed = bool(y_pressed)
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
@@ -644,6 +650,8 @@ class OculusDualArmRobot(Robot):
         obs_dict["right_trigger_pressed"] = bool(self._right_trigger_pressed)
         obs_dict["left_gripper_release_requested"] = bool(self._left_gripper_release_requested)
         obs_dict["right_gripper_release_requested"] = bool(self._right_gripper_release_requested)
+        obs_dict["x_button_pressed"] = bool(self._x_button_pressed)
+        obs_dict["y_button_pressed"] = bool(self._y_button_pressed)
         
         # Reset request flag
         obs_dict["reset_requested"] = self._reset_requested

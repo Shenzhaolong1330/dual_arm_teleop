@@ -19,7 +19,6 @@ from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
 from lerobot.scripts.lerobot_record import record_loop
 from lerobot.processor import make_default_processors
 from lerobot.utils.visualization_utils import init_rerun
-from lerobot.utils.control_utils import init_keyboard_listener
 # from send2trash import send2trash
 import shutil
 import termios, sys
@@ -93,6 +92,15 @@ RUN_MODE_POLICY = "run_policy"
 RUN_MODE_MIX = "run_mix"
 POLICY_RUN_MODES = {RUN_MODE_POLICY, RUN_MODE_MIX}
 VALID_RUN_MODES = {RUN_MODE_RECORD, RUN_MODE_POLICY, RUN_MODE_MIX}
+EPISODE_CONTROL_KEYBOARD = "keyboard"
+EPISODE_CONTROL_OCULUS = "oculus"
+VALID_EPISODE_CONTROL_MODES = {
+    EPISODE_CONTROL_KEYBOARD,
+    EPISODE_CONTROL_OCULUS,
+}
+EPISODE_PHASE_WAITING = "waiting"
+EPISODE_PHASE_RECORDING = "recording"
+EPISODE_PHASE_RESETTING = "resetting"
 GRIPPER_COMMAND_KEY_CANDIDATES = {
     "left": ("left_gripper_cmd", "left_gripper_cmd_bin"),
     "right": ("right_gripper_cmd", "right_gripper_cmd_bin"),
@@ -132,6 +140,182 @@ class ResetHomeOnRequestRobot:
             return action
 
         return self._robot.send_action(action)
+
+
+def _new_episode_events() -> dict[str, Any]:
+    return {
+        "exit_early": False,
+        "rerecord_episode": False,
+        "stop_recording": False,
+        "start_recording": False,
+        "episode_phase": EPISODE_PHASE_WAITING,
+    }
+
+
+def _set_episode_phase(events: dict[str, Any], phase: str) -> None:
+    events["episode_phase"] = phase
+    if phase != EPISODE_PHASE_RECORDING:
+        events["exit_early"] = False
+        events["rerecord_episode"] = False
+    if phase != EPISODE_PHASE_WAITING:
+        events["start_recording"] = False
+
+
+def _request_episode_start_or_save(events: dict[str, Any], *, source: str) -> str:
+    phase = events.get("episode_phase", EPISODE_PHASE_WAITING)
+    if phase == EPISODE_PHASE_WAITING:
+        events["start_recording"] = True
+        logging.info("[record] %s requested episode start.", source)
+        return "start"
+    if phase == EPISODE_PHASE_RECORDING:
+        events["exit_early"] = True
+        logging.info("[record] %s requested episode save.", source)
+        return "save"
+    logging.info("[record] Ignoring %s while reset-home is in progress.", source)
+    return "ignored"
+
+
+def _request_episode_discard(events: dict[str, Any], *, source: str) -> str:
+    phase = events.get("episode_phase", EPISODE_PHASE_WAITING)
+    if phase != EPISODE_PHASE_RECORDING:
+        logging.info("[record] Ignoring %s because no episode is being recorded.", source)
+        return "ignored"
+    events["rerecord_episode"] = True
+    events["exit_early"] = True
+    logging.info("[record] %s requested current episode discard.", source)
+    return "discard"
+
+
+class EpisodeButtonController:
+    """Convert Quest X/Y button edges into the shared episode event state."""
+
+    def __init__(self, events: dict[str, Any]):
+        self.events = events
+        self._x_latched = False
+        self._y_latched = False
+
+    def consume(self, action: dict[str, Any]) -> dict[str, Any]:
+        x_pressed = bool(action.pop("x_button_pressed", False))
+        y_pressed = bool(action.pop("y_button_pressed", False))
+        x_edge = x_pressed and not self._x_latched
+        y_edge = y_pressed and not self._y_latched
+        self._x_latched = x_pressed
+        self._y_latched = y_pressed
+
+        # In controller mode Y is reserved for episode discard, so it must not
+        # also propagate a gripper-release request. Mirror mode may route the
+        # physical left-controller Y signal to either logical arm.
+        if y_pressed:
+            action.pop("left_gripper_release_requested", None)
+            action.pop("right_gripper_release_requested", None)
+        if y_edge:
+            _request_episode_discard(self.events, source="Quest Y")
+        elif x_edge:
+            _request_episode_start_or_save(self.events, source="Quest X")
+        return action
+
+
+class EpisodeControlOculusTeleop(OculusTeleop):
+    """Oculus teleop that optionally consumes X/Y as episode controls."""
+
+    def __init__(self, config: OculusTeleopConfig, *, events: dict[str, Any], enabled: bool):
+        super().__init__(config)
+        self._episode_button_controller = EpisodeButtonController(events) if enabled else None
+
+    def _get_action_impl(self) -> dict[str, Any]:
+        action = super()._get_action_impl()
+        if self._episode_button_controller is not None:
+            return self._episode_button_controller.consume(action)
+        # Do not leak session-control-only fields into robot actions or datasets.
+        action.pop("x_button_pressed", None)
+        action.pop("y_button_pressed", None)
+        return action
+
+
+def init_episode_keyboard_listener(events: dict[str, Any]):
+    """Listen only for right=start/save and left=discard; Ctrl+C ends the session."""
+
+    try:
+        from pynput import keyboard
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "Keyboard episode control is unavailable. Use "
+            "record.task.episode_control_mode: oculus for keyboard-free collection."
+        ) from exc
+
+    pressed: set[Any] = set()
+
+    def on_press(key):
+        if key in pressed:
+            return
+        pressed.add(key)
+        try:
+            if key == keyboard.Key.right:
+                _request_episode_start_or_save(events, source="Right arrow")
+            elif key == keyboard.Key.left:
+                _request_episode_discard(events, source="Left arrow")
+        except Exception as exc:  # noqa: BLE001
+            logging.error("Error handling episode key press: %s", exc)
+
+    def on_release(key):
+        pressed.discard(key)
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
+    return listener
+
+
+def _stop_episode_keyboard_listener(listener: Any | None) -> None:
+    if listener is None:
+        return
+    try:
+        listener.stop()
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("[record] Failed to stop keyboard listener: %s", exc)
+
+
+def _wait_for_episode_start(
+    *,
+    events: dict[str, Any],
+    robot: Any,
+    teleop: Any | None,
+    teleop_action_processor: Any,
+    robot_action_processor: Any,
+    episode_index: int,
+    num_episodes: int,
+    fps: int,
+    control_mode: str,
+) -> bool:
+    _set_episode_phase(events, EPISODE_PHASE_WAITING)
+    control = "Right arrow" if control_mode == EPISODE_CONTROL_KEYBOARD else "Quest X"
+    logging.info(
+        "====== [WAIT] Episode %d of %d is ready. Press %s to start recording. ======",
+        episode_index + 1,
+        num_episodes,
+        control,
+    )
+    control_period_s = 1.0 / max(1, int(fps))
+    while not events["start_recording"] and not events["stop_recording"]:
+        loop_start_t = time.perf_counter()
+        # Keep Quest teleoperation live between episodes without passing a dataset
+        # or frame sink, so positioning actions reach the robot but no waiting-state
+        # observation/action is recorded.
+        if teleop is not None:
+            raw_obs = robot.get_observation()
+            raw_action = teleop.get_action()
+            teleop_action = teleop_action_processor((raw_action, raw_obs))
+            robot_action = robot_action_processor((teleop_action, raw_obs))
+            robot.send_action(robot_action)
+        busy_wait(control_period_s - (time.perf_counter() - loop_start_t))
+    if events["stop_recording"]:
+        return False
+    _set_episode_phase(events, EPISODE_PHASE_RECORDING)
+    return True
+
+
+def _reset_home_after_episode(robot: Any, *, outcome: str) -> None:
+    logging.info("====== [RESET_HOME] Episode %s; returning robot home automatically. ======", outcome)
+    robot.reset()
 
 
 def _default_scripts_dir() -> Path:
@@ -415,6 +599,19 @@ class RecordConfig:
         self.task_description: str = task.get("description", "default task")
         self.resume: bool = task.get("resume", False)
         self.resume_dataset: str = task.get("resume_dataset", "")
+        self.episode_control_mode = str(
+            task.get("episode_control_mode", EPISODE_CONTROL_KEYBOARD)
+        ).strip().lower()
+        if self.episode_control_mode not in VALID_EPISODE_CONTROL_MODES:
+            raise ValueError(
+                "`record.task.episode_control_mode` must be 'keyboard' or 'oculus'. "
+                f"Got: {self.episode_control_mode!r}"
+            )
+        if self.episode_control_mode == EPISODE_CONTROL_OCULUS and self.run_mode == RUN_MODE_POLICY:
+            raise ValueError(
+                "`record.task.episode_control_mode: oculus` requires run_record or run_mix "
+                "because run_policy does not create an Oculus teleoperator."
+            )
         self.success_policy: str = _normalize_record_success_policy(task)
         self.annotate_success: bool = bool(task.get("annotate_success", False))
         self.default_success: bool = bool(task.get("default_success", False))
@@ -618,7 +815,7 @@ def handle_incomplete_dataset(dataset_path, *, preserve: bool = False):
             )
             return
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
-        ans = input("Do you want to delete it? (y/n): ").strip().lower()
+        ans = input("Do you want to delete the entire incomplete dataset folder? (y/n): ").strip().lower()
         if ans == "y":
             print(f"====== [DELETE] Removing folder: {dataset_path} ======")
             # Send to trash
@@ -1526,6 +1723,7 @@ def run_record(record_cfg: RecordConfig):
     teleop = None
     dataset = None
     sidecar_writer = None
+    keyboard_listener = None
     try:
         if record_cfg.dataset_name is not None:
             dataset_name = record_cfg.dataset_name
@@ -1676,12 +1874,13 @@ def run_record(record_cfg: RecordConfig):
         if record_cfg.run_mode == RUN_MODE_MIX:
             logging.info("====== [RUN_MIX] Mix mode config ======")
             logging.info(
-                "[run_mix] robot_type=%s control_mode=%s fps=%s episode_time=%s reset_time=%s",
+                "[run_mix] robot_type=%s control_mode=%s episode_control_mode=%s "
+                "fps=%s episode_time=%s",
                 record_cfg.robot_type,
                 record_cfg.control_mode,
+                record_cfg.episode_control_mode,
                 record_cfg.fps,
                 record_cfg.episode_time_sec,
-                record_cfg.reset_time_sec,
             )
             logging.info(
                 "[run_mix] policy=%s policy_device=%s pretrained_path=%s",
@@ -1733,13 +1932,9 @@ def run_record(record_cfg: RecordConfig):
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
 
-        # Initialize keyboard listener.
-        # Rerun visualization can introduce periodic stalls when transport is unstable,
-        # so only initialize it when display is explicitly enabled.
-        # Initialize keyboard listener.
-        # Rerun visualization can introduce periodic stalls when transport is unstable,
-        # so only initialize it when display is explicitly enabled.
-        _, events = init_keyboard_listener()
+        events = _new_episode_events()
+        if record_cfg.episode_control_mode == EPISODE_CONTROL_KEYBOARD:
+            keyboard_listener = init_episode_keyboard_listener(events)
         if record_cfg.display:
             init_rerun(session_name="recording")
 
@@ -1751,7 +1946,11 @@ def run_record(record_cfg: RecordConfig):
         # configure the teleop and policy
         if record_cfg.run_mode == RUN_MODE_RECORD:
             logging.info("====== [INFO] Running in teleoperation mode ======")
-            teleop = OculusTeleop(teleop_config)
+            teleop = EpisodeControlOculusTeleop(
+                teleop_config,
+                events=events,
+                enabled=record_cfg.episode_control_mode == EPISODE_CONTROL_OCULUS,
+            )
             policy = None
         elif record_cfg.run_mode == RUN_MODE_POLICY:
             logging.info("====== [INFO] Running in policy mode ======")
@@ -1760,7 +1959,11 @@ def run_record(record_cfg: RecordConfig):
         elif record_cfg.run_mode == RUN_MODE_MIX:
             logging.info("====== [INFO] Running in mixed mode ======")
             policy = make_policy(record_cfg.policy, ds_meta=dataset.meta)
-            teleop = OculusTeleop(teleop_config)
+            teleop = EpisodeControlOculusTeleop(
+                teleop_config,
+                events=events,
+                enabled=record_cfg.episode_control_mode == EPISODE_CONTROL_OCULUS,
+            )
         else:
             raise ValueError(
                 f"Unsupported run_mode: {record_cfg.run_mode}. "
@@ -1822,8 +2025,22 @@ def run_record(record_cfg: RecordConfig):
 
         episode_idx = 0
         run_mix_episode_stats: list[dict[str, Any]] = []
+        robot_at_home = False
 
         while episode_idx < record_cfg.num_episodes and not events["stop_recording"]:
+            if not _wait_for_episode_start(
+                events=events,
+                robot=loop_robot,
+                teleop=teleop,
+                teleop_action_processor=teleop_action_processor,
+                robot_action_processor=robot_action_processor,
+                episode_index=episode_idx,
+                num_episodes=record_cfg.num_episodes,
+                fps=record_cfg.fps,
+                control_mode=record_cfg.episode_control_mode,
+            ):
+                break
+            robot_at_home = False
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
             if record_cfg.run_mode == RUN_MODE_MIX:
                 mix_stats = run_mix_record_loop(
@@ -1875,12 +2092,10 @@ def run_record(record_cfg: RecordConfig):
                     frame_sink=sidecar_writer,
                 )
 
-            rerecord_requested = bool(events["rerecord_episode"])
-            if rerecord_requested:
-                logging.info("Re-recording episode requested: discard current episode and enter reset state.")
-                events["rerecord_episode"] = False
-                # Left arrow also sets exit_early=True. Clear it here so reset phase does not exit immediately.
-                events["exit_early"] = False
+            discard_requested = bool(events["rerecord_episode"])
+            episode_saved = False
+            if discard_requested:
+                logging.info("Discarding current episode before automatic reset-home.")
                 if sidecar_writer is not None:
                     sidecar_writer.rollback_episode()
                 if dataset.episode_buffer is not None:
@@ -1931,48 +2146,35 @@ def run_record(record_cfg: RecordConfig):
                         )
                         mix_stats["success_policy"] = record_cfg.success_policy
                     _save_episode_transaction(dataset, sidecar_writer)
+                    episode_saved = True
                 else:
                     logging.warning(
-                        "[run_mix] episode %d has no recorded frames; skip saving this episode.",
+                        "[run_mix] episode %d has no recorded frames; discard and retry it.",
                         episode_idx + 1,
                     )
             else:
                 _save_episode_transaction(dataset, sidecar_writer)
+                episode_saved = True
 
-            # Reset the environment between episodes, and also before a re-record attempt.
-            if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or rerecord_requested):
-                while True:
-                    termios.tcflush(sys.stdin, termios.TCIFLUSH)
-                    user_input = input("====== [WAIT] Press Enter to reset the environment ======")
-                    if user_input == "":
-                        break  
-                    else:
-                        logging.info("====== [WARNING] Please press only Enter to continue ======")
+            _set_episode_phase(events, EPISODE_PHASE_RESETTING)
+            _reset_home_after_episode(
+                robot,
+                outcome="saved" if episode_saved else "discarded",
+            )
+            robot_at_home = True
 
-                logging.info("====== [RESET] Resetting the environment ======")
-                record_loop(
-                    robot=loop_robot,
-                    events=events,
-                    fps=record_cfg.fps,
-                    teleop=teleop,
-                    teleop_action_processor=teleop_action_processor,
-                    robot_action_processor=robot_action_processor,
-                    robot_observation_processor=robot_observation_processor,
-                    control_time_s=record_cfg.reset_time_sec,
-                    single_task=record_cfg.task_description,
-                    display_data=record_cfg.display,
-                )
-
-            if rerecord_requested:
+            if not episode_saved:
                 continue
 
             episode_idx += 1
 
         # Clean up
         logging.info("Stop recording")
+        _stop_episode_keyboard_listener(keyboard_listener)
+        keyboard_listener = None
 
         # Reset robot to home position at the end (same intent as pressing A in teleop).
-        if record_cfg.reset_on_finish:
+        if record_cfg.reset_on_finish and not robot_at_home:
             try:
                 robot.reset()
             except Exception as reset_err:
@@ -2024,6 +2226,7 @@ def run_record(record_cfg: RecordConfig):
 
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
+        _stop_episode_keyboard_listener(keyboard_listener)
         if sidecar_writer is not None:
             _safe_cleanup_call(
                 "mark RGB-D sidecar failed",
@@ -2037,6 +2240,7 @@ def run_record(record_cfg: RecordConfig):
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
+        _stop_episode_keyboard_listener(keyboard_listener)
         if sidecar_writer is not None:
             _safe_cleanup_call(
                 "mark RGB-D sidecar interrupted",
@@ -2045,7 +2249,9 @@ def run_record(record_cfg: RecordConfig):
         _release_robot_without_stop(robot)
         _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path, preserve=record_cfg.use_zarr_rgbd_sidecar)
+        # Ctrl+C is an explicit operator abort: restore the original whole-folder
+        # deletion confirmation even for manifest-based Zarr recordings.
+        handle_incomplete_dataset(dataset_path, preserve=False)
         sys.exit(1)
 
 

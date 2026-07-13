@@ -266,8 +266,8 @@ Before data collection, usually edit `scripts/config/record_cfg.yaml`:
 - `record.rgbd_sidecar_zarr`: configures the relative store path, frame chunk size, bounded queue capacity, and compressor. The measured default is 8 frames with Blosc/LZ4 level 1 and bitshuffle.
 - `record.rgb_camera_name_mode`: `rgb` records RGB video as `observation.images.head_rgb`, `observation.images.left_wrist_rgb`, and `observation.images.right_wrist_rgb`; use `legacy_image` only when an old checkpoint expects the previous `*_image` keys.
 - `record.policy.type`, `config_path`, `pretrained_path`: required only for `run_policy` or `run_mix`.
-- `record.task`: task description, number of episodes, resume behavior, and whether to record success labels.
-- `record.time`: max episode duration, reset duration, and metadata save period.
+- `record.task`: task description, number of episodes, resume behavior, success labels, and `episode_control_mode` (`keyboard` or keyboard-free `oculus`).
+- `record.time`: max episode duration and metadata save period. `reset_time_sec` remains a legacy compatibility key; automatic inter-episode `robot.reset()` is not a timed manual-reset loop.
 - `replay`, `visualize`: default dataset and episode used by replay and visualization.
 
 Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
@@ -295,7 +295,7 @@ New Flexiv recordings keep RGB in the normal LeRobot MP4 video fields and stream
 
 The Zarr arrays are `/data/{head,left_wrist,right_wrist}/{depth,left_ir,right_ir,rgbd_timestamp,rgbd_reused}`, plus `/meta/{index,episode_index,frame_index,global_frame_index,robot_timestamp,episode_ends}`. Depth remains native `uint16` RealSense units; left/right IR remains lossless `uint8`. The nine 2-D depth/IR arrays are absent from `meta/info.json`, the LeRobot episode buffer, episode statistics, and main Parquet. Scalar timestamps, reused flags, and all existing state/action/RGB fields remain in Parquet.
 
-`meta/rgbd_sidecar.json` is authoritative. During an active episode, physical arrays may contain an uncommitted tail, but readers expose only its committed prefix. Saving an episode drains the bounded writer queue, durably seals LeRobot Parquet/meta files, verifies scalar joins, appends `episode_ends`, and atomically advances the manifest. Rerecord clears both the LeRobot buffer and the uncommitted Zarr tail. Resume refuses short arrays, calibration/hash/schema conflicts, or any mismatch between manifest counts, `info.json`, and Parquet; it only truncates tails beyond an already recorded manifest prefix. Ctrl+C leaves `incomplete`, and writer/schema/queue failures leave `incomplete` or `corrupt` data for diagnosis instead of deleting it or pretending it is complete.
+`meta/rgbd_sidecar.json` is authoritative. During an active episode, physical arrays may contain an uncommitted tail, but readers expose only its committed prefix. Saving an episode drains the bounded writer queue, durably seals LeRobot Parquet/meta files, verifies scalar joins, appends `episode_ends`, and atomically advances the manifest. Rerecord clears both the LeRobot buffer and the uncommitted Zarr tail. Resume refuses short arrays, calibration/hash/schema conflicts, or any mismatch between manifest counts, `info.json`, and Parquet; it only truncates tails beyond an already recorded manifest prefix. Ctrl+C first leaves the dataset `incomplete` and then asks whether to delete the entire dataset folder; deletion occurs only after an explicit `y`. Writer/schema/queue failures remain preserved as `incomplete` or `corrupt` data for diagnosis.
 
 The default configuration is:
 
@@ -589,12 +589,20 @@ robot-record --config scripts/config/record_cfg.yaml
 
 When using `recorded_is_success`, the operator must be strict about deleting any episode that should not become a full demonstration. The success labels can later support VLA, Diffusion Policy, failure-detector filtering, and evaluation.
 
-## Recording Control Keys
+## Recording Episode Control
 
-Common key controls during collection:
+Set `record.task.episode_control_mode: keyboard` for keyboard control:
 
-- Right arrow: stop the current episode and save it.
-- Left arrow: discard the current episode.
-- Esc: stop the recording session.
-- Enter: continue to the next teleoperation segment or next episode.
-- Ctrl+C: interrupt and clean up the incomplete dataset.
+- Right arrow while waiting: start the next episode.
+- Right arrow while recording: stop and save the current episode.
+- Left arrow while recording: discard the current episode and its uncommitted Zarr tail.
+
+Set `record.task.episode_control_mode: oculus` for keyboard-free control:
+
+- Quest X while waiting: start the next episode.
+- Quest X while recording: stop and save the current episode.
+- Quest Y while recording: discard the current episode. In this mode Y is reserved for episode discard and does not request left-gripper release.
+
+After either save or discard, `robot-record` calls `robot.reset()` automatically and waits for the next Right-arrow/X start request. Enter and Esc are not part of this workflow. Ctrl+C stops the session, marks an active Zarr recording incomplete, and asks whether to delete the entire dataset folder.
+
+Quest teleoperation remains live after reset-home while `robot-record` is waiting for the next episode start. You can reposition both arms and grippers during this interval; those waiting-state observations and actions are sent to the robot but are not written to LeRobot or the RGB-D Zarr sidecar. Because live control still reads robot observations, recorded `global_frame_index` values can contain strictly increasing gaps across episode boundaries by design.

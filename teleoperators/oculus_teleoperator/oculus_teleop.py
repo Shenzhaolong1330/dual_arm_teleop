@@ -180,6 +180,8 @@ class OculusTeleop(Teleoperator):
             "right_trigger_pressed",
             "left_gripper_release_requested",
             "right_gripper_release_requested",
+            "x_button_pressed",
+            "y_button_pressed",
         ]:
             if key in obs:
                 action[key] = obs[key]

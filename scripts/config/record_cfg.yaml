@@ -77,6 +77,7 @@ record:
     description: "pick up small vials and insert them in the empty rack" # task description
     num_episodes: 10 # number of episodes to record
     display: true # whether to display data during recording
+    episode_control_mode: "oculus" # keyboard: right/left arrows | oculus: Quest X/Y, no keyboard listener
     resume: false # whether to resume from an existing dataset
     resume_dataset: "flexiv_dual_arm_3d/pick_place_20260713_v03" # dataset to resume from if resume is true
     # robot-dagger sets success_policy automatically for full_success_episode/hybrid.
@@ -86,7 +87,7 @@ record:
 
   time:
     episode_time_sec: 6000 # max time per episode in seconds
-    reset_time_sec: 6000 # max time to reset between episodes in seconds
+    reset_time_sec: 6000 # legacy compatibility; automatic robot.reset() no longer uses a timed manual-reset loop
     save_meta_period: 1 # save metadata after every N episodes
 
   storage:

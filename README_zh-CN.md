@@ -265,8 +265,8 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - `record.rgbd_sidecar_zarr`：配置相对存储路径、帧 chunk、有界队列容量和压缩器。当前实测默认值为 8 帧、Blosc/LZ4 level 1 加 bitshuffle。
 - `record.rgb_camera_name_mode`：`rgb` 会把 RGB 视频保存为 `observation.images.head_rgb`、`observation.images.left_wrist_rgb`、`observation.images.right_wrist_rgb`；只有旧 checkpoint 仍依赖历史 `*_image` key 时才改成 `legacy_image`。
 - `record.policy.type`、`config_path`、`pretrained_path`：仅在 `run_policy` 或 `run_mix` 时需要确认。
-- `record.task`：任务描述、episode 数量、是否 resume、是否记录 success。
-- `record.time`：episode 最大时长、reset 时长和 metadata 保存周期。
+- `record.task`：任务描述、episode 数量、是否 resume、是否记录 success，以及 `episode_control_mode`（`keyboard` 或无键盘的 `oculus`）。
+- `record.time`：episode 最大时长和 metadata 保存周期。`reset_time_sec` 仅保留为兼容字段；episode 间自动调用的 `robot.reset()` 不再使用定时手动 reset loop。
 - `replay`、`visualize`：回放和可视化默认使用的数据集和 episode。
 
 硬件参数通常在 `scripts/config/robots/*.yaml` 中修改：
@@ -294,7 +294,7 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 
 Zarr 数组为 `/data/{head,left_wrist,right_wrist}/{depth,left_ir,right_ir,rgbd_timestamp,rgbd_reused}`，以及 `/meta/{index,episode_index,frame_index,global_frame_index,robot_timestamp,episode_ends}`。depth 保持 RealSense 原生 `uint16` 单位，不提前乘 depth scale；左右 IR 保持无损 `uint8`。九个二维 depth/IR 数组不会进入 `meta/info.json`、LeRobot episode buffer、episode stats 或主 Parquet；标量 timestamp/reused、state、action 和 RGB 契约保持不变。
 
-`meta/rgbd_sidecar.json` 是权威记录。active episode 期间，物理数组可以带有未提交尾部，但正式 reader 只能读取 committed prefix。保存 episode 时会先 drain 有界 writer 队列，再持久封口 LeRobot Parquet/meta、核对标量 join、追加 `episode_ends`，最后原子推进 manifest。rerecord 会同时清空 LeRobot buffer 并截去未提交 Zarr 尾部。resume 会拒绝短数组、calibration/hash/schema 冲突，以及 manifest、`info.json`、Parquet 之间的任何计数差异；它只会按已有 manifest prefix 截去尾部，不会猜测提交。Ctrl+C 会留下 `incomplete`，writer/schema/queue 故障会留下 `incomplete` 或 `corrupt` 供诊断，不会删除或伪装成完整数据。
+`meta/rgbd_sidecar.json` 是权威记录。active episode 期间，物理数组可以带有未提交尾部，但正式 reader 只能读取 committed prefix。保存 episode 时会先 drain 有界 writer 队列，再持久封口 LeRobot Parquet/meta、核对标量 join、追加 `episode_ends`，最后原子推进 manifest。rerecord 会同时清空 LeRobot buffer 并截去未提交 Zarr 尾部。resume 会拒绝短数组、calibration/hash/schema 冲突，以及 manifest、`info.json`、Parquet 之间的任何计数差异；它只会按已有 manifest prefix 截去尾部，不会猜测提交。Ctrl+C 会先把数据集标记为 `incomplete`，然后询问是否删除整个数据集目录；只有明确输入 `y` 才会删除。writer/schema/queue 故障仍保留为 `incomplete` 或 `corrupt` 供诊断。
 
 默认配置为：
 
@@ -588,12 +588,20 @@ robot-record --config scripts/config/record_cfg.yaml
 
 使用 `recorded_is_success` 时，操作者必须严格删除失败、不完整、质量差或不适合作为完整示范的数据。保留下来的 success 标签后续可用于 VLA、Diffusion Policy、failure detector 的数据筛选与评估。
 
-## 录制控制按键
+## 录制 episode 控制
 
-采集时常用按键约定：
+设置 `record.task.episode_control_mode: keyboard` 使用键盘：
 
-- 右箭头：停止当前 episode 并保存。
-- 左箭头：丢弃当前 episode。
-- Esc：停止整个录制任务。
-- Enter：继续下一段遥操作或下一条 episode。
-- Ctrl+C：中断并清理未完成数据集。
+- 等待状态按右箭头：开始下一条 episode。
+- 录制状态按右箭头：结束并保存当前 episode。
+- 录制状态按左箭头：丢弃当前 episode 及其未提交 Zarr 尾部。
+
+设置 `record.task.episode_control_mode: oculus` 使用无键盘模式：
+
+- 等待状态按 Quest X：开始下一条 episode。
+- 录制状态按 Quest X：结束并保存当前 episode。
+- 录制状态按 Quest Y：丢弃当前 episode；此模式下 Y 专用于丢弃，不再触发左夹爪 release。
+
+无论保存还是丢弃，`robot-record` 都会自动调用 `robot.reset()` 回 home，然后等待下一次右箭头/X 开始请求。该流程不再使用 Enter 或 Esc。Ctrl+C 会停止会话、把活动 Zarr 录制标记为 incomplete，并询问是否删除整个数据集目录。
+
+reset-home 完成后，在等待下一条 episode 开始的期间，Quest 遥操作保持可用，可以继续调整双臂和夹爪姿态。等待态的 observation/action 只发送给机器人，不会写入 LeRobot 或 RGB-D Zarr sidecar。由于实时控制仍需读取机器人 observation，录制数据的 `global_frame_index` 允许在 episode 边界出现严格递增但不连续的间隔。
