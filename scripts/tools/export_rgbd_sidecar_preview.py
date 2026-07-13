@@ -12,6 +12,7 @@ if __package__ in (None, ""):
 
 from scripts.tools.rgbd_sidecar_export_utils import (
     CAMERAS,
+    RgbdSidecarSource,
     camera_rgb_key,
     default_output_dir,
     depth_to_colormap,
@@ -23,7 +24,6 @@ from scripts.tools.rgbd_sidecar_export_utils import (
     rgb_to_uint8_hwc,
     sanitize_name,
     scalar_or_none,
-    sidecar_keys,
     write_json,
     write_png,
 )
@@ -52,12 +52,14 @@ def main() -> None:
     dataset._ensure_hf_dataset_loaded()
 
     rgb_key = camera_rgb_key(args.camera, args.rgb_camera_name_mode)
-    sidecar = sidecar_keys(args.camera)
-    require_keys(dataset.features, [rgb_key, sidecar["depth"], sidecar["left_ir"], sidecar["right_ir"]])
+    require_keys(dataset.features, [rgb_key])
+    sidecar = RgbdSidecarSource(dataset)
+    sidecar.require(args.camera, ("depth", "left_ir", "right_ir"))
 
     dataset_index = global_index_for_episode_frame(dataset, args.episode, args.frame_index)
     sample = dataset[dataset_index]
     raw_sample = raw_hf_sample(dataset, dataset_index)
+    raw_sidecar = sidecar.frame(dataset_index, args.camera)
 
     out_dir = args.output_dir or default_output_dir(dataset, "rgbd_sidecar_preview")
     prefix = (
@@ -74,9 +76,9 @@ def main() -> None:
     }
 
     write_png(paths["rgb"], rgb_to_uint8_hwc(sample[rgb_key]))
-    write_png(paths["depth_colormap"], depth_to_colormap(raw_sample[sidecar["depth"]]))
-    write_png(paths["left_ir"], grayscale_to_uint8(raw_sample[sidecar["left_ir"]]))
-    write_png(paths["right_ir"], grayscale_to_uint8(raw_sample[sidecar["right_ir"]]))
+    write_png(paths["depth_colormap"], depth_to_colormap(raw_sidecar["depth"]))
+    write_png(paths["left_ir"], grayscale_to_uint8(raw_sidecar["left_ir"]))
+    write_png(paths["right_ir"], grayscale_to_uint8(raw_sidecar["right_ir"]))
 
     metadata = {
         "repo_id": dataset.repo_id,
@@ -85,14 +87,15 @@ def main() -> None:
         "episode_frame_index": args.frame_index,
         "dataset_index": dataset_index,
         "camera": args.camera,
+        "sidecar_storage": sidecar.storage,
         "rgb_key": rgb_key,
-        "depth_key": sidecar["depth"],
-        "left_ir_key": sidecar["left_ir"],
-        "right_ir_key": sidecar["right_ir"],
+        "depth_key": sidecar.key(args.camera, "depth"),
+        "left_ir_key": sidecar.key(args.camera, "left_ir"),
+        "right_ir_key": sidecar.key(args.camera, "right_ir"),
         "global_frame_index": scalar_or_none(raw_sample.get("global_frame_index")),
         "robot_timestamp": scalar_or_none(raw_sample.get("robot_timestamp")),
-        "rgbd_timestamp": scalar_or_none(raw_sample.get(f"{args.camera}_rgbd_timestamp")),
-        "rgbd_reused": scalar_or_none(raw_sample.get(f"{args.camera}_rgbd_reused")),
+        "rgbd_timestamp": raw_sidecar["rgbd_timestamp"],
+        "rgbd_reused": raw_sidecar["rgbd_reused"],
         "outputs": {name: str(path) for name, path in paths.items() if name != "metadata"},
     }
     write_json(paths["metadata"], metadata)

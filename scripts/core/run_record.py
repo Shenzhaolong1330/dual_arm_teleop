@@ -43,6 +43,11 @@ from scripts.core.policy_config_utils import (
     resolve_policy_config_path,
     self_test_policy_config_loader,
 )
+from scripts.core.rgbd_zarr_sidecar import (
+    DEFAULT_RELATIVE_PATH as DEFAULT_RGBD_ZARR_RELATIVE_PATH,
+    RgbdSidecarError,
+    ZarrSidecarWriter,
+)
 
 import logging
 
@@ -435,6 +440,43 @@ class RecordConfig:
         self.save_depth_sidecar: bool = bool(cfg.get("save_depth_sidecar", True))
         self.save_ir_sidecar: bool = bool(cfg.get("save_ir_sidecar", True))
         self.save_rgbd_timestamps: bool = bool(cfg.get("save_rgbd_timestamps", True))
+        self.rgbd_sidecar_storage = str(cfg.get("rgbd_sidecar_storage", "zarr")).strip().lower()
+        if self.rgbd_sidecar_storage not in {"zarr", "parquet"}:
+            raise ValueError(
+                "`record.rgbd_sidecar_storage` must be 'zarr' or 'parquet'. "
+                f"Got: {self.rgbd_sidecar_storage!r}"
+            )
+        zarr_cfg = cfg.get("rgbd_sidecar_zarr", {})
+        if not isinstance(zarr_cfg, dict):
+            raise ValueError("`record.rgbd_sidecar_zarr` must be a mapping.")
+        compressor_cfg = zarr_cfg.get("compressor", {})
+        if not isinstance(compressor_cfg, dict):
+            raise ValueError("`record.rgbd_sidecar_zarr.compressor` must be a mapping.")
+        self.rgbd_sidecar_zarr_relative_path = str(
+            zarr_cfg.get("relative_path", DEFAULT_RGBD_ZARR_RELATIVE_PATH)
+        )
+        self.rgbd_sidecar_zarr_chunk_frames = int(zarr_cfg.get("chunk_frames", 8))
+        self.rgbd_sidecar_zarr_queue_capacity_frames = int(
+            zarr_cfg.get("queue_capacity_frames", 64)
+        )
+        self.rgbd_sidecar_zarr_compressor = dict(compressor_cfg)
+        self.use_zarr_rgbd_sidecar = (
+            self.rgbd_sidecar_storage == "zarr"
+            and (self.save_depth_sidecar or self.save_ir_sidecar)
+        )
+        if self.use_zarr_rgbd_sidecar and self.robot_type != "flexiv_dual_arm":
+            raise ValueError(
+                "The streaming RealSense Zarr sidecar is currently implemented only for "
+                "robot_type='flexiv_dual_arm'. Select rgbd_sidecar_storage='parquet' for legacy robots."
+            )
+        if (
+            self.use_zarr_rgbd_sidecar
+            and not self.save_rgbd_timestamps
+        ):
+            raise ValueError(
+                "Zarr RGB-D sidecars require save_rgbd_timestamps=true so every raw row can be "
+                "strictly joined to the main Parquet timeline."
+            )
         self.rgb_camera_name_mode: str = str(cfg.get("rgb_camera_name_mode", "rgb")).strip().lower()
         if self.rgb_camera_name_mode not in {"rgb", "legacy_image"}:
             raise ValueError(
@@ -566,9 +608,15 @@ class RecordConfig:
             raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
 
 
-def handle_incomplete_dataset(dataset_path):
+def handle_incomplete_dataset(dataset_path, *, preserve: bool = False):
     if dataset_path.exists():
         print(f"====== [WARNING] Detected an incomplete dataset folder: {dataset_path} ======")
+        if preserve:
+            print(
+                "====== [KEEP] Dataset retained because its RGB-D manifest is the recovery ledger. "
+                "Inspect it before an explicit resume or removal. ======"
+            )
+            return
         termios.tcflush(sys.stdin, termios.TCIFLUSH)
         ans = input("Do you want to delete it? (y/n): ").strip().lower()
         if ans == "y":
@@ -1005,6 +1053,7 @@ def run_mix_record_loop(
     single_task: str,
     display_data: bool,
     success_policy: str = SUCCESS_POLICY_NONE,
+    frame_sink: Any | None = None,
 ) -> dict[str, Any]:
     policy.reset()
     preprocessor.reset()
@@ -1282,6 +1331,8 @@ def run_mix_record_loop(
                 frame["success_policy"] = success_policy
             if "success_inferred_from_recorded_episode" in dataset.features:
                 frame["success_inferred_from_recorded_episode"] = np.array([False], dtype=np.bool_)
+            if frame_sink is not None:
+                frame_sink.add_frame(observation=raw_obs, frame=frame)
             dataset.add_frame(frame)
             saved_steps += 1
 
@@ -1393,11 +1444,15 @@ def _save_realsense_calibration_for_session(
     robot: Any,
     dataset_root: Path,
     dataset_name: str,
-) -> None:
+    *,
+    strict: bool = False,
+) -> Path | None:
     target_robot = getattr(robot, "_robot", robot)
     cameras = getattr(target_robot, "cameras", None)
     if not cameras:
-        return
+        if strict:
+            raise RuntimeError("Zarr RGB-D sidecar requires connected RealSense cameras for calibration.")
+        return None
 
     try:
         from scripts.tools.export_realsense_calibration import (  # noqa: PLC0415
@@ -1422,17 +1477,45 @@ def _save_realsense_calibration_for_session(
                 },
                 "logical_cameras": list(cameras.keys()),
             },
+            use_depth=record_cfg.save_depth_sidecar,
+            use_ir=record_cfg.save_ir_sidecar,
         )
         logging.info("[CALIB] saved RealSense calibration manifest: %s", manifest_path)
         for logical_name, path in sorted(written.items()):
             if logical_name == "manifest":
                 continue
             logging.info("[CALIB] saved %s calibration: %s", logical_name, path)
+        return manifest_path
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise RuntimeError(
+                "Zarr RGB-D sidecar requires a valid RealSense calibration manifest."
+            ) from exc
         logging.warning(
             "[CALIB] failed to export RealSense calibration; recording will continue: %s",
             exc,
         )
+        return None
+
+
+def _save_episode_transaction(
+    dataset: LeRobotDataset,
+    sidecar_writer: ZarrSidecarWriter | None,
+) -> None:
+    """Drain raw frames, durably save LeRobot, then advance the sidecar ledger."""
+
+    episode_buffer = dataset.episode_buffer
+    episode_frames = int(episode_buffer.get("size", 0)) if episode_buffer is not None else 0
+    if sidecar_writer is not None:
+        sidecar_writer.prepare_episode(episode_frames)
+    dataset.save_episode()
+    if sidecar_writer is None:
+        return
+    dataset.seal_episode_writers()
+    sidecar_writer.commit_episode(
+        info_total_frames=dataset.meta.total_frames,
+        info_total_episodes=dataset.meta.total_episodes,
+    )
 
 
 def run_record(record_cfg: RecordConfig):
@@ -1441,6 +1524,8 @@ def run_record(record_cfg: RecordConfig):
     dataset_root = None
     robot = None
     teleop = None
+    dataset = None
+    sidecar_writer = None
     try:
         if record_cfg.dataset_name is not None:
             dataset_name = record_cfg.dataset_name
@@ -1523,6 +1608,8 @@ def run_record(record_cfg: RecordConfig):
             "save_rgbd_timestamps": record_cfg.save_rgbd_timestamps,
             **record_cfg.robot_extra_config,
         }
+        if record_cfg.robot_type == "flexiv_dual_arm":
+            robot_config_kwargs["rgbd_sidecar_storage"] = record_cfg.rgbd_sidecar_storage
         robot_config = create_robot_config(
             record_cfg.robot_type,
             **robot_config_kwargs,
@@ -1536,6 +1623,15 @@ def run_record(record_cfg: RecordConfig):
         obs_features = hw_to_dataset_features(robot.observation_features, "observation", use_video=True)
         dataset_features = {**action_features, **obs_features}
         dataset_features.update(getattr(robot, "dataset_extra_features", {}))
+        if record_cfg.use_zarr_rgbd_sidecar:
+            leaked_sidecar_features = sorted(
+                key for key in dataset_features if key.startswith("sidecar.")
+            )
+            if leaked_sidecar_features:
+                raise RuntimeError(
+                    "Zarr mode must not place raw depth/IR arrays in LeRobot features: "
+                    f"{leaked_sidecar_features}"
+                )
         if record_cfg.run_mode == RUN_MODE_MIX:
             # Extend dataset schema for DAgger mixed collection metadata.
             action_feature = dataset_features[ACTION]
@@ -1683,7 +1779,43 @@ def run_record(record_cfg: RecordConfig):
             )
 
         robot.connect()
-        _save_realsense_calibration_for_session(record_cfg, robot, dataset_root, dataset_name)
+        if record_cfg.use_zarr_rgbd_sidecar:
+            calibration_path = Path(dataset_root) / "meta" / "realsense_calibration.json"
+            if record_cfg.resume:
+                if not calibration_path.is_file():
+                    raise RuntimeError(
+                        f"Cannot resume Zarr RGB-D sidecar without existing calibration: {calibration_path}"
+                    )
+            else:
+                _save_realsense_calibration_for_session(
+                    record_cfg,
+                    robot,
+                    dataset_root,
+                    dataset_name,
+                    strict=True,
+                )
+            sidecar_writer = ZarrSidecarWriter(
+                dataset_root,
+                cameras=("head", "left_wrist", "right_wrist"),
+                save_depth=record_cfg.save_depth_sidecar,
+                save_ir=record_cfg.save_ir_sidecar,
+                height=record_cfg.cam_height,
+                width=record_cfg.cam_width,
+                relative_path=record_cfg.rgbd_sidecar_zarr_relative_path,
+                chunk_frames=record_cfg.rgbd_sidecar_zarr_chunk_frames,
+                queue_capacity_frames=record_cfg.rgbd_sidecar_zarr_queue_capacity_frames,
+                compressor=record_cfg.rgbd_sidecar_zarr_compressor,
+                resume=record_cfg.resume,
+            )
+            target_robot = getattr(robot, "_robot", robot)
+            restore_global_index = getattr(target_robot, "set_next_global_frame_index", None)
+            if not callable(restore_global_index):
+                raise RuntimeError(
+                    "Flexiv robot does not expose set_next_global_frame_index required for safe resume."
+                )
+            restore_global_index(sidecar_writer.next_global_frame_index)
+        else:
+            _save_realsense_calibration_for_session(record_cfg, robot, dataset_root, dataset_name)
         if teleop is not None:
             teleop.connect()
         loop_robot = ResetHomeOnRequestRobot(robot) if teleop is not None else robot
@@ -1710,6 +1842,7 @@ def run_record(record_cfg: RecordConfig):
                     single_task=record_cfg.task_description,
                     display_data=record_cfg.display,
                     success_policy=record_cfg.success_policy,
+                    frame_sink=sidecar_writer,
                 )
                 mix_stats["episode_index"] = episode_idx
                 run_mix_episode_stats.append(mix_stats)
@@ -1739,6 +1872,7 @@ def run_record(record_cfg: RecordConfig):
                     control_time_s=record_cfg.episode_time_sec,
                     single_task=record_cfg.task_description,
                     display_data=record_cfg.display,
+                    frame_sink=sidecar_writer,
                 )
 
             rerecord_requested = bool(events["rerecord_episode"])
@@ -1747,6 +1881,8 @@ def run_record(record_cfg: RecordConfig):
                 events["rerecord_episode"] = False
                 # Left arrow also sets exit_early=True. Clear it here so reset phase does not exit immediately.
                 events["exit_early"] = False
+                if sidecar_writer is not None:
+                    sidecar_writer.rollback_episode()
                 if dataset.episode_buffer is not None:
                     dataset.clear_episode_buffer()
             elif record_cfg.run_mode == RUN_MODE_MIX:
@@ -1794,14 +1930,14 @@ def run_record(record_cfg: RecordConfig):
                             inferred_from_recorded_episode=False,
                         )
                         mix_stats["success_policy"] = record_cfg.success_policy
-                    dataset.save_episode()
+                    _save_episode_transaction(dataset, sidecar_writer)
                 else:
                     logging.warning(
                         "[run_mix] episode %d has no recorded frames; skip saving this episode.",
                         episode_idx + 1,
                     )
             else:
-                dataset.save_episode()
+                _save_episode_transaction(dataset, sidecar_writer)
 
             # Reset the environment between episodes, and also before a re-record attempt.
             if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or rerecord_requested):
@@ -1854,6 +1990,11 @@ def run_record(record_cfg: RecordConfig):
 
         _disconnect_teleop(teleop)
         dataset.finalize()
+        if sidecar_writer is not None:
+            sidecar_writer.finalize(
+                info_total_frames=dataset.meta.total_frames,
+                info_total_episodes=dataset.meta.total_episodes,
+            )
 
         update_dataset_info(record_cfg, dataset_name, data_version)
         if record_cfg.push_to_hub:
@@ -1883,18 +2024,28 @@ def run_record(record_cfg: RecordConfig):
 
     except Exception as e:
         logging.info(f"====== [ERROR] {e} ======")
+        if sidecar_writer is not None:
+            _safe_cleanup_call(
+                "mark RGB-D sidecar failed",
+                lambda: sidecar_writer.abort(str(e), corrupt=isinstance(e, RgbdSidecarError)),
+            )
         _release_robot_without_stop(robot)
         _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path)
+        handle_incomplete_dataset(dataset_path, preserve=record_cfg.use_zarr_rgbd_sidecar)
         sys.exit(1)
 
     except KeyboardInterrupt:
         logging.info("\n====== [INFO] Ctrl+C detected, cleaning up incomplete dataset... ======")
+        if sidecar_writer is not None:
+            _safe_cleanup_call(
+                "mark RGB-D sidecar interrupted",
+                lambda: sidecar_writer.abort("KeyboardInterrupt during recording", corrupt=False),
+            )
         _release_robot_without_stop(robot)
         _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path)
+        handle_incomplete_dataset(dataset_path, preserve=record_cfg.use_zarr_rgbd_sidecar)
         sys.exit(1)
 
 

@@ -1345,6 +1345,14 @@ class FlexivDualArm(Robot):
         self._global_frame_index += 1
         return frame_index
 
+    def set_next_global_frame_index(self, frame_index: int) -> None:
+        """Restore the monotonic recording counter before a dataset resume."""
+
+        frame_index = int(frame_index)
+        if frame_index < 0:
+            raise ValueError(f"frame_index must be nonnegative, got {frame_index}")
+        self._global_frame_index = frame_index
+
     def _mark_reused_observation(self, obs: dict[str, Any]) -> dict[str, Any]:
         if not self.config.save_rgbd_timestamps:
             return obs
@@ -1679,16 +1687,19 @@ class FlexivDualArm(Robot):
     @property
     def dataset_extra_features(self) -> dict[str, dict[str, Any]]:
         features: dict[str, dict[str, Any]] = {}
+        large_arrays_in_parquet = (
+            str(getattr(self.config, "rgbd_sidecar_storage", "parquet")).lower() == "parquet"
+        )
         for cam_name, cam in self.cameras.items():
             base_name = self._camera_base_name(cam_name)
             shape = (int(cam.height), int(cam.width))
-            if self.config.save_depth_sidecar:
+            if self.config.save_depth_sidecar and large_arrays_in_parquet:
                 features[f"sidecar.{base_name}_depth"] = {
                     "dtype": "uint16",
                     "shape": shape,
                     "names": ["height", "width"],
                 }
-            if self.config.save_ir_sidecar:
+            if self.config.save_ir_sidecar and large_arrays_in_parquet:
                 features[f"sidecar.{base_name}_left_ir"] = {
                     "dtype": "uint8",
                     "shape": shape,

@@ -17,6 +17,13 @@ import pyarrow.parquet as pq
 
 from lerobot.utils.constants import HF_LEROBOT_HOME
 
+from scripts.core.rgbd_zarr_sidecar import (
+    MANIFEST_RELATIVE_PATH,
+    RgbdSidecarError,
+    ZarrSidecarReader,
+    read_parquet_join_range,
+)
+
 
 CAMERAS = ("head", "left_wrist", "right_wrist")
 MODALITIES = ("depth", "left_ir", "right_ir")
@@ -95,6 +102,7 @@ class CheckReport:
     episode_frame_counts: dict[int, int]
     content_stats: dict[tuple[int, str, str], ContentStats]
     errors: list[str]
+    storage: str = "parquet"
 
     @property
     def ok(self) -> bool:
@@ -237,7 +245,14 @@ def _check_monotonic(
     value: float,
     local_index: int,
 ) -> None:
-    state_key = (episode, key)
+    if not np.isfinite(value):
+        errors.append(
+            f"episode={episode} {key} is not finite at local_frame={local_index}: value={value}"
+        )
+        return
+    # global_frame_index is a dataset-wide identity. It may contain gaps across
+    # resets, but it must never repeat or go backwards.
+    state_key = (-1 if key == "global_frame_index" else episode, key)
     previous = previous_sync.get(state_key)
     if previous is not None:
         valid = value > previous if key == "global_frame_index" else value >= previous
@@ -250,7 +265,7 @@ def _check_monotonic(
     previous_sync[state_key] = value
 
 
-def inspect_dataset(
+def _inspect_legacy_dataset(
     dataset_root: Path,
     *,
     rgb_camera_name_mode: str = "rgb",
@@ -371,11 +386,220 @@ def inspect_dataset(
             f"parquet episodes={len(episode_frame_counts)}"
         )
 
-    return CheckReport(dataset_root, episode_frame_counts, content_stats, errors)
+    return CheckReport(dataset_root, episode_frame_counts, content_stats, errors, storage="parquet")
+
+
+def _inspect_zarr_dataset(
+    dataset_root: Path,
+    *,
+    rgb_camera_name_mode: str,
+    save_depth: bool,
+    save_ir: bool,
+    max_consecutive_identical: int,
+    batch_size: int,
+) -> CheckReport:
+    content_stats: dict[tuple[int, str, str], ContentStats] = {}
+    episode_frame_counts: dict[int, int] = {}
+    errors: list[str] = []
+    try:
+        reader = ZarrSidecarReader(dataset_root, require_complete=True)
+    except Exception as exc:  # noqa: BLE001
+        return CheckReport(
+            dataset_root,
+            episode_frame_counts,
+            content_stats,
+            [f"authoritative Zarr sidecar is invalid: {exc}"],
+            storage="zarr",
+        )
+
+    features = reader.info.get("features", {})
+    reused_keys = [f"{camera}_rgbd_reused" for camera in CAMERAS]
+    required_main_keys = [*_rgb_keys(rgb_camera_name_mode), *SYNC_KEYS, *reused_keys]
+    try:
+        _require_features(features, required_main_keys)
+    except AssertionError as exc:
+        errors.append(str(exc))
+    scalar_contract = {
+        "global_frame_index": "int64",
+        "robot_timestamp": "float64",
+        **{f"{camera}_rgbd_timestamp": "float64" for camera in CAMERAS},
+        **{f"{camera}_rgbd_reused": "bool" for camera in CAMERAS},
+    }
+    for key, expected_dtype in scalar_contract.items():
+        feature = features.get(key)
+        if not isinstance(feature, dict):
+            continue
+        shape = tuple(int(value) for value in feature.get("shape", []))
+        if feature.get("dtype") != expected_dtype or shape != (1,):
+            errors.append(
+                f"Main feature {key} declares dtype={feature.get('dtype')} shape={shape}; "
+                f"expected dtype={expected_dtype} shape=(1,)."
+            )
+    leaked_features = sorted(key for key in features if key.startswith("sidecar."))
+    if leaked_features:
+        errors.append(
+            "Zarr datasets must not declare raw depth/IR as main Parquet features: "
+            f"{leaked_features}"
+        )
+
+    modalities = _selected_modalities(save_depth, save_ir)
+    manifest_modalities = set(reader.manifest.get("modalities", []))
+    missing_modalities = sorted(set(modalities) - manifest_modalities)
+    if missing_modalities:
+        errors.append(f"Manifest is missing requested modality/modalities: {missing_modalities}")
+
+    previous_sync: dict[tuple[int, str], float] = {}
+    total_frames = reader.committed_frames
+    if total_frames == 0:
+        errors.append("Dataset has no frames.")
+    for start in range(0, total_frames, batch_size):
+        end = min(total_frames, start + batch_size)
+        try:
+            parquet = read_parquet_join_range(dataset_root, start, end)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"failed to read Parquet join rows [{start}, {end}): {exc}")
+            continue
+
+        zarr_join = {
+            "index": np.asarray(reader.array("/meta/index")[start:end]),
+            "episode_index": np.asarray(reader.array("/meta/episode_index")[start:end]),
+            "frame_index": np.asarray(reader.array("/meta/frame_index")[start:end]),
+            "global_frame_index": np.asarray(reader.array("/meta/global_frame_index")[start:end]),
+            "robot_timestamp": np.asarray(reader.array("/meta/robot_timestamp")[start:end]),
+            **{
+                f"{camera}_rgbd_timestamp": np.asarray(
+                    reader.array(f"/data/{camera}/rgbd_timestamp")[start:end]
+                )
+                for camera in CAMERAS
+            },
+            **{
+                f"{camera}_rgbd_reused": np.asarray(
+                    reader.array(f"/data/{camera}/rgbd_reused")[start:end]
+                )
+                for camera in CAMERAS
+            },
+        }
+        expected_indices = np.arange(start, end, dtype=np.int64)
+        if not np.array_equal(zarr_join["index"], expected_indices):
+            errors.append(f"Zarr /meta/index does not equal row ordinal over [{start}, {end}).")
+        for key, zarr_values in zarr_join.items():
+            if not np.array_equal(parquet[key], zarr_values):
+                errors.append(f"Parquet/Zarr join mismatch for {key} over rows [{start}, {end}).")
+
+        frame_values: dict[tuple[str, str], np.ndarray] = {}
+        for camera in CAMERAS:
+            for modality in modalities:
+                path = f"/data/{camera}/{modality}"
+                try:
+                    frame_values[(camera, modality)] = np.asarray(reader.array(path)[start:end])
+                except (RgbdSidecarError, KeyError) as exc:
+                    errors.append(str(exc))
+
+        for row_offset in range(end - start):
+            row = start + row_offset
+            episode = int(zarr_join["episode_index"][row_offset])
+            frame_index = int(zarr_join["frame_index"][row_offset])
+            expected_frame_index = episode_frame_counts.get(episode, 0)
+            if frame_index != expected_frame_index:
+                errors.append(
+                    f"episode={episode} frame_index={frame_index} at row={row}, "
+                    f"expected {expected_frame_index}."
+                )
+            episode_frame_counts[episode] = expected_frame_index + 1
+            for key in SYNC_KEYS:
+                _check_monotonic(
+                    previous_sync,
+                    errors,
+                    episode,
+                    key,
+                    float(zarr_join[key][row_offset]),
+                    frame_index,
+                )
+            for camera in CAMERAS:
+                reused = bool(zarr_join[f"{camera}_rgbd_reused"][row_offset])
+                for modality in modalities:
+                    frames = frame_values.get((camera, modality))
+                    if frames is None:
+                        continue
+                    stats_key = (episode, camera, modality)
+                    stats = content_stats.setdefault(
+                        stats_key, ContentStats(episode, camera, modality)
+                    )
+                    stats.add(frames[row_offset], reused, frame_index)
+
+    expected_episodes = list(range(reader.committed_episodes))
+    if sorted(episode_frame_counts) != expected_episodes:
+        errors.append(
+            f"episode_index keys={sorted(episode_frame_counts)}, expected contiguous {expected_episodes}."
+        )
+    cumulative = np.cumsum(
+        [episode_frame_counts.get(index, 0) for index in expected_episodes], dtype=np.int64
+    )
+    episode_ends = np.asarray(reader.array("/meta/episode_ends")[: reader.committed_episodes])
+    if not np.array_equal(episode_ends, cumulative):
+        errors.append(
+            f"episode_ends={episode_ends.tolist()} does not match row-derived boundaries={cumulative.tolist()}."
+        )
+
+    for stats in content_stats.values():
+        if stats.unmarked_duplicates:
+            errors.append(
+                f"episode={stats.episode} camera={stats.camera} modality={stats.modality} "
+                f"has {stats.unmarked_duplicates} adjacent identical frame(s) with "
+                f"rgbd_reused=false; first at local_frame={stats.first_unmarked_duplicate}"
+            )
+        if stats.longest_run_length > max_consecutive_identical:
+            errors.append(
+                f"episode={stats.episode} camera={stats.camera} modality={stats.modality} "
+                f"is frozen from local_frame={stats.longest_run_start} through "
+                f"{stats.longest_run_end} ({stats.longest_run_length} identical frames), "
+                f"exceeding max_consecutive_identical={max_consecutive_identical}"
+            )
+
+    return CheckReport(
+        dataset_root,
+        episode_frame_counts,
+        content_stats,
+        errors,
+        storage="zarr",
+    )
+
+
+def inspect_dataset(
+    dataset_root: Path,
+    *,
+    rgb_camera_name_mode: str = "rgb",
+    save_depth: bool = True,
+    save_ir: bool = True,
+    max_consecutive_identical: int = DEFAULT_MAX_CONSECUTIVE_IDENTICAL,
+    batch_size: int = 16,
+) -> CheckReport:
+    if max_consecutive_identical < 1:
+        raise ValueError("max_consecutive_identical must be >= 1")
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1")
+    if (dataset_root / MANIFEST_RELATIVE_PATH).exists():
+        return _inspect_zarr_dataset(
+            dataset_root,
+            rgb_camera_name_mode=rgb_camera_name_mode,
+            save_depth=save_depth,
+            save_ir=save_ir,
+            max_consecutive_identical=max_consecutive_identical,
+            batch_size=batch_size,
+        )
+    return _inspect_legacy_dataset(
+        dataset_root,
+        rgb_camera_name_mode=rgb_camera_name_mode,
+        save_depth=save_depth,
+        save_ir=save_ir,
+        max_consecutive_identical=max_consecutive_identical,
+        batch_size=batch_size,
+    )
 
 
 def print_report(report: CheckReport, max_consecutive_identical: int) -> None:
     print(f"dataset_root={report.dataset_root}")
+    print(f"sidecar_storage={report.storage}")
     print(
         f"num_episodes={len(report.episode_frame_counts)} "
         f"num_frames={sum(report.episode_frame_counts.values())} "

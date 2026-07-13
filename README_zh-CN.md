@@ -260,7 +260,9 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - `record.repo_id`：数据集名称，建议使用 `<robot_task<num>_step<num>/<description>`，例如 `nero_task3_step1/2mL_empty_right`。
 - `record.robot_type`：选择 `nero_dual_arm`、`franka_dual_arm`、`flexiv_dual_arm` 等机器人类型。
 - `record.run_mode`：选择 `run_record`、`run_policy` 或 `run_mix`。
-- `record.save_depth_sidecar`、`record.save_ir_sidecar`、`record.save_rgbd_timestamps`：把 RealSense 原生 depth、左右 IR、`global_frame_index`、`robot_timestamp` 和每个相机的 RGB-D timestamp 保存为非 image 的 parquet sidecar 字段。
+- `record.save_depth_sidecar`、`record.save_ir_sidecar`、`record.save_rgbd_timestamps`：选择要保存的 RealSense 原生 depth/IR，以及把它们可靠连接到 LeRobot 时间线所需的标量字段。
+- `record.rgbd_sidecar_storage`：新 Flexiv 采集默认使用 `zarr`；`parquet` 保留旧版数组写入 Parquet 的兼容路径。Zarr 模式要求 `save_rgbd_timestamps: true`，且不会默认双写大型数组。
+- `record.rgbd_sidecar_zarr`：配置相对存储路径、帧 chunk、有界队列容量和压缩器。当前实测默认值为 8 帧、Blosc/LZ4 level 1 加 bitshuffle。
 - `record.rgb_camera_name_mode`：`rgb` 会把 RGB 视频保存为 `observation.images.head_rgb`、`observation.images.left_wrist_rgb`、`observation.images.right_wrist_rgb`；只有旧 checkpoint 仍依赖历史 `*_image` key 时才改成 `legacy_image`。
 - `record.policy.type`、`config_path`、`pretrained_path`：仅在 `run_policy` 或 `run_mix` 时需要确认。
 - `record.task`：任务描述、episode 数量、是否 resume、是否记录 success。
@@ -276,17 +278,62 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - `robot.use_gripper` 和夹爪参数：夹爪启用、开合阈值、最大开口和力。
 - `cameras.*_serial`、`width`、`height`：RealSense 序列号和分辨率。
 
-RGB-D sidecar 采集方式是：RGB 保持为标准 LeRobot video 字段，depth/IR 保存为 `sidecar.head_depth`、`sidecar.head_left_ir`、`sidecar.head_right_ir` 等 parquet 数组字段。这两条路径的存储生命周期不同：RGB 会交给 image/video writer，而 depth/IR 会一直保存在内存中的 episode buffer，直到写入 Parquet。因此 RealSense 的 RGB、depth、左右 IR 数组会在相机边界脱离 SDK 管理的缓冲区，非图像数组进入 episode 历史时还会再做一次快照。
+### 原始 RGB-D Zarr v2 sidecar
+
+新的 Flexiv 采集保持 RGB 使用标准 LeRobot MP4 video 字段，并把原生 depth/IR 持续流式写入独立的 Zarr v2 采集存储：
+
+```text
+<dataset_root>/
+├── data/...                         # 仅 state、action、索引和标量同步字段
+├── videos/...                       # RGB MP4，行为不变
+├── meta/info.json
+├── meta/realsense_calibration.json
+├── meta/rgbd_sidecar.json           # 权威 commit ledger
+└── sidecars/realsense.zarr
+```
+
+Zarr 数组为 `/data/{head,left_wrist,right_wrist}/{depth,left_ir,right_ir,rgbd_timestamp,rgbd_reused}`，以及 `/meta/{index,episode_index,frame_index,global_frame_index,robot_timestamp,episode_ends}`。depth 保持 RealSense 原生 `uint16` 单位，不提前乘 depth scale；左右 IR 保持无损 `uint8`。九个二维 depth/IR 数组不会进入 `meta/info.json`、LeRobot episode buffer、episode stats 或主 Parquet；标量 timestamp/reused、state、action 和 RGB 契约保持不变。
+
+`meta/rgbd_sidecar.json` 是权威记录。active episode 期间，物理数组可以带有未提交尾部，但正式 reader 只能读取 committed prefix。保存 episode 时会先 drain 有界 writer 队列，再持久封口 LeRobot Parquet/meta、核对标量 join、追加 `episode_ends`，最后原子推进 manifest。rerecord 会同时清空 LeRobot buffer 并截去未提交 Zarr 尾部。resume 会拒绝短数组、calibration/hash/schema 冲突，以及 manifest、`info.json`、Parquet 之间的任何计数差异；它只会按已有 manifest prefix 截去尾部，不会猜测提交。Ctrl+C 会留下 `incomplete`，writer/schema/queue 故障会留下 `incomplete` 或 `corrupt` 供诊断，不会删除或伪装成完整数据。
+
+默认配置为：
+
+```yaml
+save_depth_sidecar: true
+save_ir_sidecar: true
+save_rgbd_timestamps: true
+rgbd_sidecar_storage: zarr       # zarr | parquet
+rgbd_sidecar_zarr:
+  relative_path: sidecars/realsense.zarr
+  chunk_frames: 8
+  queue_capacity_frames: 64
+  compressor: {codec: blosc, cname: lz4, clevel: 1, shuffle: bitshuffle}
+```
+
+这里的 Zarr 是原始采集 sidecar，不是 DP3 replay-buffer Zarr。DP3 转换仍是后续派生步骤，用于生成 point cloud 等策略字段；原始 depth/IR 仍可用于 preview 和后续双目处理。
+
+旧版 `rgbd_sidecar_storage: parquet` 仍会把 `sidecar.head_depth`、`sidecar.head_left_ir` 等数组写入 Parquet。工具会自动识别格式：只要 manifest 存在，就必须按 Zarr 严格验证，损坏时绝不静默回退；只有没有 manifest 的数据集才走 legacy Parquet。
 
 Flexiv 会为每个相机分别记录上一次被消费的 RealSense SDK `frame_index`。即使后台读取线程没有抛异常，只要再次消费相同 index，对应相机的 `*_rgbd_reused` 就会设为 true；读取失败并复用上一组有效 frameset 时也会设为 true。camera connect、robot reset、stop 和 release 都会清空这组状态。本次没有新增 frame-index 数据集字段，因此现有 feature schema 保持兼容。
 
-每次 RGB-D 采集结束后，必须针对精确的数据集根目录运行完整 sidecar 检查。工具直接读取原始 Parquet 行，遍历每个 episode 的每一帧 depth、左 IR 和右 IR；如果相邻帧逐像素完全一致但 `rgbd_reused=false`，检查立即判错；即使正确标记为 reused，过长的连续相同区间也会判错。默认最多允许连续 4 帧，可通过 `--max-consecutive-identical` 调整：
+每次 RGB-D 采集结束后，必须针对精确的数据集根目录运行完整 sidecar 检查。工具会验证 manifest、calibration SHA-256 与 stream shape、每个 Zarr 数组、提交计数与 episode 边界、分块 Parquet/Zarr join key、timestamp 顺序、reused、SHA-256 唯一帧、相邻逐像素相等、未标记重复和最长冻结区间。legacy Parquet 录制仍保留相同内容检查。默认最多允许连续 4 帧：
 
 ```bash
 python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
+
+# 导出一帧 RGB/depth/IR 预览
+python scripts/tools/export_rgbd_sidecar_preview.py \
+  --root /absolute/path/to/lerobot/dataset --episode 0 --frame-index 0 --camera head
+
+# 无损导出原始 IR pair；该工具不做 rectification
+python scripts/tools/export_ffs_stereo_pair.py \
+  --root /absolute/path/to/lerobot/dataset --episode 0 --frame-index 0 --camera head
+
+# 无硬件存储 benchmark
+python scripts/tools/benchmark_rgbd_zarr_sidecar.py --frames 150
 ```
 
-只有该检查通过后才能开始 DP3 Zarr 转换。原始 LeRobot 数据中的 depth/IR 如果已经冻结，重新导出 Zarr 无法恢复缺失的真实传感器帧；旧数据应保持只读用于诊断，并重新采集。
+必须先录制全新的 smoke dataset，并要求 checker 退出 0，之后才能进行 DP3 转换或正式采集。旧 LeRobot 数据中的 borrowed-buffer depth/IR 如果已经冻结，重新编码无法恢复真实帧；旧数据必须保持只读用于诊断并重新采集。
 
 训练前通常需要修改 `scripts/config/train_cfg.yaml`：
 

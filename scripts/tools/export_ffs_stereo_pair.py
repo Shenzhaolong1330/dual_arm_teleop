@@ -12,15 +12,14 @@ if __package__ in (None, ""):
 
 from scripts.tools.rgbd_sidecar_export_utils import (
     CAMERAS,
+    RgbdSidecarSource,
     default_output_dir,
     global_index_for_episode_frame,
     grayscale_to_uint8,
-    require_keys,
     resolve_dataset,
     raw_hf_sample,
     sanitize_name,
     scalar_or_none,
-    sidecar_keys,
     write_json,
     write_png,
 )
@@ -42,11 +41,12 @@ def main() -> None:
     dataset = resolve_dataset(args.repo_id, args.root)
     dataset._ensure_hf_dataset_loaded()
 
-    sidecar = sidecar_keys(args.camera)
-    require_keys(dataset.features, [sidecar["left_ir"], sidecar["right_ir"]])
+    sidecar = RgbdSidecarSource(dataset)
+    sidecar.require(args.camera, ("left_ir", "right_ir"))
 
     dataset_index = global_index_for_episode_frame(dataset, args.episode, args.frame_index)
     raw_sample = raw_hf_sample(dataset, dataset_index)
+    raw_sidecar = sidecar.frame(dataset_index, args.camera)
 
     out_dir = args.output_dir or default_output_dir(dataset, "ffs_stereo_pair")
     prefix = (
@@ -57,8 +57,8 @@ def main() -> None:
     right_path = out_dir / f"{prefix}_right_ir.png"
     metadata_path = out_dir / f"{prefix}_metadata.json"
 
-    write_png(left_path, grayscale_to_uint8(raw_sample[sidecar["left_ir"]]))
-    write_png(right_path, grayscale_to_uint8(raw_sample[sidecar["right_ir"]]))
+    write_png(left_path, grayscale_to_uint8(raw_sidecar["left_ir"]))
+    write_png(right_path, grayscale_to_uint8(raw_sidecar["right_ir"]))
 
     metadata = {
         "repo_id": dataset.repo_id,
@@ -67,14 +67,15 @@ def main() -> None:
         "episode_frame_index": args.frame_index,
         "dataset_index": dataset_index,
         "camera": args.camera,
-        "left_ir_key": sidecar["left_ir"],
-        "right_ir_key": sidecar["right_ir"],
+        "sidecar_storage": sidecar.storage,
+        "left_ir_key": sidecar.key(args.camera, "left_ir"),
+        "right_ir_key": sidecar.key(args.camera, "right_ir"),
         "left_ir_png": str(left_path),
         "right_ir_png": str(right_path),
         "global_frame_index": scalar_or_none(raw_sample.get("global_frame_index")),
         "robot_timestamp": scalar_or_none(raw_sample.get("robot_timestamp")),
-        "rgbd_timestamp": scalar_or_none(raw_sample.get(f"{args.camera}_rgbd_timestamp")),
-        "rgbd_reused": scalar_or_none(raw_sample.get(f"{args.camera}_rgbd_reused")),
+        "rgbd_timestamp": raw_sidecar["rgbd_timestamp"],
+        "rgbd_reused": raw_sidecar["rgbd_reused"],
         "note": "IR images are exported as stored sidecar frames; no rectification is applied here.",
     }
     write_json(metadata_path, metadata)

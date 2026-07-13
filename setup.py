@@ -25,6 +25,7 @@ setup(
         "numpy",
         "easyhid",
         "OneEuroFilter>=0.2.1",
+        "zarr>=2.12,<3",
     ],
     entry_points={
         "console_scripts": [
@@ -43,6 +44,7 @@ setup(
             "tools-check-rgbd-sidecar = scripts.check_rgbd_sidecar_dataset:main",
             "tools-export-rgbd-preview = scripts.tools.export_rgbd_sidecar_preview:main",
             "tools-export-ffs-pair = scripts.tools.export_ffs_stereo_pair:main",
+            "tools-benchmark-rgbd-sidecar = scripts.tools.benchmark_rgbd_zarr_sidecar:main",
             "tools-export-realsense-calibration = scripts.tools.export_realsense_calibration:main",
             "tools-check-rs = scripts.tools.rs_devices:main",
             "tools-reset-rs = scripts.tools.reset_realsense_usb:main",

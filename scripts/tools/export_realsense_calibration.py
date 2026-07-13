@@ -263,36 +263,58 @@ def calibration_from_pipeline_profile(
     profile: Any,
     logical_camera: str | None = None,
     requested_profile: Mapping[str, Any] | None = None,
+    use_depth: bool = True,
+    use_ir: bool = True,
     rs: Any | None = None,
 ) -> dict[str, Any]:
     rs = rs or _import_rs()
     device = profile.get_device()
-    streams = {
-        "color": profile.get_stream(rs.stream.color).as_video_stream_profile(),
-        "depth": profile.get_stream(rs.stream.depth).as_video_stream_profile(),
-        "infrared1": profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile(),
-        "infrared2": profile.get_stream(rs.stream.infrared, 2).as_video_stream_profile(),
-    }
-    extrinsics = {
-        "infrared1_to_infrared2": _extrinsics_to_dict(streams["infrared1"], streams["infrared2"]),
-        "infrared2_to_infrared1": _extrinsics_to_dict(streams["infrared2"], streams["infrared1"]),
-        "infrared1_to_color": _extrinsics_to_dict(streams["infrared1"], streams["color"]),
-        "color_to_infrared1": _extrinsics_to_dict(streams["color"], streams["infrared1"]),
-        "depth_to_color": _extrinsics_to_dict(streams["depth"], streams["color"]),
-        "color_to_depth": _extrinsics_to_dict(streams["color"], streams["depth"]),
-    }
-    return {
+    streams = {"color": profile.get_stream(rs.stream.color).as_video_stream_profile()}
+    if use_depth:
+        streams["depth"] = profile.get_stream(rs.stream.depth).as_video_stream_profile()
+    if use_ir:
+        streams["infrared1"] = profile.get_stream(rs.stream.infrared, 1).as_video_stream_profile()
+        streams["infrared2"] = profile.get_stream(rs.stream.infrared, 2).as_video_stream_profile()
+
+    extrinsics: dict[str, Any] = {}
+    if use_ir:
+        extrinsics.update(
+            {
+                "infrared1_to_infrared2": _extrinsics_to_dict(
+                    streams["infrared1"], streams["infrared2"]
+                ),
+                "infrared2_to_infrared1": _extrinsics_to_dict(
+                    streams["infrared2"], streams["infrared1"]
+                ),
+                "infrared1_to_color": _extrinsics_to_dict(
+                    streams["infrared1"], streams["color"]
+                ),
+                "color_to_infrared1": _extrinsics_to_dict(
+                    streams["color"], streams["infrared1"]
+                ),
+            }
+        )
+    if use_depth:
+        extrinsics.update(
+            {
+                "depth_to_color": _extrinsics_to_dict(streams["depth"], streams["color"]),
+                "color_to_depth": _extrinsics_to_dict(streams["color"], streams["depth"]),
+            }
+        )
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
         "logical_camera": logical_camera,
         "device": device_info(device, rs),
         "requested_profile": dict(requested_profile or {}),
         "profile_note": PROFILE_NOTE,
-        "depth_scale_m_per_unit": _depth_scale(profile),
+        "depth_scale_m_per_unit": _depth_scale(profile) if use_depth else None,
         "streams": {name: _video_stream_to_dict(stream) for name, stream in streams.items()},
         "extrinsics": extrinsics,
-        "baseline": _baseline_from_extrinsics(extrinsics["infrared1_to_infrared2"]),
     }
+    if use_ir:
+        payload["baseline"] = _baseline_from_extrinsics(extrinsics["infrared1_to_infrared2"])
+    return payload
 
 
 def _enable_required_streams(config: Any, rs: Any, width: int, height: int, fps: int) -> None:
@@ -392,6 +414,8 @@ def export_connected_realsense_calibrations(
     output_dir: Path,
     manifest_path: Path | None = None,
     session_metadata: Mapping[str, Any] | None = None,
+    use_depth: bool = True,
+    use_ir: bool = True,
 ) -> dict[str, Path]:
     rs = _import_rs()
     payloads: dict[str, dict[str, Any]] = {}
@@ -408,6 +432,8 @@ def export_connected_realsense_calibrations(
             profile,
             logical_camera=str(logical_name),
             requested_profile=requested_profile,
+            use_depth=use_depth,
+            use_ir=use_ir,
             rs=rs,
         )
     if not payloads:

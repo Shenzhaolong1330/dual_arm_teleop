@@ -101,3 +101,13 @@ def test_rgbd_reused_state_reset_treats_current_frame_as_new():
     robot._reset_published_camera_frame_indices()
 
     assert _publish(robot)["head_rgbd_reused"] is False
+
+
+def test_resume_restores_next_global_frame_index():
+    robot = _robot()
+    robot._global_frame_index = 0
+
+    robot.set_next_global_frame_index(42)
+
+    assert robot._next_global_frame_index() == 42
+    assert robot._next_global_frame_index() == 43

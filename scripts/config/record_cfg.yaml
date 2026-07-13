@@ -21,9 +21,19 @@ record:
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
   run_mode: "run_record" # run_record | run_policy | run_mix
-  save_depth_sidecar: true # save native RealSense depth as sidecar.* parquet arrays
-  save_ir_sidecar: true # save left/right RealSense IR as sidecar.* parquet arrays
+  save_depth_sidecar: true # save native RealSense uint16 depth in the selected raw sidecar
+  save_ir_sidecar: true # save raw left/right RealSense uint8 IR in the selected raw sidecar
   save_rgbd_timestamps: true # save global_frame_index, robot_timestamp, and per-camera RealSense timestamps
+  rgbd_sidecar_storage: "zarr" # zarr (default streaming Zarr v2) | parquet (legacy compatibility)
+  rgbd_sidecar_zarr:
+    relative_path: "sidecars/realsense.zarr"
+    chunk_frames: 8
+    queue_capacity_frames: 64
+    compressor:
+      codec: "blosc"
+      cname: "lz4"
+      clevel: 1
+      shuffle: "bitshuffle"
   rgb_camera_name_mode: "rgb" # rgb -> head_rgb/left_wrist_rgb/right_wrist_rgb; legacy_image keeps old *_image keys for old checkpoints
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
@@ -68,7 +78,7 @@ record:
     num_episodes: 10 # number of episodes to record
     display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
-    resume_dataset: # dataset to resume from if resume is true
+    resume_dataset: "flexiv_dual_arm_3d/pick_place_20260713_v03" # dataset to resume from if resume is true
     # robot-dagger sets success_policy automatically for full_success_episode/hybrid.
     # explicit prompts y/n; recorded_is_success saves every kept episode as success=true.
     success_policy:

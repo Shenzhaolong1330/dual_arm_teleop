@@ -93,6 +93,7 @@ class FlexivDualArmConfig(RobotConfig):
     save_depth_sidecar: bool = False
     save_ir_sidecar: bool = False
     save_rgbd_timestamps: bool = False
+    rgbd_sidecar_storage: str = "parquet"
 
     # Compatibility fields accepted from the generic record config parser.
     robot_ip: str = "localhost"

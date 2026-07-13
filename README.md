@@ -261,7 +261,9 @@ Before data collection, usually edit `scripts/config/record_cfg.yaml`:
 - `record.repo_id`: dataset name. Recommended format: `<robot_task<num>_step<num>/<description>`, for example `nero_task3_step1/2mL_empty_right`.
 - `record.robot_type`: choose a robot type such as `nero_dual_arm`, `franka_dual_arm`, or `flexiv_dual_arm`.
 - `record.run_mode`: choose `run_record`, `run_policy`, or `run_mix`.
-- `record.save_depth_sidecar`, `record.save_ir_sidecar`, `record.save_rgbd_timestamps`: save native RealSense depth, left/right IR, `global_frame_index`, `robot_timestamp`, and per-camera RGB-D timestamps as non-image parquet sidecar fields.
+- `record.save_depth_sidecar`, `record.save_ir_sidecar`, `record.save_rgbd_timestamps`: select native RealSense depth/IR and the scalar fields required to join them to the LeRobot timeline.
+- `record.rgbd_sidecar_storage`: `zarr` is the default for new Flexiv recordings; `parquet` keeps the legacy array-in-Parquet path. Zarr mode requires `save_rgbd_timestamps: true` and never double-writes the large arrays.
+- `record.rgbd_sidecar_zarr`: configures the relative store path, frame chunk size, bounded queue capacity, and compressor. The measured default is 8 frames with Blosc/LZ4 level 1 and bitshuffle.
 - `record.rgb_camera_name_mode`: `rgb` records RGB video as `observation.images.head_rgb`, `observation.images.left_wrist_rgb`, and `observation.images.right_wrist_rgb`; use `legacy_image` only when an old checkpoint expects the previous `*_image` keys.
 - `record.policy.type`, `config_path`, `pretrained_path`: required only for `run_policy` or `run_mix`.
 - `record.task`: task description, number of episodes, resume behavior, and whether to record success labels.
@@ -277,17 +279,62 @@ Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
 - `robot.use_gripper` and gripper parameters: enable grippers, close/open thresholds, max opening width, and force.
 - `cameras.*_serial`, `width`, `height`: RealSense serial numbers and resolution.
 
-RGB-D sidecar recording keeps RGB in the normal LeRobot video fields and stores depth/IR as parquet arrays such as `sidecar.head_depth`, `sidecar.head_left_ir`, and `sidecar.head_right_ir`. These paths have different storage lifetimes: RGB is handed to the image/video writer, while depth/IR remains in the in-memory episode buffer until Parquet is written. RealSense RGB, depth, and left/right IR arrays are therefore copied out of SDK-owned buffers at the camera boundary, and non-image arrays are snapshotted again when added to the episode history.
+### Raw RGB-D Zarr v2 sidecar
+
+New Flexiv recordings keep RGB in the normal LeRobot MP4 video fields and stream native depth/IR into a separate Zarr v2 acquisition store:
+
+```text
+<dataset_root>/
+├── data/...                         # state, action, indices, and scalar sync only
+├── videos/...                       # RGB MP4, unchanged
+├── meta/info.json
+├── meta/realsense_calibration.json
+├── meta/rgbd_sidecar.json           # authoritative commit ledger
+└── sidecars/realsense.zarr
+```
+
+The Zarr arrays are `/data/{head,left_wrist,right_wrist}/{depth,left_ir,right_ir,rgbd_timestamp,rgbd_reused}`, plus `/meta/{index,episode_index,frame_index,global_frame_index,robot_timestamp,episode_ends}`. Depth remains native `uint16` RealSense units; left/right IR remains lossless `uint8`. The nine 2-D depth/IR arrays are absent from `meta/info.json`, the LeRobot episode buffer, episode statistics, and main Parquet. Scalar timestamps, reused flags, and all existing state/action/RGB fields remain in Parquet.
+
+`meta/rgbd_sidecar.json` is authoritative. During an active episode, physical arrays may contain an uncommitted tail, but readers expose only its committed prefix. Saving an episode drains the bounded writer queue, durably seals LeRobot Parquet/meta files, verifies scalar joins, appends `episode_ends`, and atomically advances the manifest. Rerecord clears both the LeRobot buffer and the uncommitted Zarr tail. Resume refuses short arrays, calibration/hash/schema conflicts, or any mismatch between manifest counts, `info.json`, and Parquet; it only truncates tails beyond an already recorded manifest prefix. Ctrl+C leaves `incomplete`, and writer/schema/queue failures leave `incomplete` or `corrupt` data for diagnosis instead of deleting it or pretending it is complete.
+
+The default configuration is:
+
+```yaml
+save_depth_sidecar: true
+save_ir_sidecar: true
+save_rgbd_timestamps: true
+rgbd_sidecar_storage: zarr       # zarr | parquet
+rgbd_sidecar_zarr:
+  relative_path: sidecars/realsense.zarr
+  chunk_frames: 8
+  queue_capacity_frames: 64
+  compressor: {codec: blosc, cname: lz4, clevel: 1, shuffle: bitshuffle}
+```
+
+This store is a raw acquisition sidecar, not a DP3 replay-buffer Zarr. DP3 conversion remains a later derived export that builds policy fields such as point clouds. Raw depth/IR remains available for preview and downstream stereo work.
+
+The legacy `rgbd_sidecar_storage: parquet` path still writes `sidecar.head_depth`, `sidecar.head_left_ir`, and related arrays into Parquet. Tools auto-detect the format: a present manifest must validate as Zarr and is never silently bypassed; only datasets without a manifest use the legacy path.
 
 Flexiv tracks the last RealSense SDK `frame_index` consumed from each camera independently. A repeated index sets that camera's `*_rgbd_reused=true` even when the reader thread did not raise; a read failure that reuses the last valid frameset is also marked true. The tracking state is reset on camera connect, robot reset, stop, and release. No additional frame-index dataset field is introduced, so the existing feature schema remains compatible.
 
-After every RGB-D recording, run the full sidecar checker against the exact dataset root. It reads raw Parquet rows, checks every depth/left-IR/right-IR frame in every episode, rejects any pixel-identical adjacent pair whose `rgbd_reused` flag is false, and rejects long identical runs even when they are marked reused. The default maximum run is four frames and can be changed with `--max-consecutive-identical`:
+After every RGB-D recording, run the full sidecar checker against the exact dataset root. It validates the manifest, calibration SHA-256 and stream shapes, every Zarr array, committed counts and episode boundaries, chunked Parquet/Zarr join keys, timestamp order, reused flags, SHA-256 uniqueness, exact adjacent equality, unmarked duplicates, and longest frozen runs. Legacy Parquet recordings retain the same content checks. The default maximum identical run is four frames:
 
 ```bash
 python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
+
+# One RGB/depth/IR preview frame
+python scripts/tools/export_rgbd_sidecar_preview.py \
+  --root /absolute/path/to/lerobot/dataset --episode 0 --frame-index 0 --camera head
+
+# Lossless raw IR pair; this exporter does not rectify images
+python scripts/tools/export_ffs_stereo_pair.py \
+  --root /absolute/path/to/lerobot/dataset --episode 0 --frame-index 0 --camera head
+
+# Hardware-free storage benchmark
+python scripts/tools/benchmark_rgbd_zarr_sidecar.py --frames 150
 ```
 
-Only start DP3 Zarr conversion after this command passes. Re-exporting Zarr cannot repair a raw LeRobot dataset whose depth/IR arrays are already frozen; retain the old dataset read-only for diagnosis and collect new sensor data.
+Record a new smoke dataset first and require the checker to exit 0 before any DP3 conversion or formal collection. Re-encoding cannot repair an older dataset whose borrowed-buffer depth/IR frames are already frozen; keep such data read-only for diagnosis and reacquire it.
 
 Before training, usually edit `scripts/config/train_cfg.yaml`:
 

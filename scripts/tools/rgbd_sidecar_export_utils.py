@@ -13,6 +13,11 @@ from PIL import Image
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+from scripts.core.rgbd_zarr_sidecar import (
+    MANIFEST_RELATIVE_PATH,
+    ZarrSidecarReader,
+)
+
 
 CAMERAS = ("head", "left_wrist", "right_wrist")
 
@@ -53,6 +58,48 @@ def sidecar_keys(camera: str) -> dict[str, str]:
         "left_ir": f"sidecar.{camera}_left_ir",
         "right_ir": f"sidecar.{camera}_right_ir",
     }
+
+
+class RgbdSidecarSource:
+    """Manifest-first raw frame source with legacy Parquet compatibility."""
+
+    def __init__(self, dataset: LeRobotDataset):
+        self.dataset = dataset
+        self._reader = None
+        if (dataset.root / MANIFEST_RELATIVE_PATH).exists():
+            # A present manifest is authoritative. Any validation error must
+            # propagate; never hide damaged Zarr behind legacy Parquet fields.
+            self._reader = ZarrSidecarReader(dataset.root, require_complete=True)
+
+    @property
+    def storage(self) -> str:
+        return "zarr" if self._reader is not None else "parquet"
+
+    def key(self, camera: str, modality: str) -> str:
+        if self._reader is not None:
+            return f"/data/{camera}/{modality}"
+        return sidecar_keys(camera)[modality]
+
+    def require(self, camera: str, modalities: tuple[str, ...]) -> None:
+        if self._reader is not None:
+            for modality in modalities:
+                self._reader.array(f"/data/{camera}/{modality}")
+            return
+        legacy = sidecar_keys(camera)
+        require_keys(self.dataset.features, [legacy[modality] for modality in modalities])
+
+    def frame(self, dataset_index: int, camera: str) -> dict[str, Any]:
+        if self._reader is not None:
+            return self._reader.frame(dataset_index, camera)
+        raw_sample = raw_hf_sample(self.dataset, dataset_index)
+        legacy = sidecar_keys(camera)
+        return {
+            "depth": raw_sample.get(legacy["depth"]),
+            "left_ir": raw_sample.get(legacy["left_ir"]),
+            "right_ir": raw_sample.get(legacy["right_ir"]),
+            "rgbd_timestamp": scalar_or_none(raw_sample.get(f"{camera}_rgbd_timestamp")),
+            "rgbd_reused": scalar_or_none(raw_sample.get(f"{camera}_rgbd_reused")),
+        }
 
 
 def require_keys(features: dict[str, Any], keys: list[str]) -> None:
