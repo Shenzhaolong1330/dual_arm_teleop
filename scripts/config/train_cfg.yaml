@@ -31,11 +31,11 @@ train:
   policy:
     # Supported: act | diffusion | dp | diffusion_policy.
     # 推荐保持为普通 ACT；轮次式 DAgger 会由 run_dagger_rounds.py 在内存中注入训练参数。
-    type: "act"
-    config_path: scripts/config/policies/act_train_config.yaml
+    # type: "act"
+    # config_path: scripts/config/policies/act_train_config.yaml
     # For diffusion:
-    # type: "diffusion"
-    # config_path: scripts/config/policies/diffusion_train_config.yaml
+    type: "diffusion"
+    config_path: scripts/config/policies/diffusion_train_config.yaml
 
     # Policy hyperparameters live in scripts/config/policies/*_train_config.yaml.
 

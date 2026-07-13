@@ -276,7 +276,17 @@ tools-merge-datasets --config scripts/config/merge_dataset_cfg.yaml --dry-run
 - `robot.use_gripper` 和夹爪参数：夹爪启用、开合阈值、最大开口和力。
 - `cameras.*_serial`、`width`、`height`：RealSense 序列号和分辨率。
 
-RGB-D sidecar 采集方式是：RGB 保持为标准 LeRobot video 字段，depth/IR 保存为 `sidecar.head_depth`、`sidecar.head_left_ir`、`sidecar.head_right_ir` 等 parquet 数组字段。Flexiv 相机后台线程读失败时会复用上一组有效 RGB-D/IR frameset，并在对应 `*_rgbd_reused` 字段标记；如果启动阶段从未读到有效 frameset，则直接失败，不写空帧。
+RGB-D sidecar 采集方式是：RGB 保持为标准 LeRobot video 字段，depth/IR 保存为 `sidecar.head_depth`、`sidecar.head_left_ir`、`sidecar.head_right_ir` 等 parquet 数组字段。这两条路径的存储生命周期不同：RGB 会交给 image/video writer，而 depth/IR 会一直保存在内存中的 episode buffer，直到写入 Parquet。因此 RealSense 的 RGB、depth、左右 IR 数组会在相机边界脱离 SDK 管理的缓冲区，非图像数组进入 episode 历史时还会再做一次快照。
+
+Flexiv 会为每个相机分别记录上一次被消费的 RealSense SDK `frame_index`。即使后台读取线程没有抛异常，只要再次消费相同 index，对应相机的 `*_rgbd_reused` 就会设为 true；读取失败并复用上一组有效 frameset 时也会设为 true。camera connect、robot reset、stop 和 release 都会清空这组状态。本次没有新增 frame-index 数据集字段，因此现有 feature schema 保持兼容。
+
+每次 RGB-D 采集结束后，必须针对精确的数据集根目录运行完整 sidecar 检查。工具直接读取原始 Parquet 行，遍历每个 episode 的每一帧 depth、左 IR 和右 IR；如果相邻帧逐像素完全一致但 `rgbd_reused=false`，检查立即判错；即使正确标记为 reused，过长的连续相同区间也会判错。默认最多允许连续 4 帧，可通过 `--max-consecutive-identical` 调整：
+
+```bash
+python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
+```
+
+只有该检查通过后才能开始 DP3 Zarr 转换。原始 LeRobot 数据中的 depth/IR 如果已经冻结，重新导出 Zarr 无法恢复缺失的真实传感器帧；旧数据应保持只读用于诊断，并重新采集。
 
 训练前通常需要修改 `scripts/config/train_cfg.yaml`：
 
@@ -407,8 +417,8 @@ robot-record --config scripts/config/record_cfg.yaml
 robot-visualize --config scripts/config/record_cfg.yaml
 robot-replay --config scripts/config/record_cfg.yaml
 
-# 检查 RGB-D/IR sidecar 字段
-python scripts/check_rgbd_sidecar_dataset.py --repo-id <your_repo_id>
+# 在任何 DP3 Zarr 转换前逐帧检查 RGB-D/IR sidecar
+python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
 
 # 6. 训练策略
 robot-train --config scripts/config/train_cfg.yaml

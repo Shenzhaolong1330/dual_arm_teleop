@@ -122,6 +122,7 @@ class FlexivDualArm(Robot):
         self._connected_cameras: set[str] = set()
         self._frame_lock = threading.Lock()
         self._latest_frames: dict[str, Any] = {}
+        self._last_published_camera_frame_indices: dict[str, int] = {}
         self._global_frame_index = 0
         self._action_debug_count = 0
         self._timing_debug_counts: dict[str, int] = {}
@@ -484,6 +485,7 @@ class FlexivDualArm(Robot):
         logger.info("[FLEXIV] %s released without arm Stop", self.name)
 
     def _release_handles(self) -> None:
+        self._reset_published_camera_frame_indices()
         self._left_robot = None
         self._right_robot = None
         self._left_gripper = None
@@ -498,6 +500,7 @@ class FlexivDualArm(Robot):
     def reset(self) -> None:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        self._reset_published_camera_frame_indices()
         self._stop_cartesian_servo_thread()
         if self.config.reset_go_home:
             self._execute_home_for_sides(("left", "right"))
@@ -1393,6 +1396,7 @@ class FlexivDualArm(Robot):
     def _connect_cameras(self) -> None:
         if not self.cameras:
             return
+        self._reset_published_camera_frame_indices()
         self._camera_stop_event.clear()
         warmed_cameras: list[tuple[str, Any]] = []
         try:
@@ -1531,6 +1535,7 @@ class FlexivDualArm(Robot):
         self._camera_threads.clear()
         with self._frame_lock:
             self._latest_frames.clear()
+            self._last_published_camera_frame_indices.clear()
         for cam_name, cam in self.cameras.items():
             is_connected_attr = getattr(cam, "is_connected", False)
             is_connected = bool(is_connected_attr() if callable(is_connected_attr) else is_connected_attr)
@@ -1558,7 +1563,11 @@ class FlexivDualArm(Robot):
 
     def _capture_camera_frame(self, cam: Any, timeout_ms: int | None = None) -> Any:
         timeout = max(int(timeout_ms or self.config.camera_read_timeout_ms), 200)
-        needs_rgbd_frame = self.config.save_depth_sidecar or self.config.save_ir_sidecar or self.config.save_rgbd_timestamps
+        needs_rgbd_frame = (
+            self.config.save_depth_sidecar
+            or self.config.save_ir_sidecar
+            or self.config.save_rgbd_timestamps
+        )
         if needs_rgbd_frame and hasattr(cam, "read_rgbd_ir"):
             return cam.read_rgbd_ir(timeout_ms=timeout)
         return cam.read(timeout_ms=timeout)
@@ -1580,7 +1589,29 @@ class FlexivDualArm(Robot):
             frame = latest_frames.get(cam_name)
             if frame is None:
                 frame = self._capture_camera_frame(cam)
+            frame = self._mark_consumed_camera_frame(cam_name, frame)
             self._add_camera_frame_observation(obs, cam_name, frame)
+
+    def _mark_consumed_camera_frame(self, cam_name: str, frame: Any) -> Any:
+        if not isinstance(frame, dict):
+            return frame
+
+        published = dict(frame)
+        frame_index = frame.get("frame_index")
+        repeated_index = False
+        if frame_index is not None:
+            current_index = int(frame_index)
+            with self._frame_lock:
+                repeated_index = (
+                    self._last_published_camera_frame_indices.get(cam_name) == current_index
+                )
+                self._last_published_camera_frame_indices[cam_name] = current_index
+        published["reused"] = bool(frame.get("reused", False) or repeated_index)
+        return published
+
+    def _reset_published_camera_frame_indices(self) -> None:
+        with self._frame_lock:
+            self._last_published_camera_frame_indices.clear()
 
     @staticmethod
     def _camera_base_name(cam_name: str) -> str:

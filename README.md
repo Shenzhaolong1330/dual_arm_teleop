@@ -277,7 +277,17 @@ Hardware parameters are usually edited in `scripts/config/robots/*.yaml`:
 - `robot.use_gripper` and gripper parameters: enable grippers, close/open thresholds, max opening width, and force.
 - `cameras.*_serial`, `width`, `height`: RealSense serial numbers and resolution.
 
-RGB-D sidecar recording keeps RGB in the normal LeRobot video fields and stores depth/IR as parquet arrays such as `sidecar.head_depth`, `sidecar.head_left_ir`, and `sidecar.head_right_ir`. Flexiv camera reader threads reuse the last valid RGB-D/IR frameset after a read failure and mark the corresponding `*_rgbd_reused` field; startup still fails if no valid frameset has ever been captured.
+RGB-D sidecar recording keeps RGB in the normal LeRobot video fields and stores depth/IR as parquet arrays such as `sidecar.head_depth`, `sidecar.head_left_ir`, and `sidecar.head_right_ir`. These paths have different storage lifetimes: RGB is handed to the image/video writer, while depth/IR remains in the in-memory episode buffer until Parquet is written. RealSense RGB, depth, and left/right IR arrays are therefore copied out of SDK-owned buffers at the camera boundary, and non-image arrays are snapshotted again when added to the episode history.
+
+Flexiv tracks the last RealSense SDK `frame_index` consumed from each camera independently. A repeated index sets that camera's `*_rgbd_reused=true` even when the reader thread did not raise; a read failure that reuses the last valid frameset is also marked true. The tracking state is reset on camera connect, robot reset, stop, and release. No additional frame-index dataset field is introduced, so the existing feature schema remains compatible.
+
+After every RGB-D recording, run the full sidecar checker against the exact dataset root. It reads raw Parquet rows, checks every depth/left-IR/right-IR frame in every episode, rejects any pixel-identical adjacent pair whose `rgbd_reused` flag is false, and rejects long identical runs even when they are marked reused. The default maximum run is four frames and can be changed with `--max-consecutive-identical`:
+
+```bash
+python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
+```
+
+Only start DP3 Zarr conversion after this command passes. Re-exporting Zarr cannot repair a raw LeRobot dataset whose depth/IR arrays are already frozen; retain the old dataset read-only for diagnosis and collect new sensor data.
 
 Before training, usually edit `scripts/config/train_cfg.yaml`:
 
@@ -408,8 +418,8 @@ robot-record --config scripts/config/record_cfg.yaml
 robot-visualize --config scripts/config/record_cfg.yaml
 robot-replay --config scripts/config/record_cfg.yaml
 
-# Check RGB-D/IR sidecar fields
-python scripts/check_rgbd_sidecar_dataset.py --repo-id <your_repo_id>
+# Check every RGB-D/IR sidecar frame before any DP3 Zarr conversion
+python scripts/check_rgbd_sidecar_dataset.py --root /absolute/path/to/lerobot/dataset
 
 # 6. Train a policy
 robot-train --config scripts/config/train_cfg.yaml
