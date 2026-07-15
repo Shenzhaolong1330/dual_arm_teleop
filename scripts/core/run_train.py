@@ -102,6 +102,12 @@ from lerobot.utils.train_utils import (
     update_last_checkpoint,
 )
 from lerobot.utils.utils import format_big_number, has_method, init_logging
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    build_flexiv_state_schema,
+    persist_flexiv_checkpoint_schema,
+    validate_flexiv_checkpoint,
+    validate_flexiv_dataset_schema,
+)
 
 import draccus
 from huggingface_hub import hf_hub_download
@@ -747,6 +753,19 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if not is_main_process:
         dataset = make_dataset(cfg)
 
+    flexiv_schema = None
+    if getattr(dataset.meta, "robot_type", None) == "flexiv_dual_arm":
+        validate_flexiv_dataset_schema(
+            dataset.meta.info,
+            dataset.features,
+            source=f"training dataset {cfg.dataset.repo_id}",
+        )
+        validate_flexiv_checkpoint(
+            cfg.policy.pretrained_path,
+            source="Flexiv training checkpoint",
+        )
+        flexiv_schema = build_flexiv_state_schema()
+
     # Create environment used for evaluating checkpoints during training on simulation data.
     # On real-world data, no need to create an environment as evaluations are done outside train.py,
     # using the eval.py instead, with gym_dora environment and dora-rs.
@@ -980,6 +999,8 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
+                if flexiv_schema is not None:
+                    persist_flexiv_checkpoint_schema(checkpoint_dir / "pretrained_model")
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)

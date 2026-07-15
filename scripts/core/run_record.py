@@ -10,6 +10,12 @@ from robots import (
     create_robot_config,
     create_robot,
 )
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    persist_flexiv_dataset_schema,
+    validate_flexiv_checkpoint,
+    validate_flexiv_dataset_schema,
+    validate_flexiv_feature_schema,
+)
 from teleoperators import (
     OculusTeleopConfig,
     OculusTeleop,
@@ -25,7 +31,11 @@ import termios, sys
 import time
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import hw_to_dataset_features, build_dataset_frame
+from lerobot.datasets.utils import (
+    build_dataset_frame,
+    hw_to_dataset_features,
+    load_info,
+)
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
@@ -1909,11 +1919,34 @@ def run_record(record_cfg: RecordConfig):
                 record_cfg.annotate_success,
             )
 
+        if record_cfg.robot_type == "flexiv_dual_arm":
+            validate_flexiv_feature_schema(
+                dataset_features,
+                source="new Flexiv recording features",
+            )
+
         if record_cfg.resume:
+            if record_cfg.robot_type == "flexiv_dual_arm":
+                # Validate only the small standard metadata file before LeRobot
+                # opens the existing Parquet/video payloads. This keeps legacy
+                # 28D data fail-fast and read-only.
+                resume_info = load_info(Path(dataset_root))
+                validate_flexiv_dataset_schema(
+                    resume_info,
+                    resume_info.get("features", {}),
+                    source=f"resume dataset {dataset_root}",
+                )
             dataset = LeRobotDataset(
                 dataset_name,
                 root=dataset_root,
             )
+
+            if record_cfg.robot_type == "flexiv_dual_arm":
+                validate_flexiv_dataset_schema(
+                    dataset.meta.info,
+                    dataset.features,
+                    source=f"resume dataset {dataset_root}",
+                )
 
             if hasattr(robot, "cameras") and len(robot.cameras) > 0:
                 dataset.start_image_writer()
@@ -1928,6 +1961,20 @@ def run_record(record_cfg: RecordConfig):
                 root=dataset_root,
                 use_videos=True,
                 image_writer_threads=4,
+            )
+            if record_cfg.robot_type == "flexiv_dual_arm":
+                schema = persist_flexiv_dataset_schema(dataset_root, dataset.meta.info)
+                dataset.meta.info["robot_state_schema"] = schema
+                validate_flexiv_dataset_schema(
+                    dataset.meta.info,
+                    dataset.features,
+                    source=f"new dataset {dataset_root}",
+                )
+
+        if record_cfg.robot_type == "flexiv_dual_arm" and record_cfg.policy is not None:
+            validate_flexiv_checkpoint(
+                getattr(record_cfg.policy, "pretrained_path", None),
+                source="Flexiv policy checkpoint",
             )
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
@@ -2235,7 +2282,10 @@ def run_record(record_cfg: RecordConfig):
         _release_robot_without_stop(robot)
         _disconnect_teleop(teleop)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path, preserve=record_cfg.use_zarr_rgbd_sidecar)
+        handle_incomplete_dataset(
+            dataset_path,
+            preserve=record_cfg.use_zarr_rgbd_sidecar or record_cfg.resume,
+        )
         sys.exit(1)
 
     except KeyboardInterrupt:

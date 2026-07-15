@@ -316,6 +316,23 @@ rgbd_sidecar_zarr:
 
 Flexiv 会为每个相机分别记录上一次被消费的 RealSense SDK `frame_index`。即使后台读取线程没有抛异常，只要再次消费相同 index，对应相机的 `*_rgbd_reused` 就会设为 true；读取失败并复用上一组有效 frameset 时也会设为 true。camera connect、robot reset、stop 和 release 都会清空这组状态。本次没有新增 frame-index 数据集字段，因此现有 feature schema 保持兼容。
 
+### Flexiv 绝对 TCP 状态 schema
+
+新的 `flexiv_dual_arm` 采集会在 `meta/info.json["robot_state_schema"]` 中持久化 `state_schema: flexiv_abs_rot6d_v2`。`observation.state` 为 `float32 (34,)`，严格顺序如下：
+
+```text
+left_joint_1..7.pos、
+left_ee_pose.x/y/z、
+left_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z、
+left_gripper_state_norm、
+right_joint_1..7.pos、
+right_ee_pose.x/y/z、
+right_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z、
+right_gripper_state_norm
+```
+
+六个 rotation 值是当前 Flexiv RDK TCP 在 RDK world/base frame 中的绝对姿态，约定为 `rot6d = concatenate([R[:, 0], R[:, 1]])`。它们不是 Home-relative、相机坐标系或 Quest 零点坐标。`action` 仍为 `float32 (14,)`，继续使用原有左右两侧 `xyz + rotvec` 增量字段，最后是两个夹爪命令。resume 会校验持久化 schema 和字段顺序；旧的 28D 绝对 rotvec 数据集和 checkpoint 会 fail-fast，采集流程不会修改它们。
+
 每次 RGB-D 采集结束后，必须针对精确的数据集根目录运行完整 sidecar 检查。工具会验证 manifest、calibration SHA-256 与 stream shape、每个 Zarr 数组、提交计数与 episode 边界、分块 Parquet/Zarr join key、timestamp 顺序、reused、SHA-256 唯一帧、相邻逐像素相等、未标记重复和最长冻结区间。legacy Parquet 录制仍保留相同内容检查。默认最多允许连续 4 帧：
 
 ```bash

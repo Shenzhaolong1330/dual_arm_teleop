@@ -15,10 +15,14 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from .config_flexiv import FlexivDualArmConfig
+from .flexiv_state_schema import (
+    ACTION_DELTA_POSE_FIELDS,
+    STATE_POSITION_FIELDS,
+    STATE_ROTATION_6D_FIELDS,
+)
 
 logger = logging.getLogger(__name__)
 
-AXES = ("x", "y", "z", "rx", "ry", "rz")
 GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
 
 
@@ -42,16 +46,39 @@ def _clip_norm(values: np.ndarray, limit: float | None) -> np.ndarray:
     return values * (float(limit) / norm)
 
 
-def _pose7_to_pose6(pose7: Any) -> np.ndarray:
+def _normalize_rdk_quat_wxyz(quat_wxyz: Any) -> np.ndarray:
+    quat = np.asarray(quat_wxyz, dtype=float).reshape(-1)
+    if quat.size != 4:
+        raise ValueError(f"RDK quaternion must contain 4 values in wxyz order, got {quat.size}.")
+    if not np.all(np.isfinite(quat)):
+        raise ValueError(f"RDK quaternion contains non-finite values: {quat!r}")
+    norm = float(np.linalg.norm(quat))
+    if norm < 1e-12:
+        raise ValueError("RDK quaternion has near-zero norm and cannot define an orientation.")
+    return quat / norm
+
+
+def _rotation_matrix_to_rotation_6d(rotation_matrix: Any) -> np.ndarray:
+    matrix = np.asarray(rotation_matrix, dtype=float)
+    if matrix.shape != (3, 3):
+        raise ValueError(f"Rotation matrix must have shape (3, 3), got {matrix.shape}.")
+    if not np.all(np.isfinite(matrix)):
+        raise ValueError("Rotation matrix contains non-finite values.")
+    # Explicit convention: concatenate column 0 followed by column 1.
+    return np.concatenate((matrix[:, 0], matrix[:, 1]))
+
+
+def _pose7_to_absolute_xyz_rot6d(pose7: Any) -> tuple[np.ndarray, np.ndarray]:
+    """Convert an RDK ``[x, y, z, qw, qx, qy, qz]`` pose to absolute state fields."""
+
     pose = _as_np(pose7, 7)
-    rotvec = np.zeros(3, dtype=float)
-    quat = _rdk_quat_wxyz_to_scipy_xyzw(pose[3:7])
-    if np.linalg.norm(quat) > 1e-12:
-        try:
-            rotvec = Rotation.from_quat(quat).as_rotvec()
-        except ValueError:
-            rotvec = np.zeros(3, dtype=float)
-    return np.concatenate([pose[:3], rotvec])
+    if not np.all(np.isfinite(pose[:3])):
+        raise ValueError(f"RDK TCP position contains non-finite values: {pose[:3]!r}")
+    quat_wxyz = _normalize_rdk_quat_wxyz(pose[3:7])
+    quat_xyzw = _rdk_quat_wxyz_to_scipy_xyzw(quat_wxyz)
+    rotation_matrix = Rotation.from_quat(quat_xyzw).as_matrix()
+    rotation_6d = _rotation_matrix_to_rotation_6d(rotation_matrix)
+    return pose[:3].copy(), rotation_6d
 
 
 def _apply_delta_to_pose7(current_pose7: np.ndarray, delta6: np.ndarray) -> np.ndarray:
@@ -541,8 +568,14 @@ class FlexivDualArm(Robot):
         return action
 
     def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
-        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
-        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        left_delta = np.array(
+            [action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in ACTION_DELTA_POSE_FIELDS],
+            dtype=float,
+        )
+        right_delta = np.array(
+            [action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in ACTION_DELTA_POSE_FIELDS],
+            dtype=float,
+        )
         left_delta = self._apply_mount_rotation(
             left_delta,
             self._mount_raw_deg("left"),
@@ -641,8 +674,14 @@ class FlexivDualArm(Robot):
         if self._action_debug_count > 5 and self._action_debug_count % every_n != 0:
             return
 
-        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
-        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        left_delta = np.array(
+            [action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in ACTION_DELTA_POSE_FIELDS],
+            dtype=float,
+        )
+        right_delta = np.array(
+            [action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in ACTION_DELTA_POSE_FIELDS],
+            dtype=float,
+        )
         left_mapped = self._apply_mount_rotation(
             left_delta,
             self._mount_raw_deg("left"),
@@ -1369,9 +1408,7 @@ class FlexivDualArm(Robot):
             states = robot.states()
         joints = _as_np(getattr(states, "q", None), self._num_joints_per_arm)
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
-        if np.linalg.norm(pose7[3:7]) < 1e-12:
-            pose7[3] = 1.0
-        pose6 = _pose7_to_pose6(pose7)
+        position, rotation_6d = _pose7_to_absolute_xyz_rot6d(pose7)
 
         if side == "left":
             self._cached_left_pose7 = pose7.copy()
@@ -1380,8 +1417,10 @@ class FlexivDualArm(Robot):
 
         for index, value in enumerate(joints, start=1):
             obs[f"{side}_joint_{index}.pos"] = float(value)
-        for index, axis in enumerate(AXES):
-            obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
+        for axis, value in zip(STATE_POSITION_FIELDS, position, strict=True):
+            obs[f"{side}_ee_pose.{axis}"] = float(value)
+        for component, value in zip(STATE_ROTATION_6D_FIELDS, rotation_6d, strict=True):
+            obs[f"{side}_ee_rotation_6d.{component}"] = float(value)
 
         if self.config.use_gripper:
             cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
@@ -1658,8 +1697,10 @@ class FlexivDualArm(Robot):
         for side in ("left", "right"):
             for index in range(self._num_joints_per_arm):
                 features[f"{side}_joint_{index + 1}.pos"] = float
-            for axis in AXES:
+            for axis in STATE_POSITION_FIELDS:
                 features[f"{side}_ee_pose.{axis}"] = float
+            for component in STATE_ROTATION_6D_FIELDS:
+                features[f"{side}_ee_rotation_6d.{component}"] = float
             if self.config.use_gripper:
                 features[f"{side}_gripper_state_norm"] = float
         return features
@@ -1669,7 +1710,7 @@ class FlexivDualArm(Robot):
         features = {}
         if self.config.control_mode == "oculus":
             for side in ("left", "right"):
-                for axis in AXES:
+                for axis in ACTION_DELTA_POSE_FIELDS:
                     features[f"{side}_delta_ee_pose.{axis}"] = float
         else:
             for side in ("left", "right"):
