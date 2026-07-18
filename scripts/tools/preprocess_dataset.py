@@ -12,6 +12,10 @@ import yaml
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import DEFAULT_FEATURES
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    propagate_flexiv_dataset_schema,
+    validate_flexiv_dataset_schema,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -77,7 +81,16 @@ def _indices_matching(action_names: list[str], suffixes: set[str]) -> list[int]:
 
 
 def _gripper_indices(action_names: list[str]) -> list[int]:
-    return [idx for idx, name in enumerate(action_names) if "gripper" in name]
+    return [
+        idx
+        for idx, name in enumerate(action_names)
+        if "gripper" in name and not _force_or_wrench_name(name)
+    ]
+
+
+def _force_or_wrench_name(name: str) -> bool:
+    lower = name.lower()
+    return "force" in lower or "wrench" in lower
 
 
 def _expanded_mask(event_mask: np.ndarray, radius: int) -> np.ndarray:
@@ -93,17 +106,44 @@ def _expanded_mask(event_mask: np.ndarray, radius: int) -> np.ndarray:
     return keep
 
 
-def _gripper_event_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray:
+def _gripper_event_mask(
+    actions: np.ndarray,
+    action_names: list[str],
+    states: np.ndarray | None,
+    state_names: list[str],
+    cfg: dict[str, Any],
+) -> np.ndarray:
     gripper_cfg = cfg.get("gripper_events", {}) or {}
     if not gripper_cfg.get("enabled", False):
         return np.zeros(actions.shape[0], dtype=bool)
 
-    indices = _gripper_indices(action_names)
-    if not indices or actions.shape[0] == 0:
+    signal = None
+    indices: list[int] = []
+    if states is not None and state_names:
+        state_array = np.asarray(states, dtype=np.float32)
+        if state_array.ndim == 1:
+            state_array = state_array[:, None]
+        indices = [
+            idx
+            for idx, name in enumerate(state_names)
+            if "gripper" in name.lower() and not _force_or_wrench_name(name)
+            and idx < state_array.shape[1]
+        ]
+        if indices:
+            signal = state_array
+
+    # Keep compatibility for datasets without a usable observation.state, but
+    # never let an action command override a real gripper width/state signal.
+    if signal is None:
+        indices = _gripper_indices(action_names)
+        if indices and actions.shape[0] > 0:
+            signal = actions
+
+    if signal is None or not indices or signal.shape[0] == 0:
         return np.zeros(actions.shape[0], dtype=bool)
 
     threshold = float(gripper_cfg.get("change_threshold", 0.5))
-    diffs = np.abs(np.diff(actions[:, indices], axis=0))
+    diffs = np.abs(np.diff(signal[:, indices], axis=0))
     event_mask = np.zeros(actions.shape[0], dtype=bool)
     event_mask[1:] = (diffs >= threshold).any(axis=1)
     event_mask[:-1] |= (diffs >= threshold).any(axis=1)
@@ -153,13 +193,17 @@ def _state_rate_motion_mask(
         diffs[1:] = np.abs(np.diff(states, axis=0)) * max(float(fps), 1e-6)
 
     ignore_gripper = bool(state_cfg.get("ignore_gripper", False))
+    include_force = bool(state_cfg.get("include_force", False))
     exclude = ("gripper",) if ignore_gripper else ()
+    if not include_force:
+        exclude = (*exclude, "force", "wrench")
     gripper_indices = (
         []
         if ignore_gripper
         else _feature_indices(
             state_names,
             include=("gripper",),
+            exclude=exclude,
         )
     )
     translation_indices = _feature_indices(
@@ -201,11 +245,15 @@ def _state_rate_motion_mask(
             idx
             for idx, name in enumerate(state_names)
             if not (ignore_gripper and "gripper" in name.lower())
-        ] or list(range(states.shape[1]))
-        norms = np.linalg.norm(diffs[:, all_indices], axis=1)
-        active = norms > float(state_cfg.get("norm_threshold", 1e-6))
-        motion |= active
-        motion[:-1] |= active[1:]
+            and (include_force or not _force_or_wrench_name(name))
+        ]
+        if not state_names:
+            all_indices = list(range(states.shape[1]))
+        if all_indices:
+            norms = np.linalg.norm(diffs[:, all_indices], axis=1)
+            active = norms > float(state_cfg.get("norm_threshold", 1e-6))
+            motion |= active
+            motion[:-1] |= active[1:]
 
     return motion
 
@@ -416,6 +464,12 @@ def _frame_from_source_item(
 
 def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRobotDataset:
     _assert_output_is_separate_from_source(source, cfg)
+    if source.meta.info.get("robot_type") == "flexiv_dual_arm":
+        validate_flexiv_dataset_schema(
+            source.meta.info,
+            source.features,
+            source="preprocess_dataset source",
+        )
     output_cfg = cfg["output"]
     output_root = _as_path_or_none(output_cfg.get("root"))
     if output_root is not None and output_root.exists():
@@ -427,7 +481,7 @@ def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRob
                 "Set output.overwrite=true to replace it."
             )
 
-    return LeRobotDataset.create(
+    output = LeRobotDataset.create(
         repo_id=output_cfg["repo_id"],
         root=output_root,
         fps=source.fps,
@@ -441,6 +495,14 @@ def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRob
         image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
+    propagate_flexiv_dataset_schema(
+        source.meta.info,
+        output,
+        source_features=source.features,
+        output_features=output.features,
+        source="preprocess_dataset",
+    )
+    return output
 
 
 def preprocess_dataset(cfg: dict[str, Any]) -> None:
@@ -469,7 +531,13 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
             states = arrays.get("observation.state")
 
             smoothed_actions = _smooth_actions(actions, action_names, cfg)
-            gripper_keep = _gripper_event_mask(actions, action_names, cfg)
+            gripper_keep = _gripper_event_mask(
+                actions,
+                action_names,
+                states,
+                state_names,
+                cfg,
+            )
             motion, motion_source = _motion_mask(
                 smoothed_actions,
                 action_names,

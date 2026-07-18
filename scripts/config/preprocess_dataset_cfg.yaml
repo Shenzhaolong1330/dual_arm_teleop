@@ -25,6 +25,9 @@ preprocess_dataset:
     keep_end_frames: 5
     state_rate:
       ignore_gripper: false
+      # Force/wrench fields are excluded from motion detection by default.
+      # Set true only when raw force feedback is an intentional split signal.
+      include_force: false
       # Units are per second because the tool multiplies frame-to-frame state
       # differences by dataset fps. Use small eps-like thresholds to approximate
       # state_rate == 0 while tolerating tiny serialization noise.

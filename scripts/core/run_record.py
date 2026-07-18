@@ -1963,7 +1963,13 @@ def run_record(record_cfg: RecordConfig):
                 image_writer_threads=4,
             )
             if record_cfg.robot_type == "flexiv_dual_arm":
-                schema = persist_flexiv_dataset_schema(dataset_root, dataset.meta.info)
+                schema = persist_flexiv_dataset_schema(
+                    dataset_root,
+                    dataset.meta.info,
+                    zero_ft_sensor_on_connect=record_cfg.robot_extra_config.get(
+                        "zero_ft_sensor_on_connect", False
+                    ),
+                )
                 dataset.meta.info["robot_state_schema"] = schema
                 validate_flexiv_dataset_schema(
                     dataset.meta.info,

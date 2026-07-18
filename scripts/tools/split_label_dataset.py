@@ -45,6 +45,11 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local env
         "task_index": {},
     }
 
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    propagate_flexiv_dataset_schema,
+    validate_flexiv_dataset_schema,
+)
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
@@ -259,8 +264,18 @@ def _side_from_name(name: str, fallback_index: int) -> str:
     return f"gripper_{fallback_index}"
 
 
+def _force_or_wrench_name(name: str) -> bool:
+    lower = name.lower()
+    return "force" in lower or "wrench" in lower
+
+
 def _gripper_indices(names: list[str], *, prefer_state: bool = False) -> list[int]:
-    indices = [idx for idx, name in enumerate(names) if "gripper" in name.lower()]
+    # Force feedback is intentionally not a gripper displacement/state signal.
+    indices = [
+        idx
+        for idx, name in enumerate(names)
+        if "gripper" in name.lower() and not _force_or_wrench_name(name)
+    ]
     if not prefer_state:
         return indices
 
@@ -290,7 +305,7 @@ def _extract_gripper_signal(
     cfg: dict[str, Any],
 ) -> tuple[np.ndarray | None, list[str], str]:
     split_cfg = cfg.get("segmentation", {}) or {}
-    if split_cfg.get("prefer_action_gripper", True) and "action" in arrays:
+    if split_cfg.get("prefer_action_gripper", False) and "action" in arrays:
         indices = _gripper_indices(action_names)
         if indices:
             side_names = [_side_from_name(action_names[idx], i) for i, idx in enumerate(indices)]
@@ -379,7 +394,12 @@ def _state_filter_indices(state_names: list[str], state_dim: int, cfg: dict[str,
     if not state_names:
         return list(range(state_dim))
 
-    indices = list(range(min(state_dim, len(state_names))))
+    include_force = bool(state_cfg.get("include_force", False))
+    indices = [
+        idx
+        for idx in range(min(state_dim, len(state_names)))
+        if include_force or not _force_or_wrench_name(state_names[idx])
+    ]
     if state_cfg.get("ignore_gripper", False):
         non_gripper = [idx for idx in indices if "gripper" not in state_names[idx].lower()]
         if non_gripper:
@@ -2078,6 +2098,12 @@ class OpenRouterLabeler:
 def _create_output_dataset(source: Any, cfg: dict[str, Any]) -> Any:
     _require_lerobot()
     _assert_output_root_is_separate_from_source(source, cfg)
+    if source.meta.info.get("robot_type") == "flexiv_dual_arm":
+        validate_flexiv_dataset_schema(
+            source.meta.info,
+            source.features,
+            source="split_label_dataset source",
+        )
     output_cfg = cfg["output"]
     output_root = _as_path_or_none(output_cfg.get("root"))
     if output_root is not None and output_root.exists():
@@ -2089,7 +2115,7 @@ def _create_output_dataset(source: Any, cfg: dict[str, Any]) -> Any:
                 "Set output.overwrite=true or pass --overwrite to replace it."
             )
 
-    return LeRobotDataset.create(
+    output = LeRobotDataset.create(
         repo_id=output_cfg["repo_id"],
         root=output_root,
         fps=source.fps,
@@ -2103,6 +2129,14 @@ def _create_output_dataset(source: Any, cfg: dict[str, Any]) -> Any:
         image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
+    propagate_flexiv_dataset_schema(
+        source.meta.info,
+        output,
+        source_features=source.features,
+        output_features=output.features,
+        source="split_label_dataset",
+    )
+    return output
 
 
 def _manifest_dir(cfg: dict[str, Any]) -> Path:

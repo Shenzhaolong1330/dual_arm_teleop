@@ -54,6 +54,26 @@ def to_hwc_uint8_numpy(chw_float32_torch: torch.Tensor) -> np.ndarray:
     return hwc_uint8_numpy
 
 
+def log_named_vector(
+    rerun_module,
+    entity_prefix: str,
+    values,
+    names: list[str],
+) -> tuple[str, ...]:
+    """Log every vector component using the dataset metadata name order."""
+
+    if len(values) != len(names):
+        raise ValueError(
+            f"{entity_prefix} vector length {len(values)} does not match metadata names {len(names)}"
+        )
+    paths: list[str] = []
+    for name, value in zip(names, values, strict=True):
+        path = f"{entity_prefix}/{name}"
+        rerun_module.log(path, rerun_module.Scalars(value.item() if hasattr(value, "item") else float(value)))
+        paths.append(path)
+    return tuple(paths)
+
+
 def visualize_dataset(
     dataset: LeRobotDataset,
     episode_index: int,
@@ -116,13 +136,16 @@ def visualize_dataset(
                 
             # display each dimension of action space (e.g. actuators command)
             if ACTION in batch:
-                for dim_idx, val in enumerate(batch[ACTION][i]):
-                    rr.log(f"{ACTION}/{features['action']['names'][dim_idx]}", rr.Scalars(val.item()))
+                log_named_vector(rr, ACTION, batch[ACTION][i], features["action"]["names"])
 
             # display each dimension of observed state space (e.g. agent position in joint space)
             if OBS_STATE in batch:
-                for dim_idx, val in enumerate(batch[OBS_STATE][i]):
-                    rr.log(f"observation.state/{features['observation.state']['names'][dim_idx]}", rr.Scalars(val.item()))
+                log_named_vector(
+                    rr,
+                    OBS_STATE,
+                    batch[OBS_STATE][i],
+                    features["observation.state"]["names"],
+                )
 
             if DONE in batch:
                 rr.log(DONE, rr.Scalars(batch[DONE][i].item()))

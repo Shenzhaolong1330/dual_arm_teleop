@@ -18,6 +18,10 @@ import yaml
 from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
 from lerobot.datasets.utils import DEFAULT_FEATURES
 from lerobot.utils.constants import ACTION, HF_LEROBOT_HOME
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    propagate_flexiv_dataset_schema,
+    validate_flexiv_dataset_schema,
+)
 
 
 DEFAULT_KEEP_FRAME_ROLES = ("takeover_start", "recovery")
@@ -1368,6 +1372,22 @@ def export_dagger_dataset(
 
     seed_meta = LeRobotDatasetMetadata(seed_repo_id, root=seed_root)
     raw_dataset = LeRobotDataset(raw_repo_id, root=raw_root)
+    if seed_meta.robot_type == "flexiv_dual_arm":
+        validate_flexiv_dataset_schema(
+            seed_meta.info,
+            seed_meta.features,
+            source=f"DAgger seed dataset {seed_root}",
+        )
+        validate_flexiv_dataset_schema(
+            raw_dataset.meta.info,
+            raw_dataset.features,
+            source=f"DAgger raw dataset {raw_root}",
+        )
+        if raw_dataset.meta.info["robot_state_schema"] != seed_meta.info["robot_state_schema"]:
+            raise ValueError(
+                "DAgger Flexiv seed/raw datasets must have identical robot_state_schema metadata, "
+                "including zero_ft_sensor_on_connect."
+            )
     output_features = seed_meta.features
     use_videos = any(feature["dtype"] == "video" for feature in output_features.values())
     effective_min_episode_len = max(min_segment_frames, min_episode_len_for_act or 1)
@@ -1386,6 +1406,13 @@ def export_dagger_dataset(
         use_videos=use_videos,
         image_writer_processes=image_writer_processes,
         image_writer_threads=image_writer_threads,
+    )
+    propagate_flexiv_dataset_schema(
+        seed_meta.info,
+        output_dataset,
+        source_features=seed_meta.features,
+        output_features=output_dataset.features,
+        source="DAgger export",
     )
     output_dataset.meta.metadata_buffer_size = 1
 

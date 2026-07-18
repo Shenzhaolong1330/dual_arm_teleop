@@ -42,6 +42,11 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local env
         "task_index": {},
     }
 
+from robots.dual_flexiv_rizon4s.flexiv_state_schema import (
+    propagate_flexiv_dataset_schema,
+    validate_flexiv_dataset_schema,
+)
+
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -332,6 +337,13 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
         )
 
     reference_spec, reference, _ = loaded_sources[0]
+    if reference.meta.info.get("robot_type") == "flexiv_dual_arm":
+        reference_schema = reference.meta.info.get("robot_state_schema")
+        validate_flexiv_dataset_schema(
+            reference.meta.info,
+            reference.features,
+            source=f"merge source {reference_spec.name}",
+        )
     for spec, dataset, _ in loaded_sources[1:]:
         _validate_compatible_sources(
             reference,
@@ -341,6 +353,17 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
             strict_schema=strict_schema,
             strict_robot_type=strict_robot_type,
         )
+        if reference.meta.info.get("robot_type") == "flexiv_dual_arm":
+            validate_flexiv_dataset_schema(
+                dataset.meta.info,
+                dataset.features,
+                source=f"merge source {spec.name}",
+            )
+            if dataset.meta.info.get("robot_state_schema") != reference_schema:
+                raise ValueError(
+                    "Flexiv merge requires identical robot_state_schema metadata, including "
+                    "zero_ft_sensor_on_connect; refusing to rewrite mixed connection contracts."
+                )
 
     total_input_frames = 0
     total_output_episodes = 0
@@ -393,6 +416,13 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
         image_writer_processes=int(output_cfg.get("image_writer_processes", 0)),
         image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
+    )
+    propagate_flexiv_dataset_schema(
+        reference.meta.info,
+        output,
+        source_features=reference.features,
+        output_features=output.features,
+        source="merge_lerobot_datasets",
     )
 
     written_frames = 0

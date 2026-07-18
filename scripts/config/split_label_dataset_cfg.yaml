@@ -34,6 +34,9 @@ split_label_dataset:
     activity_source: "state_rate"  # state_rate | action_norm
     state_rate:
       ignore_gripper: false
+      # Force/wrench fields are excluded from motion detection by default.
+      # Set true only when raw force feedback is an intentional split signal.
+      include_force: false
       norm_threshold: 0.000001
     # Fallback only when observation.state is unavailable. By default, gripper
     # command channels are ignored so an open/closed gripper value does not make
@@ -51,7 +54,9 @@ split_label_dataset:
   segmentation:
     # Rule-based segmentation is now an auxiliary/fallback signal. The VLM semantic
     # splitter below should decide the final subtask boundaries when enabled.
-    prefer_action_gripper: true
+    # Use recorded gripper width/state by default. Set true explicitly only
+    # for datasets that intentionally use gripper command channels instead.
+    prefer_action_gripper: false
     open_threshold: 0.75
     closed_threshold: 0.25
     debounce_frames: 5

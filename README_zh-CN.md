@@ -318,20 +318,62 @@ Flexiv 会为每个相机分别记录上一次被消费的 RealSense SDK `frame_
 
 ### Flexiv 绝对 TCP 状态 schema
 
-新的 `flexiv_dual_arm` 采集会在 `meta/info.json["robot_state_schema"]` 中持久化 `state_schema: flexiv_abs_rot6d_v2`。`observation.state` 为 `float32 (34,)`，严格顺序如下：
+新的 `flexiv_dual_arm` 采集会在 `meta/info.json["robot_state_schema"]` 中持久化 `state_schema: flexiv_abs_rot6d_raw_force_v3`。`observation.state` 为 `float32 (48,)`；前 34 个字段与 v2 完全相同，末尾严格追加原始力反馈字段：
 
-```text
-left_joint_1..7.pos、
-left_ee_pose.x/y/z、
-left_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z、
-left_gripper_state_norm、
-right_joint_1..7.pos、
-right_ee_pose.x/y/z、
-right_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z、
-right_gripper_state_norm
-```
+| index | state name | unit | source / convention |
+|---:|---|---|---|
+| 0 | `left_joint_1.pos` | rad | `robot.states().q` |
+| 1 | `left_joint_2.pos` | rad | `robot.states().q` |
+| 2 | `left_joint_3.pos` | rad | `robot.states().q` |
+| 3 | `left_joint_4.pos` | rad | `robot.states().q` |
+| 4 | `left_joint_5.pos` | rad | `robot.states().q` |
+| 5 | `left_joint_6.pos` | rad | `robot.states().q` |
+| 6 | `left_joint_7.pos` | rad | `robot.states().q` |
+| 7 | `left_ee_pose.x` | m | `robot.states().tcp_pose` |
+| 8 | `left_ee_pose.y` | m | `robot.states().tcp_pose` |
+| 9 | `left_ee_pose.z` | m | `robot.states().tcp_pose` |
+| 10 | `left_ee_rotation_6d.c0x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 11 | `left_ee_rotation_6d.c0y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 12 | `left_ee_rotation_6d.c0z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 13 | `left_ee_rotation_6d.c1x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 14 | `left_ee_rotation_6d.c1y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 15 | `left_ee_rotation_6d.c1z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 16 | `left_gripper_state_norm` | unitless | existing gripper width normalization |
+| 17 | `right_joint_1.pos` | rad | `robot.states().q` |
+| 18 | `right_joint_2.pos` | rad | `robot.states().q` |
+| 19 | `right_joint_3.pos` | rad | `robot.states().q` |
+| 20 | `right_joint_4.pos` | rad | `robot.states().q` |
+| 21 | `right_joint_5.pos` | rad | `robot.states().q` |
+| 22 | `right_joint_6.pos` | rad | `robot.states().q` |
+| 23 | `right_joint_7.pos` | rad | `robot.states().q` |
+| 24 | `right_ee_pose.x` | m | `robot.states().tcp_pose` |
+| 25 | `right_ee_pose.y` | m | `robot.states().tcp_pose` |
+| 26 | `right_ee_pose.z` | m | `robot.states().tcp_pose` |
+| 27 | `right_ee_rotation_6d.c0x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 28 | `right_ee_rotation_6d.c0y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 29 | `right_ee_rotation_6d.c0z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 30 | `right_ee_rotation_6d.c1x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 31 | `right_ee_rotation_6d.c1y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 32 | `right_ee_rotation_6d.c1z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 33 | `right_gripper_state_norm` | unitless | existing gripper width normalization |
+| 34 | `left_ee_ext_wrench_in_tcp_raw.fx` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP, raw `[fx, fy, fz, mx, my, mz]` |
+| 35 | `left_ee_ext_wrench_in_tcp_raw.fy` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 36 | `left_ee_ext_wrench_in_tcp_raw.fz` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 37 | `left_ee_ext_wrench_in_tcp_raw.mx` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 38 | `left_ee_ext_wrench_in_tcp_raw.my` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 39 | `left_ee_ext_wrench_in_tcp_raw.mz` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 40 | `left_gripper_force` | N | `gripper.states().force`, preserve raw signed value |
+| 41 | `right_ee_ext_wrench_in_tcp_raw.fx` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP, raw `[fx, fy, fz, mx, my, mz]` |
+| 42 | `right_ee_ext_wrench_in_tcp_raw.fy` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 43 | `right_ee_ext_wrench_in_tcp_raw.fz` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 44 | `right_ee_ext_wrench_in_tcp_raw.mx` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 45 | `right_ee_ext_wrench_in_tcp_raw.my` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 46 | `right_ee_ext_wrench_in_tcp_raw.mz` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 47 | `right_gripper_force` | N | `gripper.states().force`, preserve raw signed value |
 
-六个 rotation 值是当前 Flexiv RDK TCP 在 RDK world/base frame 中的绝对姿态，约定为 `rot6d = concatenate([R[:, 0], R[:, 1]])`。它们不是 Home-relative、相机坐标系或 Quest 零点坐标。`action` 仍为 `float32 (14,)`，继续使用原有左右两侧 `xyz + rotvec` 增量字段，最后是两个夹爪命令。resume 会校验持久化 schema 和字段顺序；旧的 28D 绝对 rotvec 数据集和 checkpoint 会 fail-fast，采集流程不会修改它们。
+每帧每侧只获取一次 `robot.states()` 和一次 `gripper.states()`；同一快照提供关节、TCP 位姿、wrench，以及夹爪宽度和 force。wrench/force 不做滤波、平滑、裁剪、去偏置、归一化、`abs()`、替换或补零；缺失、长度错误、非有限值会 fail-fast。只允许现有 LeRobot 的 float32 序列化。`action` 仍为不变的 `float32 (14,)` 左右两侧 `xyz + rotvec` 增量字段及两个夹爪命令。metadata 还会记录 `wrench_source`、`wrench_frame`、`wrench_order`、`wrench_units`、`gripper_force_source`、`gripper_force_unit`、`gripper_force_sign_convention`、`software_filter: none` 和显式的 `zero_ft_sensor_on_connect`；不会新增自动 `ZeroFTSensor`。
+
+resume、append、rewrite、merge、DAgger export、训练和 checkpoint 加载都要求 `flexiv_abs_rot6d_raw_force_v3`、state dim 48 及以上表格的精确 names。旧 v2/34D 和更旧 28D 数据/checkpoint 会在写入或构造 policy 前拒绝，不会自动补 14 个 0。默认运动检测只使用运动学状态和真实夹爪宽度/状态，并排除名称含 `force` 或 `wrench` 的字段；若确需使用力切分，必须显式设置 `state_rate.include_force: true`。离线可视化按 metadata names 枚举，因此会显示全部 48 个 state scalar。
 
 每次 RGB-D 采集结束后，必须针对精确的数据集根目录运行完整 sidecar 检查。工具会验证 manifest、calibration SHA-256 与 stream shape、每个 Zarr 数组、提交计数与 episode 边界、分块 Parquet/Zarr join key、timestamp 顺序、reused、SHA-256 唯一帧、相邻逐像素相等、未标记重复和最长冻结区间。legacy Parquet 录制仍保留相同内容检查。默认最多允许连续 4 帧：
 

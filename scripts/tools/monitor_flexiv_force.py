@@ -24,10 +24,16 @@ from typing import Any, Callable, Iterable, Mapping
 
 import yaml
 
+from robots.dual_flexiv_rizon4s.flexiv_force_contract import (
+    FlexivRawSignalReadError,
+    GRIPPER_FORCE_FIELD,
+    WRENCH_FIELD,
+    WRENCH_ORDER,
+    read_ext_wrench_in_tcp_raw,
+    read_gripper_force,
+)
 
-WRENCH_FIELD = "ext_wrench_in_tcp_raw"
-GRIPPER_FORCE_FIELD = "force"
-WRENCH_LABELS = ("fx", "fy", "fz", "mx", "my", "mz")
+WRENCH_LABELS = WRENCH_ORDER
 
 RERUN_WAVEFORM_GROUPS = (
     ("left TCP force [N]", "flexiv/left/tcp/force", WRENCH_LABELS[:3]),
@@ -235,62 +241,17 @@ def connect_devices(
 
 
 def _read_wrench(state: Any, side: str) -> tuple[float, float, float, float, float, float]:
-    field_name = WRENCH_FIELD
     try:
-        raw_values = getattr(state, field_name)
-    except AttributeError as exc:
-        raise SampleReadError(f"{side} robot field {field_name!r} is missing") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise SampleReadError(f"{side} robot field {field_name!r} read failed: {exc}") from exc
-
-    try:
-        values = list(raw_values)
-    except Exception as exc:  # noqa: BLE001
-        raise SampleReadError(
-            f"{side} robot field {field_name!r} is not an iterable six-dimensional value"
-        ) from exc
-    if len(values) != 6:
-        raise SampleReadError(
-            f"{side} robot field {field_name!r} must have length 6, got {len(values)}"
-        )
-
-    converted: list[float] = []
-    for index, value in enumerate(values):
-        try:
-            numeric = float(value)
-        except (TypeError, ValueError) as exc:
-            raise SampleReadError(
-                f"{side} robot field {field_name!r}[{index}] is not numeric: {value!r}"
-            ) from exc
-        if not math.isfinite(numeric):
-            raise SampleReadError(
-                f"{side} robot field {field_name!r}[{index}] is not finite: {numeric!r}"
-            )
-        converted.append(numeric)
-
-    return tuple(converted)  # type: ignore[return-value]
+        return read_ext_wrench_in_tcp_raw(state, side=side)
+    except FlexivRawSignalReadError as exc:
+        raise SampleReadError(str(exc)) from exc
 
 
 def _read_gripper_force(state: Any, side: str) -> float:
-    field_name = GRIPPER_FORCE_FIELD
     try:
-        raw_value = getattr(state, field_name)
-    except AttributeError as exc:
-        raise SampleReadError(f"{side} gripper field {field_name!r} is missing") from exc
-    except Exception as exc:  # noqa: BLE001
-        raise SampleReadError(f"{side} gripper field {field_name!r} read failed: {exc}") from exc
-
-    try:
-        value = float(raw_value)
-    except (TypeError, ValueError) as exc:
-        raise SampleReadError(
-            f"{side} gripper field {field_name!r} is not numeric: {raw_value!r}"
-        ) from exc
-    if not math.isfinite(value):
-        raise SampleReadError(
-            f"{side} gripper field {field_name!r} is not finite: {value!r}"
-        )
-    return value
+        return read_gripper_force(state, side=side)
+    except FlexivRawSignalReadError as exc:
+        raise SampleReadError(str(exc)) from exc
 
 
 def read_force_sample(devices: ConnectedDevices, timestamp: float | None = None) -> ForceSample:

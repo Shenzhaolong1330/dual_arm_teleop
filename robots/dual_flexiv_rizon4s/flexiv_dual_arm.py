@@ -15,10 +15,17 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
 from .config_flexiv import FlexivDualArmConfig
+from .flexiv_force_contract import (
+    FlexivRawSignalReadError,
+    WRENCH_FIELD,
+    read_ext_wrench_in_tcp_raw,
+    read_gripper_force,
+)
 from .flexiv_state_schema import (
     ACTION_DELTA_POSE_FIELDS,
     STATE_POSITION_FIELDS,
     STATE_ROTATION_6D_FIELDS,
+    STATE_FORCE_FIELDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -1358,11 +1365,24 @@ class FlexivDualArm(Robot):
             timing: dict[str, float] = {}
             obs = {}
             left_start_t = time.perf_counter()
-            self._add_arm_observation(obs, "left", self._left_robot)
+            left_force_values = self._add_arm_observation(obs, "left", self._left_robot)
             timing["left_state_ms"] = (time.perf_counter() - left_start_t) * 1000.0
             right_start_t = time.perf_counter()
-            self._add_arm_observation(obs, "right", self._right_robot)
+            right_force_values = self._add_arm_observation(obs, "right", self._right_robot)
             timing["right_state_ms"] = (time.perf_counter() - right_start_t) * 1000.0
+
+            # Keep the complete existing 34D left/right order above. Append
+            # all raw-force channels only after both arms have contributed
+            # their kinematic fields; build_dataset_frame then serializes this
+            # exact order from the metadata names.
+            force_values = (
+                *left_force_values[0],
+                left_force_values[1],
+                *right_force_values[0],
+                right_force_values[1],
+            )
+            for name, value in zip(STATE_FORCE_FIELDS, force_values, strict=True):
+                obs[name] = float(value)
             if self.config.save_rgbd_timestamps:
                 obs["global_frame_index"] = self._next_global_frame_index()
                 obs["robot_timestamp"] = time.time()
@@ -1375,6 +1395,10 @@ class FlexivDualArm(Robot):
             return obs
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FLEXIV] get_observation failed: %s", exc)
+            # Raw wrench/force fields are mandatory for v3. Never reuse a
+            # previous frame when their read/validation failed.
+            if isinstance(exc, FlexivRawSignalReadError):
+                raise
             if self._prev_observation is not None:
                 return self._mark_reused_observation(dict(self._prev_observation))
             raise
@@ -1402,12 +1426,57 @@ class FlexivDualArm(Robot):
             obs[f"{base_name}_rgbd_reused"] = True
         return obs
 
-    def _add_arm_observation(self, obs: dict[str, Any], side: str, robot: Any) -> None:
+    def _read_observation_gripper_state(
+        self,
+        side: str,
+        gripper: Any,
+        fallback_command: float,
+    ) -> tuple[float, float]:
+        """Read width and signed force from exactly one GripperStates snapshot."""
+
+        if gripper is None:
+            raise FlexivRawSignalReadError(
+                f"{side} gripper.states() is unavailable; v3 requires gripper.states().force"
+            )
+        try:
+            states = gripper.states()
+        except Exception as exc:  # noqa: BLE001
+            # Width fallback remains a legacy compatibility behavior, but a
+            # missing snapshot can never fabricate the mandatory force value.
+            raise FlexivRawSignalReadError(
+                f"{side} gripper.states() failed; cannot read gripper.states().force: {exc}"
+            ) from exc
+
+        try:
+            width = float(states.width)
+        except Exception:  # noqa: BLE001
+            cached_width = self._left_gripper_width if side == "left" else self._right_gripper_width
+            width = (
+                float(cached_width)
+                if cached_width is not None
+                else self._gripper_width_from_cmd(fallback_command)
+            )
+        force = read_gripper_force(states, side=side)
+        self._set_cached_gripper_width(side, width)
+        return width, force
+
+    def _add_arm_observation(
+        self,
+        obs: dict[str, Any],
+        side: str,
+        robot: Any,
+    ) -> tuple[tuple[float, float, float, float, float, float], float]:
         robot_lock = self._left_robot_lock if side == "left" else self._right_robot_lock
-        with robot_lock:
-            states = robot.states()
+        try:
+            with robot_lock:
+                states = robot.states()
+        except Exception as exc:  # noqa: BLE001
+            raise FlexivRawSignalReadError(
+                f"{side} robot.states() failed; cannot read {side} {WRENCH_FIELD}: {exc}"
+            ) from exc
         joints = _as_np(getattr(states, "q", None), self._num_joints_per_arm)
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
+        wrench = read_ext_wrench_in_tcp_raw(states, side=side)
         position, rotation_6d = _pose7_to_absolute_xyz_rot6d(pose7)
 
         if side == "left":
@@ -1422,14 +1491,11 @@ class FlexivDualArm(Robot):
         for component, value in zip(STATE_ROTATION_6D_FIELDS, rotation_6d, strict=True):
             obs[f"{side}_ee_rotation_6d.{component}"] = float(value)
 
-        if self.config.use_gripper:
-            cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
-            gripper = self._left_gripper if side == "left" else self._right_gripper
-            if gripper is not None:
-                width = self._observed_gripper_width(side, gripper, cmd)
-            else:
-                width = self._gripper_width_from_cmd(cmd)
-            obs[f"{side}_gripper_state_norm"] = self._gripper_state_norm_from_width(width)
+        cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
+        gripper = self._left_gripper if side == "left" else self._right_gripper
+        width, gripper_force = self._read_observation_gripper_state(side, gripper, cmd)
+        obs[f"{side}_gripper_state_norm"] = self._gripper_state_norm_from_width(width)
+        return wrench, gripper_force
 
     def _refresh_cached_poses(self) -> None:
         if self._left_robot is not None:
@@ -1701,8 +1767,9 @@ class FlexivDualArm(Robot):
                 features[f"{side}_ee_pose.{axis}"] = float
             for component in STATE_ROTATION_6D_FIELDS:
                 features[f"{side}_ee_rotation_6d.{component}"] = float
-            if self.config.use_gripper:
-                features[f"{side}_gripper_state_norm"] = float
+            features[f"{side}_gripper_state_norm"] = float
+        for name in STATE_FORCE_FIELDS:
+            features[name] = float
         return features
 
     @property

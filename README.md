@@ -319,20 +319,62 @@ Flexiv tracks the last RealSense SDK `frame_index` consumed from each camera ind
 
 ### Flexiv absolute TCP state schema
 
-New `flexiv_dual_arm` recordings use `meta/info.json["robot_state_schema"]` with `state_schema: flexiv_abs_rot6d_v2`. `observation.state` is `float32 (34,)` in this exact order:
+New `flexiv_dual_arm` recordings use `meta/info.json["robot_state_schema"]` with `state_schema: flexiv_abs_rot6d_raw_force_v3`. `observation.state` is `float32 (48,)`; the first 34 fields are unchanged from v2 and the raw-force tail is appended exactly as follows:
 
-```text
-left_joint_1..7.pos,
-left_ee_pose.x/y/z,
-left_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z,
-left_gripper_state_norm,
-right_joint_1..7.pos,
-right_ee_pose.x/y/z,
-right_ee_rotation_6d.c0x/c0y/c0z/c1x/c1y/c1z,
-right_gripper_state_norm
-```
+| index | state name | unit | source / convention |
+|---:|---|---|---|
+| 0 | `left_joint_1.pos` | rad | `robot.states().q` |
+| 1 | `left_joint_2.pos` | rad | `robot.states().q` |
+| 2 | `left_joint_3.pos` | rad | `robot.states().q` |
+| 3 | `left_joint_4.pos` | rad | `robot.states().q` |
+| 4 | `left_joint_5.pos` | rad | `robot.states().q` |
+| 5 | `left_joint_6.pos` | rad | `robot.states().q` |
+| 6 | `left_joint_7.pos` | rad | `robot.states().q` |
+| 7 | `left_ee_pose.x` | m | `robot.states().tcp_pose` |
+| 8 | `left_ee_pose.y` | m | `robot.states().tcp_pose` |
+| 9 | `left_ee_pose.z` | m | `robot.states().tcp_pose` |
+| 10 | `left_ee_rotation_6d.c0x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 11 | `left_ee_rotation_6d.c0y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 12 | `left_ee_rotation_6d.c0z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 13 | `left_ee_rotation_6d.c1x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 14 | `left_ee_rotation_6d.c1y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 15 | `left_ee_rotation_6d.c1z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 16 | `left_gripper_state_norm` | unitless | existing gripper width normalization |
+| 17 | `right_joint_1.pos` | rad | `robot.states().q` |
+| 18 | `right_joint_2.pos` | rad | `robot.states().q` |
+| 19 | `right_joint_3.pos` | rad | `robot.states().q` |
+| 20 | `right_joint_4.pos` | rad | `robot.states().q` |
+| 21 | `right_joint_5.pos` | rad | `robot.states().q` |
+| 22 | `right_joint_6.pos` | rad | `robot.states().q` |
+| 23 | `right_joint_7.pos` | rad | `robot.states().q` |
+| 24 | `right_ee_pose.x` | m | `robot.states().tcp_pose` |
+| 25 | `right_ee_pose.y` | m | `robot.states().tcp_pose` |
+| 26 | `right_ee_pose.z` | m | `robot.states().tcp_pose` |
+| 27 | `right_ee_rotation_6d.c0x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 28 | `right_ee_rotation_6d.c0y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 29 | `right_ee_rotation_6d.c0z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 30 | `right_ee_rotation_6d.c1x` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 31 | `right_ee_rotation_6d.c1y` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 32 | `right_ee_rotation_6d.c1z` | unitless | `robot.states().tcp_pose`, absolute RDK world/base TCP rotation |
+| 33 | `right_gripper_state_norm` | unitless | existing gripper width normalization |
+| 34 | `left_ee_ext_wrench_in_tcp_raw.fx` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP, raw `[fx, fy, fz, mx, my, mz]` |
+| 35 | `left_ee_ext_wrench_in_tcp_raw.fy` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 36 | `left_ee_ext_wrench_in_tcp_raw.fz` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 37 | `left_ee_ext_wrench_in_tcp_raw.mx` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 38 | `left_ee_ext_wrench_in_tcp_raw.my` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 39 | `left_ee_ext_wrench_in_tcp_raw.mz` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 40 | `left_gripper_force` | N | `gripper.states().force`, preserve raw signed value |
+| 41 | `right_ee_ext_wrench_in_tcp_raw.fx` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP, raw `[fx, fy, fz, mx, my, mz]` |
+| 42 | `right_ee_ext_wrench_in_tcp_raw.fy` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 43 | `right_ee_ext_wrench_in_tcp_raw.fz` | N | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 44 | `right_ee_ext_wrench_in_tcp_raw.mx` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 45 | `right_ee_ext_wrench_in_tcp_raw.my` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 46 | `right_ee_ext_wrench_in_tcp_raw.mz` | Nm | `robot.states().ext_wrench_in_tcp_raw`, TCP |
+| 47 | `right_gripper_force` | N | `gripper.states().force`, preserve raw signed value |
 
-The six rotation values are the absolute current Flexiv RDK TCP orientation in the RDK world/base frame, with `rot6d = concatenate([R[:, 0], R[:, 1]])`. They are not Home-relative, camera-frame, or Quest-zeroed values. `action` remains `float32 (14,)` with the existing left/right `xyz + rotvec` delta fields followed by the two gripper commands. Resume validates both the persisted schema and feature order; legacy 28D absolute-rotvec datasets and checkpoints fail fast and are not modified in the recording workflow.
+Each frame takes one `robot.states()` snapshot and one `gripper.states()` snapshot per arm. Wrench and force values are not filtered, smoothed, clipped, debiased, normalized, absolute-valued, replaced, or padded; non-finite, missing, or wrong-length raw signals fail fast. Only the existing float32 serialization is allowed. `action` remains `float32 (14,)` with the unchanged left/right `xyz + rotvec` delta fields followed by the two gripper commands. Metadata also records `wrench_source`, `wrench_frame`, `wrench_order`, `wrench_units`, `gripper_force_source`, `gripper_force_unit`, `gripper_force_sign_convention`, `software_filter: none`, and the explicit `zero_ft_sensor_on_connect` configuration; no automatic `ZeroFTSensor` is added.
+
+Resume, append, rewrite, merge, DAgger export, training, and checkpoint loading require `flexiv_abs_rot6d_raw_force_v3` with state dimension 48 and the exact names above. Legacy v2/34D and older 28D data/checkpoints fail before writing or policy construction; no fourteen-zero padding is performed. Motion detection uses kinematic state and real gripper width/state by default and excludes names containing `force` or `wrench`; force-based splitting requires explicit `state_rate.include_force: true`. Offline visualization enumerates the metadata names, so all 48 state scalars are displayed.
 
 After every RGB-D recording, run the full sidecar checker against the exact dataset root. It validates the manifest, calibration SHA-256 and stream shapes, every Zarr array, committed counts and episode boundaries, chunked Parquet/Zarr join keys, timestamp order, reused flags, SHA-256 uniqueness, exact adjacent equality, unmarked duplicates, and longest frozen runs. Legacy Parquet recordings retain the same content checks. The default maximum identical run is four frames:
 
