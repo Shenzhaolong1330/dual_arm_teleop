@@ -103,7 +103,7 @@ replay:
   robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
-  dataset_name: flexiv_dual_arm_test/pick_place_20260703_v02
+  dataset_name: flexiv_dual_arm_3d/pick_place_20260717_v01
   # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
-  episode_index: 0 # episode index to visualize
+  episode_index: 5 # episode index to visualize
   # episode_index: 15

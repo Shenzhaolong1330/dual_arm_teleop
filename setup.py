@@ -51,6 +51,7 @@ setup(
             "tools-preprocess-dataset = scripts.tools.preprocess_dataset:main",
             "tools-split-label-dataset = scripts.tools.split_label_dataset:main",
             "tools-merge-datasets = scripts.tools.merge_lerobot_datasets:main",
+            "tools-monitor-flexiv-force = scripts.tools.monitor_flexiv_force:main",
 
             # unified help command
             "robot-help = scripts.help.help_info:main",

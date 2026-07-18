@@ -109,13 +109,17 @@ class OculusDualArmRobot(Robot):
         robot_z =   oculus_y   (oculus up       -> robot up)
     """
 
-    # Oculus -> Robot coordinate transform matrix (for position only)
+    # Oculus -> Robot coordinate transform matrix.  The same proper rotation
+    # maps both position deltas and rotation vectors between the two frames.
     T_OCULUS_TO_ROBOT = np.array([
         [ 0.,  0., -1.],
         [-1.,  0.,  0.],
         [ 0.,  1.,  0.],
     ])
-    MIRROR_ACTION_SIGNS = np.array([-1., -1., 1., -1., -1., 1.])
+    # Rotation-vector signs are already handled by T_OCULUS_TO_ROBOT.  Keep
+    # the positional reflection in mirror mode, but do not apply the same
+    # roll/pitch sign change a second time after the frame conversion.
+    MIRROR_ACTION_SIGNS = np.array([-1., -1., 1., 1., 1., 1.])
 
     def __init__(
         self,
@@ -395,22 +399,16 @@ class OculusDualArmRobot(Robot):
         oculus_delta_pos = current_transform[:3, 3] - prev_transform[:3, 3]
         robot_delta_pos = self.T_OCULUS_TO_ROBOT @ oculus_delta_pos
         
-        # --- Rotation delta (in Oculus frame) ---
+        # --- Rotation delta (in Oculus frame -> Robot frame) ---
         current_rot = current_transform[:3, :3]
         prev_rot = prev_transform[:3, :3]
         delta_rot_oculus = current_rot @ prev_rot.T
         oculus_delta_rotvec = R.from_matrix(delta_rot_oculus).as_rotvec()
         
-        # --- Explicit axis mapping for rotation ---
-        oculus_rx = oculus_delta_rotvec[0]
-        oculus_ry = oculus_delta_rotvec[1]
-        oculus_rz = oculus_delta_rotvec[2]
-        
-        robot_delta_rotvec = np.array([
-            oculus_rz,   # robot roll
-            oculus_rx,   # robot pitch
-            oculus_ry,   # robot yaw
-        ])
+        # Use the same Oculus->robot frame transform as translation.  The
+        # previous hand-written axis reorder omitted the two negative signs
+        # from this matrix, so non-mirror teleop reversed roll and pitch.
+        robot_delta_rotvec = self.T_OCULUS_TO_ROBOT @ oculus_delta_rotvec
         
         return np.concatenate([robot_delta_pos, robot_delta_rotvec])
 

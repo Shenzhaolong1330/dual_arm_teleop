@@ -7,9 +7,11 @@ teleop:
     ip: null
     use_gripper: true
     left_pose_scaler: [1.0, 1.0]
-    left_channel_signs: [-1, 1, 1, 1, -1, 1]
+    left_channel_signs: [1, -1, 1, 1, -1, 1]
+    # left_channel_signs: [-1, 1, 1, 1, -1, 1]
     right_pose_scaler: [1.0, 1.0]
-    right_channel_signs: [1, -1, 1, -1, 1, 1]
+    right_channel_signs: [-1, 1, 1, -1, 1, 1]
+    # right_channel_signs: [1, -1, 1, -1, 1, 1]
     position_axis_order: [1, 0, 2]
     rotation_axis_order: [1, 0, 2]
     action_smoothing_method: "one_euro"
@@ -26,7 +28,7 @@ teleop:
     action_spike_rotation: 0.10
     gripper_trigger_deadzone: 0.0
     gripper_trigger_gamma: 0.7 # 1.0 linear; <1.0 closes earlier, >1.0 closes later
-    mirror_teleop: true
+    mirror_teleop: false
     visualize_placo: false
 
 robot:
@@ -71,7 +73,7 @@ robot:
   home_joint_max_acc: 2.0
   home_joint_tolerance: 0.01
   home_joint_timeout_sec: 20.0
-  zero_ft_sensor_on_connect: false
+  zero_ft_sensor_on_connect: true
   max_cartesian_delta: 0.02
   max_rotation_delta: 0.04
   cartesian_max_linear_vel: 0.8
@@ -93,7 +95,7 @@ robot:
   # reset off during normal recording because these cameras can take too long
   # to re-enumerate after reset and block robot-record startup.
   camera_hardware_reset_on_connect: false
-  camera_hardware_reset_on_release: true
+  camera_hardware_reset_on_release: false
   camera_reset_settle_sec: 6.0
   camera_reset_timeout_sec: 20.0
 
