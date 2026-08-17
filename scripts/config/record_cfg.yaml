@@ -55,7 +55,7 @@ record:
     # For ACT:
     type: "act"
     config_path: scripts/config/policies/act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/flexiv_ws/dual_arm_teleop/outputs/train/franka_dual_arm_test/pick_place_20260703_E10/checkpoints/008000/pretrained_model"
+    pretrained_path: "/home/deepcybo/flexiv_ws/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm_test/pick_place_20260703_E10/checkpoints/008000/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"

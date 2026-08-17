@@ -39,7 +39,7 @@ train:
 
     # Policy hyperparameters live in scripts/config/policies/*_train_config.yaml.
 
-  output_dir: "/home/deepcybo/flexiv_ws/dual_arm_teleop/outputs/train/franka_dual_arm_test/pick_place_20260703_E10" # model and log output directory
+  output_dir: "/home/deepcybo/flexiv_ws/Le-nero/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/franka_dual_arm_test/pick_place_20260703_E10" # model and log output directory
   # output_dir: "/home/geist/wbcd_workspace/lerobot/dual_arm_data_collection/lerobot_dual_arm_teleop/outputs/train/task3_step1/2mL_empty_right/dp_20260523_E249_Crop224"
   job_name: "act_pick_place_20260703_E10"
   # job_name: "2mL_empty_right_dp_20260523_E249_Crop224"
