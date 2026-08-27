@@ -409,6 +409,7 @@ class TrainPipelineConfig(HubMixin):
 
         self.wandb: WandBConfig = WandBConfig(
             enable = wandb["enable"],
+            disable_artifact = wandb.get("disable_artifact", False),
             project = wandb["project"],
             entity = wandb.get("entity"),  # 使用 get 方法，允许键不存在
             notes = wandb.get("notes"),    # 使用 get 方法，允许键不存在

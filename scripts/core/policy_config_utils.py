@@ -8,6 +8,7 @@ from typing import Any, Dict
 import yaml
 
 ACT_POLICY_TYPES = {"act", "act_dagger"}
+GRASP_ACT_POLICY_TYPES = {"grasp_act"}
 DIFFUSION_POLICY_TYPES = {"diffusion", "dp", "diffusion_policy"}
 POLICY_CONFIG_META_KEYS = {"type", "config_path", "reason_config_path", "train_config_path", "name"}
 POLICY_CONFIG_RUNTIME_OVERRIDE_KEYS = {"pretrained_path"}
@@ -28,11 +29,13 @@ def normalize_policy_type(policy_type: str) -> str:
     policy_type = str(policy_type).strip().lower()
     if policy_type in ACT_POLICY_TYPES:
         return "act"
+    if policy_type in GRASP_ACT_POLICY_TYPES:
+        return "grasp_act"
     if policy_type in DIFFUSION_POLICY_TYPES:
         return "diffusion"
     raise ValueError(
         f"No config for policy type: {policy_type}. "
-        "Supported policy types: act | diffusion | dp | diffusion_policy"
+        "Supported policy types: act | grasp_act | diffusion | dp | diffusion_policy"
     )
 
 
@@ -48,6 +51,8 @@ def get_default_policy_config_path(policy_type: str, mode: str) -> str:
     mode = _validate_policy_config_mode(mode)
     if policy_type == "act":
         return f"scripts/config/policies/act_{mode}_config.yaml"
+    if policy_type == "grasp_act":
+        return f"scripts/config/policies/grasp_act_{mode}_config.yaml"
     return f"scripts/config/policies/diffusion_{mode}_config.yaml"
 
 
@@ -140,13 +145,23 @@ def load_policy_yaml(path: Path) -> Dict[str, Any]:
 
 
 def _policy_label(policy_type: str) -> str:
-    return "Diffusion" if policy_type == "diffusion" else "ACT"
+    if policy_type == "diffusion":
+        return "Diffusion"
+    if policy_type == "grasp_act":
+        return "Grasp-ACT"
+    return "ACT"
 
 
 def get_act_config_field_names() -> set[str]:
     from lerobot.policies import ACTConfig
 
     return {config_field.name for config_field in fields(ACTConfig)}
+
+
+def get_grasp_act_config_field_names() -> set[str]:
+    from lerobot.policies import GraspACTConfig
+
+    return {config_field.name for config_field in fields(GraspACTConfig)}
 
 
 def get_diffusion_config_field_names() -> set[str]:
@@ -375,18 +390,23 @@ def build_act_config(
     legacy_source_name: str = "config",
     runtime_overrides: Dict[str, Any] | None = None,
     config_path: Path | None = None,
+    policy_type: str = "act",
+    config_cls: type[PreTrainedConfig] | None = None,
 ) -> PreTrainedConfig:
-    from lerobot.policies import ACTConfig
+    if config_cls is None:
+        from lerobot.policies import ACTConfig
 
-    allowed_fields = get_act_config_field_names()
-    validate_unknown_fields(policy_yaml_dict, allowed_fields, config_path=config_path, policy_type="act")
+        config_cls = ACTConfig
+
+    allowed_fields = {config_field.name for config_field in fields(config_cls)}
+    validate_unknown_fields(policy_yaml_dict, allowed_fields, config_path=config_path, policy_type=policy_type)
 
     act_kwargs = merge_legacy_policy_fields(
         policy_yaml_dict,
         legacy_policy_dict,
         allowed_fields,
         source_name=legacy_source_name,
-        policy_type="act",
+        policy_type=policy_type,
     )
     if runtime_overrides:
         unknown_runtime_fields = sorted(set(runtime_overrides) - allowed_fields)
@@ -413,6 +433,15 @@ def build_act_config(
             act_kwargs["temporal_ensemble_coeff"]
         )
 
+    if "low_dim_state_indices" in act_kwargs and act_kwargs["low_dim_state_indices"] is not None:
+        indices = act_kwargs["low_dim_state_indices"]
+        if not isinstance(indices, (list, tuple)):
+            raise ValueError(
+                "`low_dim_state_indices` must be a list, tuple, or null. "
+                f"Got {type(indices).__name__}."
+            )
+        act_kwargs["low_dim_state_indices"] = tuple(int(index) for index in indices)
+
     if (
         act_kwargs.get("temporal_ensemble_coeff") is not None
         and act_kwargs.get("n_action_steps", 100) != 1
@@ -435,9 +464,30 @@ def build_act_config(
 
     init_device, indexed_device = _act_init_device_and_restore_device(act_kwargs.get("device"))
     act_kwargs["device"] = init_device
-    act_config = ACTConfig(**act_kwargs)
+    act_config = config_cls(**act_kwargs)
     _restore_indexed_device_if_available(act_config, indexed_device)
     return act_config
+
+
+def build_grasp_act_config(
+    policy_yaml_dict: Dict[str, Any],
+    legacy_policy_dict: Dict[str, Any] | None = None,
+    *,
+    legacy_source_name: str = "config",
+    runtime_overrides: Dict[str, Any] | None = None,
+    config_path: Path | None = None,
+) -> PreTrainedConfig:
+    from lerobot.policies import GraspACTConfig
+
+    return build_act_config(
+        policy_yaml_dict,
+        legacy_policy_dict=legacy_policy_dict,
+        legacy_source_name=legacy_source_name,
+        runtime_overrides=runtime_overrides,
+        config_path=config_path,
+        policy_type="grasp_act",
+        config_cls=GraspACTConfig,
+    )
 
 
 def _list_or_tuple_to_tuple(value: Any, field_name: str, *, length: int | None = None) -> tuple:
@@ -655,6 +705,14 @@ def build_policy_config(
             runtime_overrides=runtime_overrides,
             config_path=config_path,
         )
+    if policy_type == "grasp_act":
+        return build_grasp_act_config(
+            policy_yaml_dict,
+            legacy_policy_dict=legacy_policy_dict,
+            legacy_source_name=legacy_source_name,
+            runtime_overrides=runtime_overrides,
+            config_path=config_path,
+        )
     if policy_type == "diffusion":
         return build_diffusion_config(
             policy_yaml_dict,
@@ -666,7 +724,7 @@ def build_policy_config(
         )
     raise ValueError(
         f"No config for policy type: {policy_type}. "
-        "Supported policy types: act | diffusion | dp | diffusion_policy"
+        "Supported policy types: act | grasp_act | diffusion | dp | diffusion_policy"
     )
 
 
