@@ -132,6 +132,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
     )
+    parser.add_argument("--max_steps", "--max-steps", dest="max_steps", type=int, default=3000)
     parser.add_argument("--compact", action="store_true", help="Print compact JSON for result payloads.")
     return parser
 
@@ -195,6 +196,7 @@ def main(argv: list[str] | None = None) -> int:
             position_tolerance_m=args.position_tolerance_m,
             rotation_tolerance_rad=args.rotation_tolerance_rad,
             max_correction_iters=args.max_correction_iters,
+            max_steps=args.max_steps,
         )
 
         left1, right1 = read_ee_poses(client)
