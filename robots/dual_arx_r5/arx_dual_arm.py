@@ -29,6 +29,13 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.utils.errors import DeviceNotConnectedError, DeviceAlreadyConnectedError
 from lerobot.robots.robot import Robot
 
+from robots.dual_arm_schema import (
+    AXES,
+    action_features as x_embodiment_action_features,
+    clip_gripper_width,
+    observation_features as x_embodiment_observation_features,
+    width_from_normalized_command,
+)
 from .config_arx import ArxDualArmConfig
 from .arx_interface_client import ArxDualArmClient
 
@@ -104,11 +111,14 @@ class ArxDualArm(Robot):
         self._left_reset_latch = False
         self._right_reset_latch = False
 
-        # Gripper state tracking
-        self._last_left_gripper_cmd = 0.0
-        self._last_right_gripper_cmd = 0.0
-        self._left_gripper_state = 0.0
-        self._right_gripper_state = 0.0
+        # The ARX RPC endpoint reports/accepts a normalized actuator position.
+        # Keep that hardware value private and expose only physical aperture in
+        # the public observation/action schema.
+        open_command = self._gripper_command_from_width(config.gripper_max_open)
+        self._last_left_gripper_cmd = open_command
+        self._last_right_gripper_cmd = open_command
+        self._left_gripper_width = float(config.gripper_max_open)
+        self._right_gripper_width = float(config.gripper_max_open)
 
         # ============================================================
         # 后台相机读取 (避免 try_wait_for_frames 阻塞主循环)
@@ -318,10 +328,14 @@ class ArxDualArm(Robot):
 
         # Open grippers
         if self.config.use_gripper:
-            self._client.set_left_gripper(self.config.gripper_open_value)
-            self._client.set_right_gripper(self.config.gripper_open_value)
-            self._last_left_gripper_cmd = 0.0
-            self._last_right_gripper_cmd = 0.0
+            open_width = self._clip_gripper_width(self.config.gripper_max_open)
+            open_command = self._gripper_command_from_width(open_width)
+            self._client.set_left_gripper(open_command)
+            self._client.set_right_gripper(open_command)
+            self._last_left_gripper_cmd = open_command
+            self._last_right_gripper_cmd = open_command
+            self._left_gripper_width = open_width
+            self._right_gripper_width = open_width
 
         logger.info("[ROBOT] Reset complete\n")
 
@@ -417,6 +431,17 @@ class ArxDualArm(Robot):
             self._smooth_reset_arms(left_reset_edge, right_reset_edge)
             motion_handled_by_reset = True
 
+        sent_action = dict(action)
+
+        # Public actions use a physical target aperture. Old normalized gripper
+        # keys remain accepted as input aliases, but are not part of features or
+        # newly recorded datasets.
+        if self.config.use_gripper:
+            for side in ("left", "right"):
+                width = self._gripper_width_from_action(action, side)
+                if width is not None:
+                    sent_action[f"{side}_gripper_width"] = self._handle_gripper(side, width)
+
         if not self.config.debug and not motion_handled_by_reset:
             has_delta_ee = "left_delta_ee_pose.x" in action
             has_joints = all(f"left_joint_{i+1}.pos" in action for i in range(self._num_arm_joints))
@@ -426,16 +451,10 @@ class ArxDualArm(Robot):
             elif has_joints:
                 self._send_action_joint(action)
 
-        # Handle grippers
-        if "left_gripper_cmd_bin" in action:
-            self._handle_gripper("left", action["left_gripper_cmd_bin"])
-        if "right_gripper_cmd_bin" in action:
-            self._handle_gripper("right", action["right_gripper_cmd_bin"])
-
         self._left_reset_latch = left_reset_pressed
         self._right_reset_latch = right_reset_pressed
 
-        return action
+        return sent_action
 
     def _send_action_cartesian(self, action: dict[str, Any]) -> None:
         """Oculus mode: delta_ee → 绝对目标位姿 → set_dual_ee_poses (服务端 IK).
@@ -443,9 +462,8 @@ class ArxDualArm(Robot):
         和 Dobot/Franka 一致的模式: 客户端只做加法, 服务端做 IK.
         send_action 总耗时 ~3ms (仅 RPC), 而不是之前客户端 IK 的 ~13ms.
         """
-        axes = ["x", "y", "z", "rx", "ry", "rz"]
-        left_delta_raw = np.array([action.get(f"left_delta_ee_pose.{a}", 0.0) for a in axes], dtype=float)
-        right_delta_raw = np.array([action.get(f"right_delta_ee_pose.{a}", 0.0) for a in axes], dtype=float)
+        left_delta_raw = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        right_delta_raw = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         left_delta_raw = self._apply_arm_mount_compensation("left", left_delta_raw)
         right_delta_raw = self._apply_arm_mount_compensation("right", right_delta_raw)
         left_delta = self._apply_delta_filter("left", left_delta_raw)
@@ -497,25 +515,80 @@ class ArxDualArm(Robot):
         clipped = np.clip(delta, -_MAX_JOINT_DELTA, _MAX_JOINT_DELTA)
         return current + clipped
 
-    def _handle_gripper(self, side: str, value: float) -> None:
-        if not self.config.use_gripper:
-            return
+    def _clip_gripper_width(self, width: float) -> float:
+        return clip_gripper_width(
+            width,
+            self.config.gripper_min_width,
+            self.config.gripper_max_open,
+        )
 
-        if value >= self.config.close_threshold:
-            cmd = self.config.gripper_close_value
+    def _gripper_width_from_action(self, action: dict[str, Any], side: str) -> float | None:
+        width_key = f"{side}_gripper_width"
+        if width_key in action and action[width_key] is not None:
+            return self._clip_gripper_width(float(action[width_key]))
+
+        # Input-only migration path for pre-X-embodiment ARX recordings:
+        # *_gripper_cmd_bin=1 meant close and 0 meant open.
+        for key in (f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"):
+            if key in action and action[key] is not None:
+                close_fraction = float(np.clip(float(action[key]), 0.0, 1.0))
+                return width_from_normalized_command(
+                    1.0 - close_fraction,
+                    self.config.gripper_min_width,
+                    self.config.gripper_max_open,
+                )
+        return None
+
+    def _gripper_command_from_width(self, width: float) -> float:
+        """Convert a physical aperture to the ARX RPC actuator position."""
+        minimum = float(self.config.gripper_min_width)
+        maximum = float(self.config.gripper_max_open)
+        width = self._clip_gripper_width(width)
+        if maximum <= minimum:
+            logical_command = float(self.config.gripper_close_value)
         else:
-            cmd = self.config.gripper_open_value
+            close_fraction = 1.0 - (width - minimum) / (maximum - minimum)
+            logical_command = (
+                float(self.config.gripper_open_value)
+                + close_fraction
+                * (float(self.config.gripper_close_value) - float(self.config.gripper_open_value))
+            )
+        return 1.0 - logical_command if self.config.gripper_reverse else logical_command
 
-        if self.config.gripper_reverse:
-            cmd = 1.0 - cmd
+    def _gripper_width_from_hardware_command(self, command: float) -> float:
+        """Convert an ARX normalized actuator state to calibrated aperture."""
+        logical_command = 1.0 - float(command) if self.config.gripper_reverse else float(command)
+        opened = float(self.config.gripper_open_value)
+        closed = float(self.config.gripper_close_value)
+        if abs(closed - opened) < 1e-12:
+            return self._clip_gripper_width(self._left_gripper_width)
+        close_fraction = (logical_command - opened) / (closed - opened)
+        close_fraction = float(np.clip(close_fraction, 0.0, 1.0))
+        return self._clip_gripper_width(
+            self.config.gripper_max_open
+            - close_fraction * (self.config.gripper_max_open - self.config.gripper_min_width)
+        )
 
-        last_attr = f"_last_{side}_gripper_cmd"
-        if cmd != getattr(self, last_attr):
-            if side == "left":
-                self._client.set_left_gripper(cmd)
-            else:
-                self._client.set_right_gripper(cmd)
-            setattr(self, last_attr, cmd)
+    def _handle_gripper(self, side: str, width: float) -> float:
+        if not self.config.use_gripper:
+            return float(width)
+
+        width = self._clip_gripper_width(width)
+        width_attr = f"_{side}_gripper_width"
+        last_width = float(getattr(self, width_attr))
+        command = self._gripper_command_from_width(width)
+        command_attr = f"_last_{side}_gripper_cmd"
+
+        if abs(width - last_width) < float(self.config.gripper_command_epsilon):
+            return width
+
+        if side == "left":
+            self._client.set_left_gripper(command)
+        else:
+            self._client.set_right_gripper(command)
+        setattr(self, command_attr, command)
+        setattr(self, width_attr, width)
+        return width
 
     # ============================================================
     # 后台相机读取线程
@@ -569,36 +642,25 @@ class ArxDualArm(Robot):
 
         obs = {}
 
-        # Left arm joints (6, 1-indexed)
-        left_jp = state["left_arm"]["joint_positions"]
-        for i in range(self._num_arm_joints):
-            obs[f"left_joint_{i+1}.pos"] = float(left_jp[i])
-
-        # Right arm joints (6, 1-indexed)
-        right_jp = state["right_arm"]["joint_positions"]
-        for i in range(self._num_arm_joints):
-            obs[f"right_joint_{i+1}.pos"] = float(right_jp[i])
-
         # End-effector poses
         left_ep = state["left_arm"]["end_pose"]
         right_ep = state["right_arm"]["end_pose"]
-        for i, axis in enumerate(["x", "y", "z", "rx", "ry", "rz"]):
+        for i, axis in enumerate(AXES):
             obs[f"left_ee_pose.{axis}"] = float(left_ep[i])
             obs[f"right_ee_pose.{axis}"] = float(right_ep[i])
 
-        # Gripper states
+        # Gripper states are calibrated physical apertures. ARX does not expose
+        # a native metre measurement, so this is the configured 0-1-to-width
+        # calibration applied to its reported actuator state.
         if self.config.use_gripper:
-            left_grip = state["left_arm"]["gripper"]
-            right_grip = state["right_arm"]["gripper"]
-            if self.config.gripper_reverse:
-                left_grip = 1.0 - left_grip
-                right_grip = 1.0 - right_grip
-            self._left_gripper_state = left_grip
-            self._right_gripper_state = right_grip
-            obs["left_gripper_state_norm"] = self._left_gripper_state
-            obs["right_gripper_state_norm"] = self._right_gripper_state
-            obs["left_gripper_cmd_bin"] = self._last_left_gripper_cmd
-            obs["right_gripper_cmd_bin"] = self._last_right_gripper_cmd
+            self._left_gripper_width = self._gripper_width_from_hardware_command(
+                state["left_arm"]["gripper"]
+            )
+            self._right_gripper_width = self._gripper_width_from_hardware_command(
+                state["right_arm"]["gripper"]
+            )
+            obs["left_gripper_width"] = self._left_gripper_width
+            obs["right_gripper_width"] = self._right_gripper_width
 
         # Camera images: 从后台线程缓存取最新帧 (<0.1ms)
         t_cam_total = time.perf_counter()
@@ -624,59 +686,23 @@ class ArxDualArm(Robot):
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        features = {}
-
-        # Left arm joints
-        for i in range(self._num_arm_joints):
-            features[f"left_joint_{i+1}.pos"] = float
-
-        # Right arm joints
-        for i in range(self._num_arm_joints):
-            features[f"right_joint_{i+1}.pos"] = float
-
-        # Left arm end effector pose
-        for axis in ["x", "y", "z", "rx", "ry", "rz"]:
-            features[f"left_ee_pose.{axis}"] = float
-
-        # Right arm end effector pose
-        for axis in ["x", "y", "z", "rx", "ry", "rz"]:
-            features[f"right_ee_pose.{axis}"] = float
-
-        if self.config.use_gripper:
-            features["left_gripper_state_norm"] = float
-            features["left_gripper_cmd_bin"] = float
-            features["right_gripper_state_norm"] = float
-            features["right_gripper_cmd_bin"] = float
-
-        return features
+        return {
+            name: feature
+            for name, feature in x_embodiment_observation_features(
+                {}, use_gripper=self.config.use_gripper
+            ).items()
+        }
 
     @property
     def action_features(self) -> dict[str, type]:
-        features = {}
-        if self.config.control_mode == "oculus":
-            # Left arm delta pose
-            for axis in ["x", "y", "z", "rx", "ry", "rz"]:
-                features[f"left_delta_ee_pose.{axis}"] = float
-
-            # Right arm delta pose
-            for axis in ["x", "y", "z", "rx", "ry", "rz"]:
-                features[f"right_delta_ee_pose.{axis}"] = float
-        else:
-            # Left arm joints
-            for i in range(self._num_arm_joints):
-                features[f"left_joint_{i+1}.pos"] = float
-
-            # Right arm joints
-            for i in range(self._num_arm_joints):
-                features[f"right_joint_{i+1}.pos"] = float
-        if self.config.use_gripper:
-            features["left_gripper_cmd_bin"] = float
-            features["right_gripper_cmd_bin"] = float
-        return features
+        return x_embodiment_action_features(use_gripper=self.config.use_gripper)
 
     @property
     def observation_features(self) -> dict[str, Any]:
-        return {**self._motors_ft, **self._cameras_ft}
+        return x_embodiment_observation_features(
+            self.cameras,
+            use_gripper=self.config.use_gripper,
+        )
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:

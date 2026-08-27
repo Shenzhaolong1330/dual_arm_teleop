@@ -10,6 +10,8 @@ teleop:
     left_channel_signs: [1, 1, 1, -1, -1, 1]
     right_pose_scaler: [2.5, 2.5]
     right_channel_signs: [1, 1, 1, -1, -1, 1]
+    # Operator stands opposite the robot: right controller drives left arm.
+    mirror_teleop: true
     visualize_placo: false
 
 robot:
@@ -22,6 +24,12 @@ robot:
   close_threshold: 0.5
   gripper_open_value: 0.0
   gripper_close_value: 1.0
+  # Dataset/teleop interface is physical aperture (m). The ARX RPC bridge
+  # still receives 0-1 actuator positions, converted by the adapter.
+  # Calibrate gripper_max_open to the installed end effector when it differs.
+  gripper_min_width: 0.0
+  gripper_max_open: 0.085
+  gripper_command_epsilon: 0.0005
   go_home_on_connect: true
   home_joint_positions: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
   home_steps: 50

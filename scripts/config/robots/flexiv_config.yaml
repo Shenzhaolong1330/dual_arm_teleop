@@ -26,6 +26,7 @@ teleop:
     action_spike_rotation: 0.10
     gripper_trigger_deadzone: 0.0
     gripper_trigger_gamma: 0.7 # 1.0 linear; <1.0 closes earlier, >1.0 closes later
+    # Operator stands opposite the robot: right controller drives left arm.
     mirror_teleop: true
     visualize_placo: false
 
@@ -45,7 +46,7 @@ robot:
   switch_tool_on_connect: true
   initialize_gripper_on_connect: true # true: initialize gripper by opening and closing in slow speed
   gripper_min_width: 0.0
-  gripper_max_open: 0.1 # meters; normalized command 1.0 maps to this width
+  gripper_max_open: 0.1 # metres; public dataset actions use physical width directly
   gripper_speed: 0.2 # Flexiv-GN01 RDK reports max_vel=0.2; higher values are clipped/rejected
   gripper_force: 10.0
   gripper_command_epsilon: 0.0005 # realtime command deadband; home wait still has a 0.001m floor
@@ -57,7 +58,7 @@ robot:
   use_cartesian_servo_thread: true
   cartesian_servo_hz: 200.0
   cartesian_servo_alpha: 0.25
-  gripper_reverse: false
+  gripper_reverse: false # legacy normalized-command compatibility only
   close_threshold: 0.5
   enable_on_connect: true
   clear_fault_on_connect: true

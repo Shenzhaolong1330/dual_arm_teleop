@@ -4,9 +4,10 @@ Supports multiple robot types: Franka (single-arm), Dobot (dual-arm), etc.
 
 Action input format (from teleop):
 - Single-arm robot: uses right_delta_ee_pose.{axis}, right_gripper_cmd_bin
-- Dual-arm robot schemas are robot-specific. Nero-compatible contracts use
-  left/right_delta_ee_pose.{axis} and left/right_gripper_cmd; Franka-native
-  contracts keep the Franka-specific left/right_gripper_cmd_bin keys.
+- Nero, ARX, dual Franka, and dual Flexiv use the X-embodiment contract:
+  left/right_delta_ee_pose.{axis} plus left/right_gripper_width in metres.
+  Their observations expose absolute left/right EE poses, physical gripper
+  widths, and the three configured RGB cameras.
 """
 
 from typing import Dict, Any, Type

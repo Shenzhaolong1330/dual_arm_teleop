@@ -25,12 +25,16 @@ class ArxDualArmConfig(RobotConfig):
     robot_ip: str = "localhost"
     robot_port: int = 4242
 
-    # Gripper (integrated, single 0-1 float via RPC)
+    # Gripper. The ARX RPC server accepts a normalized actuator position, while
+    # the public X-embodiment API exposes calibrated physical aperture in m.
     use_gripper: bool = True
     gripper_open_value: float = 0.0
     gripper_close_value: float = 1.0
+    gripper_min_width: float = 0.0
+    gripper_max_open: float = 0.085
     close_threshold: float = 0.5
     gripper_reverse: bool = False
+    gripper_command_epsilon: float = 0.0005
 
     # Control
     control_mode: str = "oculus"
@@ -62,10 +66,9 @@ class ArxDualArmConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
 
     # Compatibility fields — accepted by create_robot_config() in run_record.py
-    # but NOT used by ArxDualArm (ARX gripper has no separate server or Robotiq params)
+    # but not used by ARX's integrated RPC gripper.
     gripper_ip: str = "localhost"
     gripper_port: int = 4243
-    gripper_max_open: float = 0.085
     gripper_force: float = 10.0
     gripper_speed: float = 0.1
     max_joint_velocity: float = 2.0

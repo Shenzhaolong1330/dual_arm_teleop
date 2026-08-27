@@ -14,6 +14,8 @@ teleop:
     right_pose_scaler: [1.2, 1.2] # right arm scaler
     right_channel_signs: [-1, -1, 1, 1, 1, 1] # right arm signs
     # right_channel_signs: [-1, -1, 1, -1, -1, -1]
+    # Operator stands opposite the robot: right controller drives left arm.
+    mirror_teleop: true
     visualize_placo: false # whether to visualize robot using placo
 
 robot:
@@ -26,9 +28,11 @@ robot:
   # gripper_port: 4243 # gripper zerorpc port (single port for both arms)
   close_threshold: 0.05 # threshold to determine gripper open/close
   # gripper_bin_threshold: 0.05 # threshold to determine gripper is closed
-  gripper_reverse: false # if gripper moves opposite, flip this value
+  gripper_reverse: false # legacy normalized-command compatibility only; width actions are physical
+  gripper_min_width: 0.0 # metres; dataset observations/actions use physical widths
   gripper_max_open: 0.1 # Robotiq 2F-85 max open width in meters
   gripper_force: 2.0 # Robotiq 2F-85 max force in Newtons
+  gripper_command_epsilon: 0.0005 # metres; suppress redundant width commands
 
 cameras:
   left_wrist_cam_serial: "412622270929" # left wrist camera serial number

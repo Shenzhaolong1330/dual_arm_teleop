@@ -14,11 +14,17 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
+from robots.dual_arm_schema import (
+    AXES,
+    action_features as x_embodiment_action_features,
+    clip_gripper_width,
+    observation_features as x_embodiment_observation_features,
+    width_from_normalized_command,
+)
 from .config_flexiv import FlexivDualArmConfig
 
 logger = logging.getLogger(__name__)
 
-AXES = ("x", "y", "z", "rx", "ry", "rz")
 GRIPPER_WAIT_TOLERANCE_FLOOR = 0.001
 
 
@@ -487,27 +493,28 @@ class FlexivDualArm(Robot):
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
+        sent_action = dict(action)
         send_start_t = time.perf_counter()
         timing: dict[str, float] = {}
-        if not self.config.debug and "left_delta_ee_pose.x" in action:
+        if not self.config.debug and "left_delta_ee_pose.x" in sent_action:
             cartesian_start_t = time.perf_counter()
-            self._send_cartesian_delta(action)
+            self._send_cartesian_delta(sent_action)
             timing["cartesian_ms"] = (time.perf_counter() - cartesian_start_t) * 1000.0
         elif not self.config.debug and all(
-            f"left_joint_{i + 1}.pos" in action for i in range(self._num_joints_per_arm)
+            f"left_joint_{i + 1}.pos" in sent_action for i in range(self._num_joints_per_arm)
         ):
             joint_start_t = time.perf_counter()
-            self._send_joint_positions(action)
+            self._send_joint_positions(sent_action)
             timing["joint_ms"] = (time.perf_counter() - joint_start_t) * 1000.0
 
         if self.config.use_gripper:
             gripper_start_t = time.perf_counter()
-            self._update_gripper_cache(action)
+            self._update_gripper_cache(sent_action)
             timing["gripper_ms"] = (time.perf_counter() - gripper_start_t) * 1000.0
-        self._log_action_debug(action)
+        self._log_action_debug(sent_action)
         timing["total_ms"] = (time.perf_counter() - send_start_t) * 1000.0
         self._log_timing_debug("send_action", timing)
-        return action
+        return sent_action
 
     def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
         left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
@@ -604,8 +611,8 @@ class FlexivDualArm(Robot):
         right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         left_mapped = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
         right_mapped = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
-        left_grip = self._gripper_value_from_action(action, "left")
-        right_grip = self._gripper_value_from_action(action, "right")
+        left_grip = self._gripper_width_from_action(action, "left")
+        right_grip = self._gripper_width_from_action(action, "right")
         logger.info(
             "[FLEXIV ACTION] step=%d raw_left_xyz=%.6f raw_right_xyz=%.6f "
             "mapped_left_xyz=%.6f mapped_right_xyz=%.6f left_rot=%.6f right_rot=%.6f "
@@ -789,21 +796,39 @@ class FlexivDualArm(Robot):
         self._right_robot.SendJointPosition(right_q, zeros, max_vel, max_acc)
 
     def _update_gripper_cache(self, action: dict[str, Any]) -> None:
-        left = self._gripper_value_from_action(action, "left")
-        right = self._gripper_value_from_action(action, "right")
-        if left is not None:
-            self._left_gripper_cmd = self._normalize_gripper(float(left))
-            self._move_gripper_command_if_needed("left", self._left_gripper_cmd)
-        if right is not None:
-            self._right_gripper_cmd = self._normalize_gripper(float(right))
-            self._move_gripper_command_if_needed("right", self._right_gripper_cmd)
+        for side in ("left", "right"):
+            width = self._gripper_width_from_action(action, side)
+            if width is None:
+                continue
+            width = self._clip_gripper_width(width)
+            command = self._gripper_command_from_width(width)
+            if side == "left":
+                self._left_gripper_cmd = command
+            else:
+                self._right_gripper_cmd = command
+            gripper = self._left_gripper if side == "left" else self._right_gripper
+            if gripper is None:
+                self._set_cached_gripper_width(side, width)
+            else:
+                self._move_gripper_to_width_if_needed(side, width, command=command)
+            action[f"{side}_gripper_width"] = width
 
-    @staticmethod
-    def _gripper_value_from_action(action: dict[str, Any], side: str) -> Any:
+    def _gripper_width_from_action(self, action: dict[str, Any], side: str) -> float | None:
+        width = action.get(f"{side}_gripper_width")
+        if width is not None:
+            return self._clip_gripper_width(float(width))
+
+        # Legacy normalized aliases are still accepted for manual compatibility,
+        # but never emitted by the public X-embodiment schema.
         for key in (f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"):
             value = action.get(key)
             if value is not None:
-                return value
+                return width_from_normalized_command(
+                    float(value),
+                    self.config.gripper_min_width,
+                    self.config.gripper_max_open,
+                    reverse=self.config.gripper_reverse,
+                )
         return None
 
     def _normalize_gripper(self, value: float) -> float:
@@ -818,8 +843,11 @@ class FlexivDualArm(Robot):
         return min_width, max_width
 
     def _clip_gripper_width(self, width: float) -> float:
-        min_width, max_width = self._gripper_width_limits()
-        return float(np.clip(float(width), min_width, max_width))
+        return clip_gripper_width(
+            width,
+            self.config.gripper_min_width,
+            self.config.gripper_max_open,
+        )
 
     def _gripper_width_from_cmd(self, command: float) -> float:
         min_width, max_width = self._gripper_width_limits()
@@ -1255,7 +1283,6 @@ class FlexivDualArm(Robot):
         robot_lock = self._left_robot_lock if side == "left" else self._right_robot_lock
         with robot_lock:
             states = robot.states()
-        joints = _as_np(getattr(states, "q", None), self._num_joints_per_arm)
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
         if np.linalg.norm(pose7[3:7]) < 1e-12:
             pose7[3] = 1.0
@@ -1266,21 +1293,25 @@ class FlexivDualArm(Robot):
         else:
             self._cached_right_pose7 = pose7.copy()
 
-        for index, value in enumerate(joints, start=1):
-            obs[f"{side}_joint_{index}.pos"] = float(value)
         for index, axis in enumerate(AXES):
             obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
 
         if self.config.use_gripper:
             cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
-            obs[f"{side}_gripper_state_norm"] = float(cmd)
-            obs[f"{side}_gripper_cmd"] = float(cmd)
             gripper = self._left_gripper if side == "left" else self._right_gripper
+            width = None
             if gripper is not None:
                 try:
-                    obs[f"{side}_gripper_width"] = float(gripper.states().width)
+                    width = self._clip_gripper_width(float(gripper.states().width))
                 except Exception:  # noqa: BLE001
-                    obs[f"{side}_gripper_width"] = self._gripper_width_from_cmd(cmd)
+                    pass
+            if width is None:
+                width = self._left_gripper_width if side == "left" else self._right_gripper_width
+            if width is None:
+                width = self._gripper_width_from_cmd(cmd)
+            width = self._clip_gripper_width(width)
+            self._set_cached_gripper_width(side, width)
+            obs[f"{side}_gripper_width"] = width
 
     def _refresh_cached_poses(self) -> None:
         if self._left_robot is not None:
@@ -1373,37 +1404,23 @@ class FlexivDualArm(Robot):
 
     @property
     def _motors_ft(self) -> dict[str, type]:
-        features = {}
-        for side in ("left", "right"):
-            for index in range(self._num_joints_per_arm):
-                features[f"{side}_joint_{index + 1}.pos"] = float
-            for axis in AXES:
-                features[f"{side}_ee_pose.{axis}"] = float
-            if self.config.use_gripper:
-                features[f"{side}_gripper_state_norm"] = float
-                features[f"{side}_gripper_cmd"] = float
-                features[f"{side}_gripper_width"] = float
-        return features
+        return {
+            name: feature
+            for name, feature in x_embodiment_observation_features(
+                {}, use_gripper=self.config.use_gripper
+            ).items()
+        }
 
     @property
     def action_features(self) -> dict[str, type]:
-        features = {}
-        if self.config.control_mode == "oculus":
-            for side in ("left", "right"):
-                for axis in AXES:
-                    features[f"{side}_delta_ee_pose.{axis}"] = float
-        else:
-            for side in ("left", "right"):
-                for index in range(self._num_joints_per_arm):
-                    features[f"{side}_joint_{index + 1}.pos"] = float
-        if self.config.use_gripper:
-            features["left_gripper_cmd"] = float
-            features["right_gripper_cmd"] = float
-        return features
+        return x_embodiment_action_features(use_gripper=self.config.use_gripper)
 
     @property
     def observation_features(self) -> dict[str, Any]:
-        return {**self._motors_ft, **self._cameras_ft}
+        return x_embodiment_observation_features(
+            self.cameras,
+            use_gripper=self.config.use_gripper,
+        )
 
     @property
     def _cameras_ft(self) -> dict[str, tuple[int, int, int]]:

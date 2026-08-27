@@ -18,6 +18,13 @@ from lerobot.cameras import make_cameras_from_configs
 from lerobot.robots.robot import Robot
 from lerobot.utils.errors import DeviceAlreadyConnectedError, DeviceNotConnectedError
 
+from robots.dual_arm_schema import (
+    AXES,
+    action_features as x_embodiment_action_features,
+    clip_gripper_width,
+    observation_features as x_embodiment_observation_features,
+    width_from_normalized_command,
+)
 from .config_franka import FrankaDualArmConfig
 from .dual_franka_robotiq_rpc_client import FrankaDualArmClient
 
@@ -25,8 +32,12 @@ logger = logging.getLogger(__name__)
 
 SCHEMA_MODE_NERO_COMPATIBLE = "nero_compatible"
 SCHEMA_MODE_FRANKA_NATIVE = "franka_native"
-VALID_SCHEMA_MODES = {SCHEMA_MODE_NERO_COMPATIBLE, SCHEMA_MODE_FRANKA_NATIVE}
-AXES = ("x", "y", "z", "rx", "ry", "rz")
+SCHEMA_MODE_X_EMBODIMENT = "x_embodiment"
+VALID_SCHEMA_MODES = {
+    SCHEMA_MODE_X_EMBODIMENT,
+    SCHEMA_MODE_NERO_COMPATIBLE,
+    SCHEMA_MODE_FRANKA_NATIVE,
+}
 NERO_COMPAT_ACTION_KEYS = tuple(
     [f"left_delta_ee_pose.{axis}" for axis in AXES]
     + [f"right_delta_ee_pose.{axis}" for axis in AXES]
@@ -180,7 +191,7 @@ class FrankaDualArm(Robot):
 
     @staticmethod
     def _resolve_schema_mode(schema_mode: str | None) -> str:
-        mode = str(schema_mode or SCHEMA_MODE_FRANKA_NATIVE).strip().lower()
+        mode = str(schema_mode or SCHEMA_MODE_X_EMBODIMENT).strip().lower()
         if mode not in VALID_SCHEMA_MODES:
             raise ValueError(
                 f"FrankaDualArmConfig.schema_mode must be one of {sorted(VALID_SCHEMA_MODES)}; "
@@ -236,7 +247,10 @@ class FrankaDualArm(Robot):
 
     def disconnect(self) -> None:
         has_camera_threads = bool(self._camera_threads)
-        has_connected_cameras = any(getattr(cam, "is_connected", False) for cam in self.cameras.values())
+        has_connected_cameras = any(
+            getattr(cam, "is_connected", getattr(cam, "connected", False))
+            for cam in self.cameras.values()
+        )
         has_rpc_client = self._robot is not None or self._observation_robot is not None
         if not (self.is_connected or has_camera_threads or has_connected_cameras or has_rpc_client):
             return
@@ -245,7 +259,7 @@ class FrankaDualArm(Robot):
         self._stop_camera_threads()
         for cam in self.cameras.values():
             try:
-                if getattr(cam, "is_connected", False):
+                if getattr(cam, "is_connected", getattr(cam, "connected", False)):
                     cam.disconnect()
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[CAM] Failed to disconnect camera cleanly: %s", exc)
@@ -397,6 +411,7 @@ class FrankaDualArm(Robot):
                     side,
                     float(gripper_value),
                     gripper_updates,
+                    source_key=source_key,
                 )
                 sent_action[public_key] = sent_value
                 if source_key is not None:
@@ -698,13 +713,17 @@ class FrankaDualArm(Robot):
         return float(default)
 
     def _public_gripper_action_key(self, side: str) -> str:
+        if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+            return f"{side}_gripper_width"
         if self.schema_mode == SCHEMA_MODE_NERO_COMPATIBLE:
             return f"{side}_gripper_cmd"
         return f"{side}_gripper_cmd_bin"
 
     def _gripper_action_keys(self, side: str) -> list[str]:
         public_key = self._public_gripper_action_key(side)
-        return _unique([public_key, f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"])
+        return _unique(
+            [public_key, f"{side}_gripper_width", f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"]
+        )
 
     def _gripper_value_from_action(self, action: dict[str, Any], side: str) -> tuple[Any, str | None]:
         for key in self._gripper_action_keys(side):
@@ -749,7 +768,43 @@ class FrankaDualArm(Robot):
         side: str,
         value: float,
         gripper_updates: list[tuple[str, float]],
+        *,
+        source_key: str | None = None,
     ) -> float:
+        if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+            if source_key == f"{side}_gripper_width":
+                width = clip_gripper_width(value, 0.0, self.config.gripper_max_open)
+            else:
+                # Input-only migration path for old normalized action keys.
+                width = width_from_normalized_command(
+                    value,
+                    0.0,
+                    self.config.gripper_max_open,
+                    reverse=self.config.gripper_reverse,
+                )
+            open_fraction = (
+                width / self.config.gripper_max_open
+                if self.config.gripper_max_open > 1e-12
+                else 0.0
+            )
+
+            if side == "left":
+                if self._last_left_gripper_open is not None and abs(open_fraction - self._last_left_gripper_open) < 1e-4:
+                    return width
+                side_key = "left_arm"
+            else:
+                if self._last_right_gripper_open is not None and abs(open_fraction - self._last_right_gripper_open) < 1e-4:
+                    return width
+                side_key = "right_arm"
+
+            server_action.setdefault(side_key, {})["gripper"] = {
+                "width": width,
+                "max_velocity": self.config.gripper_speed,
+                "max_effort": self.config.gripper_force,
+            }
+            gripper_updates.append((side, open_fraction))
+            return width
+
         commanded_open_fraction = _clamp(value, 0.0, 1.0)
         open_fraction = commanded_open_fraction
         if self.config.gripper_reverse:
@@ -803,21 +858,29 @@ class FrankaDualArm(Robot):
         if self.config.use_gripper:
             left_grip = _gripper_open_fraction_from_side(left_side, self._left_gripper_state)
             right_grip = _gripper_open_fraction_from_side(right_side, self._right_gripper_state)
-            if self.config.gripper_reverse:
-                left_grip = 1.0 - left_grip
-                right_grip = 1.0 - right_grip
-            self._left_gripper_state = _clamp(left_grip, 0.0, 1.0)
-            self._right_gripper_state = _clamp(right_grip, 0.0, 1.0)
-            left_cmd = (
-                self._last_left_gripper_open
-                if self._last_left_gripper_open is not None
-                else self._left_gripper_state
-            )
-            right_cmd = (
-                self._last_right_gripper_open
-                if self._last_right_gripper_open is not None
-                else self._right_gripper_state
-            )
+            if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+                # The canonical observation is a physical aperture in metres,
+                # independent of any legacy command-direction setting.
+                self._left_gripper_state = _clamp(left_grip, 0.0, 1.0)
+                self._right_gripper_state = _clamp(right_grip, 0.0, 1.0)
+                left_cmd = clip_gripper_width(left_grip * self.config.gripper_max_open, 0.0, self.config.gripper_max_open)
+                right_cmd = clip_gripper_width(right_grip * self.config.gripper_max_open, 0.0, self.config.gripper_max_open)
+            else:
+                if self.config.gripper_reverse:
+                    left_grip = 1.0 - left_grip
+                    right_grip = 1.0 - right_grip
+                self._left_gripper_state = _clamp(left_grip, 0.0, 1.0)
+                self._right_gripper_state = _clamp(right_grip, 0.0, 1.0)
+                left_cmd = (
+                    self._last_left_gripper_open
+                    if self._last_left_gripper_open is not None
+                    else self._left_gripper_state
+                )
+                right_cmd = (
+                    self._last_right_gripper_open
+                    if self._last_right_gripper_open is not None
+                    else self._right_gripper_state
+                )
 
         obs = self._format_observation(
             left_joints=left_joints,
@@ -851,6 +914,16 @@ class FrankaDualArm(Robot):
         right_gripper_cmd: float | None,
     ) -> dict[str, Any]:
         obs: dict[str, Any] = {}
+        if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+            for i, axis in enumerate(AXES):
+                obs[f"left_ee_pose.{axis}"] = float(left_pose[i])
+            for i, axis in enumerate(AXES):
+                obs[f"right_ee_pose.{axis}"] = float(right_pose[i])
+            if self.config.use_gripper:
+                obs["left_gripper_width"] = float(left_gripper_cmd)
+                obs["right_gripper_width"] = float(right_gripper_cmd)
+            return obs
+
         if self.schema_mode == SCHEMA_MODE_NERO_COMPATIBLE:
             for i in range(self._num_joints_per_arm):
                 obs[f"left_joint_{i + 1}.pos"] = float(left_joints[i])
@@ -942,6 +1015,9 @@ class FrankaDualArm(Robot):
 
     @property
     def action_features(self) -> dict[str, type]:
+        if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+            return x_embodiment_action_features(use_gripper=self.config.use_gripper)
+
         if self.schema_mode == SCHEMA_MODE_NERO_COMPATIBLE:
             keys = list(NERO_COMPAT_ACTION_KEYS[:12])
             if self.config.use_gripper:
@@ -964,6 +1040,12 @@ class FrankaDualArm(Robot):
 
     @property
     def observation_features(self) -> dict[str, Any]:
+        if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+            return x_embodiment_observation_features(
+                self.cameras,
+                use_gripper=self.config.use_gripper,
+            )
+
         motor_features = (
             self._nero_compatible_motors_ft
             if self.schema_mode == SCHEMA_MODE_NERO_COMPATIBLE

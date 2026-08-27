@@ -15,6 +15,7 @@ teleop:
     action_deadband_rotation: 0.0005      # radians per frame; keep fine teleop rotation responsive
     action_spike_translation: 0.1       # meters per frame; ignore tracking jumps
     action_spike_rotation: 0.2          # radians per frame; ignore tracking jumps before Franka clipping
+    # Operator stands opposite the robot: right controller drives left arm.
     mirror_teleop: true
     visualize_placo: false
 
@@ -22,7 +23,7 @@ robot:
   robot_ip: "172.16.0.1"
   robot_port: 4242
   rpc_timeout_sec: 30.0
-  schema_mode: "nero_compatible"
+  schema_mode: "x_embodiment"
   use_gripper: true
   close_threshold: 0.7
   gripper_reverse: false

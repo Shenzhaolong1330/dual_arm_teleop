@@ -24,11 +24,13 @@ class NeroDualArmConfig(RobotConfig):
     gripper_ip: str = "192.168.110.114"  # gripper zerorpc ip, if different from robot_ip, set to robot_ip
     gripper_port: int = 4243  # gripper zerorpc port (single port for both arms)
     use_gripper: bool = True
+    gripper_min_width: float = 0.0
     gripper_max_open: float = 0.1  # agx_gripper max opening: 10mm
     gripper_force: float = 2.0  # Gripping force in N
     gripper_speed: float = 0.1  # Speed in m/s
     gripper_reverse: bool = False  # Whether to reverse gripper command
     close_threshold: float = 0.05  # Threshold for binary gripper control
+    gripper_command_epsilon: float = 0.0005
     
     # Control configuration
     control_mode: str = "oculus"
