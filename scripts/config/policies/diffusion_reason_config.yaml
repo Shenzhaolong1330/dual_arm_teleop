@@ -8,9 +8,9 @@
 pretrained_path: null # move to record_cfg_*.yaml
 device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
 use_amp: false  # inference autocast flag used by run_record/predict_action on CUDA.
-n_obs_steps: 2  # int > 0. Number of observation frames cached before diffusion sampling.
-horizon: 8  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
-n_action_steps: 7  # int > 0 and <= horizon - n_obs_steps + 1. Number of sampled actions queued/executed per denoising call.
+n_obs_steps: 4  # int > 0. Number of observation frames cached before diffusion sampling.
+horizon: 32  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
+n_action_steps: 12  # int > 0 and <= horizon - n_obs_steps + 1. Number of sampled actions queued/executed per denoising call.
 
 # =========================
 # Model / policy architecture

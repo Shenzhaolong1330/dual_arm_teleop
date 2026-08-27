@@ -9,8 +9,8 @@ pretrained_path: null # move to record_cfg_*.yaml
 device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
 use_amp: false  # inference autocast flag used by run_record/predict_action on CUDA.
 n_obs_steps: 1  # ACT supports exactly 1; ACTConfig raises if n_obs_steps != 1.
-chunk_size: 15  # int > 0. ACT predicted action chunk length; must match checkpoint architecture.
-n_action_steps: 1  # int > 0 and <= chunk_size. Number of actions queued/executed; must be 1 when temporal ensemble is enabled.
+chunk_size: 60  # int > 0. ACT predicted action chunk length; must match checkpoint architecture.
+n_action_steps: 20  # int > 0 and <= chunk_size. Execute 0.167s at 30Hz before replanning.
 
 # =========================
 # Model / policy architecture
@@ -45,7 +45,7 @@ n_vae_encoder_layers: 4  # Kept to match checkpoint VAE encoder module structure
 # =========================
 # Inference-only parameters
 # =========================
-temporal_ensemble_coeff: 0.03  # ACT inference only. null/non-positive disables; positive float enables smoothing and requires n_action_steps=1.
+temporal_ensemble_coeff: null  # ACT inference only. null/non-positive disables; positive float enables smoothing and requires n_action_steps=1.
 
 # =========================
 # Default semantic overrides / 默认语义补充

@@ -8,7 +8,7 @@
 device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
 use_amp: false  # AMP flag on policy config. Custom run_train uses Accelerator, but keep explicit for saved config semantics.
 n_obs_steps: 1  # ACT supports exactly 1; ACTConfig raises if n_obs_steps != 1.
-chunk_size: 15  # int > 0. ACT predicted action chunk length and training target sequence length.
+chunk_size: 60  # 30Hz equivalent of LeRobot ACT's 100-step / 50Hz (~2s) action chunk.
 
 # =========================
 # Model / policy architecture
@@ -37,8 +37,8 @@ n_vae_encoder_layers: 4  # Number of transformer layers in the VAE encoder.
 # =========================
 # Training-only parameters
 # =========================
-kl_weight: 5  # training loss only when use_vae=true; loss = l1_loss + kl_weight * kld_loss.
-dropout: 0.05  # Dropout probability used in transformer layers during training.
+kl_weight: 10  # training loss only when use_vae=true; loss = l1_loss + kl_weight * kld_loss.
+dropout: 0.1  # Dropout probability used in transformer layers during training.
 optimizer_lr: 0.00001  # AdamW preset lr when use_policy_training_preset is true.
 optimizer_weight_decay: 0.0001  # AdamW preset weight_decay.
 optimizer_lr_backbone: 0.00001  # ACT get_optim_params assigns this lr to model.backbone params.
@@ -56,7 +56,7 @@ optimizer_lr_backbone: 0.00001  # ACT get_optim_params assigns this lr to model.
 # =========================
 push_to_hub: false  # PreTrainedConfig default is true; keep explicit to avoid accidental model upload validation/push.
 pretrained_path: null  # null means train from scratch; set to a pretrained_model directory only for finetune.
-n_action_steps: 5  # int > 0 and <= chunk_size. Not part of ACT loss, but saved for later select_action queue semantics.
+n_action_steps: 15  # Execute 0.5s at 30Hz before replanning; keep chunk_size=60 for a 2s training horizon.
 temporal_ensemble_coeff: null  # ACT inference only. null/non-positive disables temporal ensemble; positive float enables it and requires n_action_steps=1.
 
 # input_features / output_features are omitted intentionally.
