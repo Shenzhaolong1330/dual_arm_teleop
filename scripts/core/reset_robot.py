@@ -26,8 +26,41 @@ ROBOT_DETAIL_CONFIG_FILES = {
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
     "arx_dual_arm": "arx_config.yaml",
+    "flexiv_dual_arm": "flexiv_config.yaml",
 }
 ROBOT_CONFIG_DIR = Path("config") / "robots"
+
+
+def _apply_reset_runtime_overrides(robot_type: str, robot_cfg: Dict[str, Any]) -> None:
+    if robot_type != "flexiv_dual_arm":
+        return
+
+    robot_cfg["stop_grippers_on_disconnect"] = False
+    if robot_cfg.get("go_home_on_connect", False):
+        robot_cfg["go_home_on_connect"] = False
+        logging.info("[FLEXIV] robot-reset skips go_home_on_connect; reset() will home arms and grippers.")
+    logging.info(
+        "[FLEXIV] robot-reset gripper config: min_width=%s max_open=%s "
+        "speed=%s home_uses=max_open init_timeout=%s init_settle=%s "
+        "command_epsilon=%s",
+        robot_cfg.get("gripper_min_width"),
+        robot_cfg.get("gripper_max_open"),
+        robot_cfg.get("gripper_speed"),
+        robot_cfg.get("gripper_init_timeout_sec"),
+        robot_cfg.get("gripper_init_settle_sec"),
+        robot_cfg.get("gripper_command_epsilon"),
+    )
+
+    if robot_cfg.get("use_cartesian_servo_thread", False):
+        robot_cfg["use_cartesian_servo_thread"] = False
+        logging.info("[FLEXIV] robot-reset disables the Cartesian servo thread for one-shot reset.")
+
+    if robot_cfg.get("switch_cartesian_mode_on_connect", True):
+        robot_cfg["zero_ft_sensor_on_connect"] = True
+        logging.warning(
+            "[FLEXIV] robot-reset will run ZeroFTSensor before switching to "
+            "NRT_CARTESIAN_MOTION_FORCE. Make sure both arms/tools are not touching anything."
+        )
 
 
 def _load_robot_cfg_from_das(robot_type: str) -> Dict[str, Any]:
@@ -73,7 +106,8 @@ def main(argv: list[str] | None = None):
     robot_type = record_cfg.get("robot_type", "dobot_dual_arm")
     robot_cfg = dict(record_cfg.get("robot") or _load_robot_cfg_from_das(robot_type))
     robot_cfg["debug"] = False
-    
+    _apply_reset_runtime_overrides(robot_type, robot_cfg)
+
     # 创建机器人配置
     robot_config = create_robot_config(
         robot_type=robot_type,
@@ -83,15 +117,20 @@ def main(argv: list[str] | None = None):
     # 创建机器人实例并连接
     robot = create_robot(robot_type, robot_config)
     print("----------",robot.name)
-    robot.connect()
-    
-    # 重置机器人到初始位置
-    logging.info("Resetting robot to home position...")
-    robot.reset()
-    
-    # 断开连接
-    # robot.disconnect()
-    logging.info("Robot reset completed successfully.")
+    try:
+        robot.connect()
+
+        # 重置机器人到初始位置
+        logging.info("Resetting robot to home position...")
+        robot.reset()
+        logging.info("Robot reset completed successfully.")
+    finally:
+        disconnect = getattr(robot, "disconnect", None)
+        if callable(disconnect):
+            try:
+                disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logging.warning("Robot disconnect failed during reset shutdown: %s", exc)
 
 if __name__ == "__main__":
     main()

@@ -104,6 +104,32 @@ BASE_ROBOT_CONFIG_KEYS = {
     "gripper_speed",
 }
 
+
+class ResetHomeOnRequestRobot:
+    """Route teleop reset_requested edges to robot.reset() from the record layer."""
+
+    def __init__(self, robot: Any):
+        self._robot = robot
+        self._reset_requested_latch = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._robot, name)
+
+    def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        reset_pressed = bool(action.get("reset_requested", False))
+        reset_edge = reset_pressed and not self._reset_requested_latch
+        self._reset_requested_latch = reset_pressed
+
+        if reset_edge:
+            logging.info("[record] reset_requested from teleop; calling robot.reset()")
+            self._robot.reset()
+            return action
+        if reset_pressed:
+            return action
+
+        return self._robot.send_action(action)
+
+
 def _default_scripts_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
@@ -122,6 +148,7 @@ ROBOT_DETAIL_CONFIG_FILES = {
     "franka_dual_arm": "franka_config.yaml",
     "nero_dual_arm": "nero_cofig.yaml",
     "arx_dual_arm": "arx_config.yaml",
+    "flexiv_dual_arm": "flexiv_config.yaml",
 }
 ROBOT_CONFIG_DIR = Path("config") / "robots"
 LEGACY_ROBOT_CONFIG_DIR = Path("DAS_config")
@@ -419,12 +446,26 @@ class RecordConfig:
             self.pose_scaler = oculus_cfg.get("pose_scaler", [1.0, 1.0])
             self.channel_signs = oculus_cfg.get("channel_signs", [1, 1, 1, 1, 1, 1])
             self.visualize_placo = oculus_cfg.get("visualize_placo", False)
+            self.action_smoothing_method = oculus_cfg.get("action_smoothing_method", "ema")
             self.action_smoothing_alpha = oculus_cfg.get("action_smoothing_alpha", 0.35)
+            self.action_smoothing_freq = oculus_cfg.get("action_smoothing_freq", 30.0)
+            self.action_smoothing_min_cutoff = oculus_cfg.get("action_smoothing_min_cutoff", 1.2)
+            self.action_smoothing_beta = oculus_cfg.get("action_smoothing_beta", 0.4)
+            self.action_smoothing_d_cutoff = oculus_cfg.get("action_smoothing_d_cutoff", 1.0)
+            self.action_missing_hold_frames = oculus_cfg.get("action_missing_hold_frames", 0)
+            self.action_missing_decay = oculus_cfg.get("action_missing_decay", 0.5)
             self.action_deadband_translation = oculus_cfg.get("action_deadband_translation", 0.0)
             self.action_deadband_rotation = oculus_cfg.get("action_deadband_rotation", 0.0)
             self.action_spike_translation = oculus_cfg.get("action_spike_translation")
             self.action_spike_rotation = oculus_cfg.get("action_spike_rotation")
+            self.gripper_trigger_deadzone = oculus_cfg.get("gripper_trigger_deadzone", 0.02)
+            self.gripper_trigger_gamma = oculus_cfg.get("gripper_trigger_gamma", 1.0)
+            self.oculus_timing_debug = bool(oculus_cfg.get("timing_debug", False))
+            self.oculus_timing_debug_every_n = int(oculus_cfg.get("timing_debug_every_n", 30))
+            self.oculus_timing_warn_ms = float(oculus_cfg.get("timing_warn_ms", 33.0))
             self.mirror_teleop = oculus_cfg.get("mirror_teleop", False)
+            self.position_axis_order = oculus_cfg.get("position_axis_order", [0, 1, 2])
+            self.rotation_axis_order = oculus_cfg.get("rotation_axis_order", [0, 1, 2])
             if self.dual_arm:
                 self.left_pose_scaler = oculus_cfg.get("left_pose_scaler", self.pose_scaler)
                 self.right_pose_scaler = oculus_cfg.get("right_pose_scaler", self.pose_scaler)
@@ -472,12 +513,26 @@ class RecordConfig:
                     right_pose_scaler=self.right_pose_scaler,
                     left_channel_signs=self.left_channel_signs,
                     right_channel_signs=self.right_channel_signs,
+                    action_smoothing_method=self.action_smoothing_method,
                     action_smoothing_alpha=self.action_smoothing_alpha,
+                    action_smoothing_freq=self.action_smoothing_freq,
+                    action_smoothing_min_cutoff=self.action_smoothing_min_cutoff,
+                    action_smoothing_beta=self.action_smoothing_beta,
+                    action_smoothing_d_cutoff=self.action_smoothing_d_cutoff,
+                    action_missing_hold_frames=self.action_missing_hold_frames,
+                    action_missing_decay=self.action_missing_decay,
                     action_deadband_translation=self.action_deadband_translation,
                     action_deadband_rotation=self.action_deadband_rotation,
                     action_spike_translation=self.action_spike_translation,
                     action_spike_rotation=self.action_spike_rotation,
+                    gripper_trigger_deadzone=self.gripper_trigger_deadzone,
+                    gripper_trigger_gamma=self.gripper_trigger_gamma,
+                    timing_debug=self.oculus_timing_debug,
+                    timing_debug_every_n=self.oculus_timing_debug_every_n,
+                    timing_warn_ms=self.oculus_timing_warn_ms,
                     mirror_teleop=self.mirror_teleop,
+                    position_axis_order=self.position_axis_order,
+                    rotation_axis_order=self.rotation_axis_order,
                     visualize_placo=self.visualize_placo,
                 )
             return OculusTeleopConfig(
@@ -485,6 +540,19 @@ class RecordConfig:
                 ip=self.oculus_ip,
                 pose_scaler=self.pose_scaler,
                 channel_signs=self.channel_signs,
+                action_smoothing_method=self.action_smoothing_method,
+                action_smoothing_alpha=self.action_smoothing_alpha,
+                action_smoothing_freq=self.action_smoothing_freq,
+                action_smoothing_min_cutoff=self.action_smoothing_min_cutoff,
+                action_smoothing_beta=self.action_smoothing_beta,
+                action_smoothing_d_cutoff=self.action_smoothing_d_cutoff,
+                action_missing_hold_frames=self.action_missing_hold_frames,
+                action_missing_decay=self.action_missing_decay,
+                gripper_trigger_deadzone=self.gripper_trigger_deadzone,
+                gripper_trigger_gamma=self.gripper_trigger_gamma,
+                timing_debug=self.oculus_timing_debug,
+                timing_debug_every_n=self.oculus_timing_debug_every_n,
+                timing_warn_ms=self.oculus_timing_warn_ms,
             )
         else:
             raise ValueError(f"Unsupported control mode: {self.control_mode}. Supported: oculus")
@@ -1914,6 +1982,7 @@ def run_record(record_cfg: RecordConfig):
         robot.connect()
         if teleop is not None:
             teleop.connect()
+        loop_robot = ResetHomeOnRequestRobot(robot) if teleop is not None else robot
 
         episode_idx = 0
         run_mix_episode_stats: list[dict[str, Any]] = []
@@ -1922,7 +1991,7 @@ def run_record(record_cfg: RecordConfig):
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
             if record_cfg.run_mode == RUN_MODE_MIX:
                 mix_stats = run_mix_record_loop(
-                    robot=robot,
+                    robot=loop_robot,
                     teleop=teleop,
                     policy=policy,
                     preprocessor=preprocessor,

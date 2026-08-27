@@ -25,11 +25,20 @@ class OculusTeleopConfig(TeleoperatorConfig):
     # Right controller (controls right arm)
     right_pose_scaler: List[float] = field(default_factory=lambda: [1.0, 1.0])
     right_channel_signs: List[int] = field(default_factory=lambda: [1, 1, 1, 1, 1, 1])
+
+    # Optional output-axis remapping after Oculus-to-robot conversion.
+    # Values are output axes selecting from input axes: [1, 0, 2] swaps X/Y.
+    position_axis_order: List[int] = field(default_factory=lambda: [0, 1, 2])
+    rotation_axis_order: List[int] = field(default_factory=lambda: [0, 1, 2])
     
     # Gripper control
     use_gripper: bool = True
     # Left gripper: Left Trigger (LTr)
     # Right gripper: Right Trigger (RTr)
+    # Trims noisy analog trigger endpoints before mapping trigger to gripper.
+    gripper_trigger_deadzone: float = 0.02
+    # 1.0 is linear; values below 1.0 close earlier, values above 1.0 close later.
+    gripper_trigger_gamma: float = 1.0
 
     # Action smoothing for 6D delta pose per arm.
     # one_euro is adaptive and usually feels more responsive than EMA for delta actions.
@@ -39,12 +48,17 @@ class OculusTeleopConfig(TeleoperatorConfig):
     action_smoothing_min_cutoff: float = 1.2
     action_smoothing_beta: float = 0.4
     action_smoothing_d_cutoff: float = 1.0
+    action_missing_hold_frames: int = 0
+    action_missing_decay: float = 0.5
     # Output-side filtering for noisy Oculus tracking. Deadband removes tiny
     # still-hand jitter; spike limits reject one-frame tracking jumps entirely.
     action_deadband_translation: float = 0.0
     action_deadband_rotation: float = 0.0
     action_spike_translation: float | None = None
     action_spike_rotation: float | None = None
+    timing_debug: bool = False
+    timing_debug_every_n: int = 30
+    timing_warn_ms: float = 33.0
 
     # Mirror mode for operating while standing opposite the robot.
     # When enabled, controller-to-arm assignment is mirrored and the final

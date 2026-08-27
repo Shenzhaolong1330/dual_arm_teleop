@@ -18,6 +18,7 @@ from .dual_dobot.config_dobot import DobotDualArmConfig
 from .dual_agilex_nero.config_nero import NeroDualArmConfig
 from .dual_arx_r5.config_arx import ArxDualArmConfig
 from .dual_franka.config_franka import FrankaDualArmConfig
+from .dual_flexiv_rizon4s.config_flexiv import FlexivDualArmConfig
 
 # Import robot classes
 from .franka.franka import Franka
@@ -25,6 +26,7 @@ from .dual_dobot.dobot_dual_arm import DobotDualArm
 from .dual_agilex_nero.nero_dual_arm import NeroDualArm
 from .dual_arx_r5.arx_dual_arm import ArxDualArm
 from .dual_franka.franka_dual_arm import FrankaDualArm
+from .dual_flexiv_rizon4s.flexiv_dual_arm import FlexivDualArm
 
 
 # Robot type registry: {robot_type: (ConfigClass, RobotClass)}
@@ -36,6 +38,7 @@ ROBOT_CONFIG_REGISTRY: Dict[str, tuple] = {
     "nero_dual_arm": (NeroDualArmConfig, NeroDualArm),
     "arx_dual_arm": (ArxDualArmConfig, ArxDualArm),
     "franka_dual_arm": (FrankaDualArmConfig, FrankaDualArm),
+    "flexiv_dual_arm": (FlexivDualArmConfig, FlexivDualArm),
 }
 
 # Supported robot types
@@ -84,12 +87,14 @@ __all__ = [
     "NeroDualArmConfig",
     "ArxDualArmConfig",
     "FrankaDualArmConfig",
+    "FlexivDualArmConfig",
     # Robot classes
     "Franka",
     "DobotDualArm",
     "NeroDualArm",
     "ArxDualArm",
     "FrankaDualArm",
+    "FlexivDualArm",
     # Registry and factory functions
     "ROBOT_CONFIG_REGISTRY",
     "SUPPORTED_ROBOTS",

@@ -8,6 +8,7 @@ Only outputs delta EE pose, no IK implementation.
 """
 
 import logging
+import time
 from typing import Any, Dict, Optional
 
 from lerobot.teleoperators.teleoperator import Teleoperator
@@ -43,6 +44,7 @@ class OculusTeleop(Teleoperator):
         self.cfg = config
         self._is_connected = False
         self.oculus_robot: Optional[OculusDualArmRobot] = None
+        self._timing_debug_count = 0
     
     @property
     def is_connected(self) -> bool:
@@ -87,11 +89,22 @@ class OculusTeleop(Teleoperator):
             left_channel_signs=self.cfg.left_channel_signs,
             right_pose_scaler=self.cfg.right_pose_scaler,
             right_channel_signs=self.cfg.right_channel_signs,
+            position_axis_order=self.cfg.position_axis_order,
+            rotation_axis_order=self.cfg.rotation_axis_order,
+            action_smoothing_method=self.cfg.action_smoothing_method,
             action_smoothing_alpha=self.cfg.action_smoothing_alpha,
+            action_smoothing_freq=self.cfg.action_smoothing_freq,
+            action_smoothing_min_cutoff=self.cfg.action_smoothing_min_cutoff,
+            action_smoothing_beta=self.cfg.action_smoothing_beta,
+            action_smoothing_d_cutoff=self.cfg.action_smoothing_d_cutoff,
+            action_missing_hold_frames=self.cfg.action_missing_hold_frames,
+            action_missing_decay=self.cfg.action_missing_decay,
             action_deadband_translation=self.cfg.action_deadband_translation,
             action_deadband_rotation=self.cfg.action_deadband_rotation,
             action_spike_translation=self.cfg.action_spike_translation,
             action_spike_rotation=self.cfg.action_spike_rotation,
+            gripper_trigger_deadzone=self.cfg.gripper_trigger_deadzone,
+            gripper_trigger_gamma=self.cfg.gripper_trigger_gamma,
             mirror_teleop=self.cfg.mirror_teleop,
         )
         
@@ -129,7 +142,9 @@ class OculusTeleop(Teleoperator):
             raise RuntimeError("Oculus robot is not initialized.")
         
         # Get observations from OculusDualArmRobot
+        action_start_t = time.perf_counter()
         obs = self.oculus_robot.get_observations()
+        oculus_read_ms = (time.perf_counter() - action_start_t) * 1000.0
         
         # Build action dict with delta EE poses
         action = {}
@@ -168,8 +183,32 @@ class OculusTeleop(Teleoperator):
         ]:
             if key in obs:
                 action[key] = obs[key]
+
+        self._log_timing_debug(oculus_read_ms)
         
         return action
+
+    def _log_timing_debug(self, total_ms: float) -> None:
+        if not self.cfg.timing_debug:
+            return
+
+        self._timing_debug_count += 1
+        every_n = max(1, int(self.cfg.timing_debug_every_n))
+        warn_ms = max(0.0, float(self.cfg.timing_warn_ms))
+        should_log = (
+            self._timing_debug_count <= 5
+            or self._timing_debug_count % every_n == 0
+            or (warn_ms > 0.0 and total_ms >= warn_ms)
+        )
+        if not should_log:
+            return
+
+        log_fn = logger.warning if warn_ms > 0.0 and total_ms >= warn_ms else logger.info
+        log_fn(
+            "[OCULUS TIMING] step=%d get_action total_ms=%.1f",
+            self._timing_debug_count,
+            float(total_ms),
+        )
     
     def calibrate(self) -> None:
         """Calibrate the teleoperation device. Default: no-op."""
