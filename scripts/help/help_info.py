@@ -25,6 +25,8 @@ Tool Commands:
                          Split long LeRobot episodes and label sub-episodes
   tools-merge-datasets
                          Merge multiple local LeRobot datasets into one
+  tools-charuco          Print ChArUco boards and calibrate camera intrinsics/extrinsics
+  tools-hand-eye         Calibrate wrist cameras and fixed head camera transforms
 
 Shell Tools:
   check_robotiq_ports.sh  Get Robotiq gripper serial ports

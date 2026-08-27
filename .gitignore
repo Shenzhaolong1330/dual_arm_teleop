@@ -24,5 +24,8 @@ dist/
 outputs/
 oculus_reader/
 logs/
-calibration/
+calibration/*
+!calibration/__init__.py
+!calibration/charuco_calibration.py
+!calibration/hand_eye_calibration.py
 tests/transition.json

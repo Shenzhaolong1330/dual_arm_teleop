@@ -20,6 +20,8 @@ setup(
     install_requires=[
         "send2trash",
         "pyrealsense2",
+        "opencv-contrib-python",
+        "Pillow",
         "scipy",
         "zerorpc",
         "numpy",
@@ -44,6 +46,8 @@ setup(
             "tools-preprocess-dataset = scripts.tools.preprocess_dataset:main",
             "tools-split-label-dataset = scripts.tools.split_label_dataset:main",
             "tools-merge-datasets = scripts.tools.merge_lerobot_datasets:main",
+            "tools-charuco = calibration.charuco_calibration:main",
+            "tools-hand-eye = calibration.hand_eye_calibration:main",
 
             # unified help command
             "robot-help = scripts.help.help_info:main",
