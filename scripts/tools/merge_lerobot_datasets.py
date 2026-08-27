@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Merge multiple local LeRobot datasets into one materialized dataset.
 
-The source datasets must share a compatible LeRobot schema. This tool copies
-frames through LeRobotDataset.add_frame/save_episode so metadata, episode
-indices, task tables, stats, images, and videos are produced by LeRobot's
-normal writer path.
+The source datasets must share a compatible LeRobot schema. By default this
+tool uses LeRobot's parquet/video aggregate path, which avoids decoding and
+re-encoding every video frame. It falls back to the slower frame writer path
+when a partial episode selection is requested.
 """
 
 from __future__ import annotations
@@ -30,10 +30,11 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local env
     torch = None
 
 try:  # pragma: no cover - depends on local env
-    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
     from lerobot.datasets.utils import DEFAULT_FEATURES
 except ModuleNotFoundError:  # pragma: no cover - depends on local env
     LeRobotDataset = None
+    LeRobotDatasetMetadata = None
     DEFAULT_FEATURES = {
         "timestamp": {},
         "frame_index": {},
@@ -41,6 +42,11 @@ except ModuleNotFoundError:  # pragma: no cover - depends on local env
         "index": {},
         "task_index": {},
     }
+
+try:  # pragma: no cover - depends on local env
+    from lerobot.datasets.aggregate import aggregate_datasets
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - depends on local env
+    aggregate_datasets = None
 
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -168,15 +174,16 @@ def _output_root(cfg: dict[str, Any]) -> Path:
 
 
 def _selected_episodes(dataset: Any, spec: SourceSpec) -> list[int]:
+    metadata = _metadata(dataset)
     if spec.episodes is None:
-        episodes = list(range(int(dataset.meta.total_episodes)))
+        episodes = list(range(int(metadata.total_episodes)))
     else:
         episodes = list(spec.episodes)
 
     if spec.max_episodes is not None:
         episodes = episodes[: spec.max_episodes]
 
-    total = int(dataset.meta.total_episodes)
+    total = int(metadata.total_episodes)
     bad = [ep for ep in episodes if ep < 0 or ep >= total]
     if bad:
         raise ValueError(f"{spec.name} has invalid episode indices {bad}; total_episodes={total}")
@@ -191,6 +198,22 @@ def _json_signature(value: Any) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
 
 
+def _metadata(dataset_or_metadata: Any) -> Any:
+    return getattr(dataset_or_metadata, "meta", dataset_or_metadata)
+
+
+def _total_episodes(dataset_or_metadata: Any) -> int:
+    return int(_metadata(dataset_or_metadata).total_episodes)
+
+
+def _total_frames(dataset_or_metadata: Any) -> int:
+    return int(_metadata(dataset_or_metadata).total_frames)
+
+
+def _robot_type(dataset_or_metadata: Any) -> Any:
+    return _metadata(dataset_or_metadata).info.get("robot_type")
+
+
 def _validate_compatible_sources(
     reference: Any,
     candidate: Any,
@@ -200,15 +223,18 @@ def _validate_compatible_sources(
     strict_schema: bool,
     strict_robot_type: bool,
 ) -> None:
-    if int(candidate.fps) != int(reference.fps):
+    reference_meta = _metadata(reference)
+    candidate_meta = _metadata(candidate)
+
+    if int(candidate_meta.fps) != int(reference_meta.fps):
         raise ValueError(
-            f"FPS mismatch: {reference_name} fps={reference.fps}, "
-            f"{candidate_name} fps={candidate.fps}"
+            f"FPS mismatch: {reference_name} fps={reference_meta.fps}, "
+            f"{candidate_name} fps={candidate_meta.fps}"
         )
 
     if strict_robot_type:
-        reference_robot = reference.meta.info.get("robot_type")
-        candidate_robot = candidate.meta.info.get("robot_type")
+        reference_robot = _robot_type(reference_meta)
+        candidate_robot = _robot_type(candidate_meta)
         if candidate_robot != reference_robot:
             raise ValueError(
                 f"robot_type mismatch: {reference_name}={reference_robot!r}, "
@@ -216,8 +242,8 @@ def _validate_compatible_sources(
             )
 
     if strict_schema:
-        ref_features = _features_without_defaults(reference.features)
-        candidate_features = _features_without_defaults(candidate.features)
+        ref_features = _features_without_defaults(reference_meta.features)
+        candidate_features = _features_without_defaults(candidate_meta.features)
         if _json_signature(candidate_features) != _json_signature(ref_features):
             ref_keys = set(ref_features)
             candidate_keys = set(candidate_features)
@@ -279,7 +305,7 @@ def _frame_from_source_item(source: Any, item: dict[str, Any]) -> dict[str, Any]
 
 
 def _episode_bounds(dataset: Any, ep_idx: int) -> tuple[int, int]:
-    ep = dataset.meta.episodes[int(ep_idx)]
+    ep = _metadata(dataset).episodes[int(ep_idx)]
     return int(ep["dataset_from_index"]), int(ep["dataset_to_index"])
 
 
@@ -287,6 +313,128 @@ def _write_summary(output_root: Path, summary: dict[str, Any]) -> None:
     summary_path = output_root / "meta" / "merge_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _fast_aggregate_skip_reason(
+    *,
+    cfg: dict[str, Any],
+    output_cfg: dict[str, Any],
+    source_specs: list[SourceSpec],
+    strict_schema: bool,
+    strict_robot_type: bool,
+) -> str | None:
+    fast_merge = bool(output_cfg.get("fast_merge", cfg.get("fast_merge", True)))
+    if not fast_merge:
+        return "fast_merge=false"
+    if aggregate_datasets is None or LeRobotDatasetMetadata is None:
+        return "lerobot.datasets.aggregate is not available"
+    if not strict_schema:
+        return "source.strict_schema=false"
+    if not strict_robot_type:
+        return "source.strict_robot_type=false"
+    for spec in source_specs:
+        if spec.episodes is not None:
+            return f"{spec.name} selects explicit episodes"
+        if spec.max_episodes is not None:
+            return f"{spec.name} uses max_episodes"
+    return None
+
+
+def _load_sources(
+    source_specs: list[SourceSpec],
+    *,
+    download_videos: bool,
+    metadata_only: bool,
+) -> list[tuple[SourceSpec, Any, list[int]]]:
+    loaded_sources: list[tuple[SourceSpec, Any, list[int]]] = []
+    for spec in source_specs:
+        if not spec.root.exists():
+            raise FileNotFoundError(f"Source dataset root does not exist: {spec.root}")
+
+        if metadata_only:
+            if LeRobotDatasetMetadata is None:
+                raise RuntimeError("LeRobotDatasetMetadata is not available in this LeRobot environment.")
+            dataset_or_meta = LeRobotDatasetMetadata(spec.repo_id, root=spec.root)
+        else:
+            dataset_or_meta = LeRobotDataset(spec.repo_id, root=spec.root, download_videos=download_videos)
+
+        episodes = _selected_episodes(dataset_or_meta, spec)
+        loaded_sources.append((spec, dataset_or_meta, episodes))
+        logger.info(
+            "[SOURCE] %s root=%s episodes=%d/%d frames=%d",
+            spec.repo_id,
+            spec.root,
+            len(episodes),
+            _total_episodes(dataset_or_meta),
+            _total_frames(dataset_or_meta),
+        )
+    return loaded_sources
+
+
+def _run_fast_aggregate(
+    *,
+    source_specs: list[SourceSpec],
+    output_repo_id: str,
+    output_root: Path,
+    output_cfg: dict[str, Any],
+) -> None:
+    logger.info("[FAST] Using lerobot.datasets.aggregate.aggregate_datasets")
+    aggregate_datasets(
+        repo_ids=[spec.repo_id for spec in source_specs],
+        roots=[spec.root for spec in source_specs],
+        aggr_repo_id=output_repo_id,
+        aggr_root=output_root,
+        data_files_size_in_mb=output_cfg.get("data_files_size_in_mb"),
+        video_files_size_in_mb=output_cfg.get("video_files_size_in_mb"),
+        chunk_size=output_cfg.get("chunk_size") or output_cfg.get("chunks_size"),
+    )
+
+
+def _run_frame_rewrite_merge(
+    *,
+    source_specs: list[SourceSpec],
+    loaded_metadata: list[tuple[SourceSpec, Any, list[int]]],
+    output_repo_id: str,
+    output_root: Path,
+    output_cfg: dict[str, Any],
+    download_videos: bool,
+) -> int:
+    logger.info("[SLOW] Falling back to frame rewrite via LeRobotDataset.add_frame/save_episode")
+    reference = loaded_metadata[0][1]
+    loaded_datasets = _load_sources(source_specs, download_videos=download_videos, metadata_only=False)
+    output = LeRobotDataset.create(
+        repo_id=output_repo_id,
+        root=output_root,
+        fps=_metadata(reference).fps,
+        features=_features_without_defaults(_metadata(reference).features),
+        robot_type=_robot_type(reference),
+        use_videos=len(_metadata(reference).video_keys) > 0,
+        image_writer_processes=int(output_cfg.get("image_writer_processes", 0)),
+        image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
+        batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
+    )
+
+    written_frames = 0
+    try:
+        for spec, dataset, episodes in loaded_datasets:
+            for ep_idx in episodes:
+                start, end = _episode_bounds(dataset, ep_idx)
+                logger.info(
+                    "[MERGE] %s episode=%d -> output_episode=%d frames=%d",
+                    spec.name,
+                    ep_idx,
+                    output.meta.total_episodes,
+                    end - start,
+                )
+                for source_idx in range(start, end):
+                    item = dataset[int(source_idx)]
+                    output.add_frame(_frame_from_source_item(dataset, item))
+                    written_frames += 1
+                output.save_episode()
+    finally:
+        output.finalize()
+
+    return written_frames
 
 
 def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -304,6 +452,13 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
     strict_schema = bool((cfg.get("source") or {}).get("strict_schema", True))
     strict_robot_type = bool((cfg.get("source") or {}).get("strict_robot_type", True))
     download_videos = bool((cfg.get("source") or {}).get("download_videos", True))
+    fast_skip_reason = _fast_aggregate_skip_reason(
+        cfg=cfg,
+        output_cfg=output_cfg,
+        source_specs=source_specs,
+        strict_schema=strict_schema,
+        strict_robot_type=strict_robot_type,
+    )
 
     _assert_output_is_separate(output_root, source_specs)
     if output_root.exists() and not dry_run:
@@ -315,21 +470,11 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
                 "Set output.overwrite=true or pass --overwrite to replace it."
             )
 
-    loaded_sources: list[tuple[SourceSpec, Any, list[int]]] = []
-    for spec in source_specs:
-        if not spec.root.exists():
-            raise FileNotFoundError(f"Source dataset root does not exist: {spec.root}")
-        dataset = LeRobotDataset(spec.repo_id, root=spec.root, download_videos=download_videos)
-        episodes = _selected_episodes(dataset, spec)
-        loaded_sources.append((spec, dataset, episodes))
-        logger.info(
-            "[SOURCE] %s root=%s episodes=%d/%d frames=%d",
-            spec.repo_id,
-            spec.root,
-            len(episodes),
-            dataset.meta.total_episodes,
-            dataset.meta.total_frames,
-        )
+    loaded_sources = _load_sources(
+        source_specs,
+        download_videos=download_videos,
+        metadata_only=LeRobotDatasetMetadata is not None,
+    )
 
     reference_spec, reference, _ = loaded_sources[0]
     for spec, dataset, _ in loaded_sources[1:]:
@@ -365,58 +510,51 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
     summary = {
         "output_repo_id": output_repo_id,
         "output_root": str(output_root),
-        "fps": int(reference.fps),
-        "robot_type": reference.meta.info.get("robot_type"),
+        "fps": int(_metadata(reference).fps),
+        "robot_type": _robot_type(reference),
         "source_count": len(loaded_sources),
         "total_episodes": total_output_episodes,
         "total_frames": total_input_frames,
         "sources": source_summaries,
         "dry_run": dry_run,
+        "merge_mode": "fast_aggregate" if fast_skip_reason is None else "frame_rewrite",
     }
+    if fast_skip_reason is not None:
+        summary["fast_aggregate_skip_reason"] = fast_skip_reason
 
     if dry_run:
+        if fast_skip_reason is not None:
+            logger.info("[FAST] Not used: %s", fast_skip_reason)
         logger.info(
-            "[DRY-RUN] Would write %d episodes / %d frames to %s",
+            "[DRY-RUN] Would write %d episodes / %d frames to %s using %s",
             total_output_episodes,
             total_input_frames,
             output_root,
+            summary["merge_mode"],
         )
         return summary
 
-    output = LeRobotDataset.create(
-        repo_id=output_repo_id,
-        root=output_root,
-        fps=reference.fps,
-        features=_features_without_defaults(reference.features),
-        robot_type=reference.meta.info.get("robot_type"),
-        use_videos=len(reference.meta.video_keys) > 0,
-        image_writer_processes=int(output_cfg.get("image_writer_processes", 0)),
-        image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
-        batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
-    )
-
-    written_frames = 0
-    try:
-        for spec, dataset, episodes in loaded_sources:
-            for ep_idx in episodes:
-                start, end = _episode_bounds(dataset, ep_idx)
-                logger.info(
-                    "[MERGE] %s episode=%d -> output_episode=%d frames=%d",
-                    spec.name,
-                    ep_idx,
-                    output.meta.total_episodes,
-                    end - start,
-                )
-                for source_idx in range(start, end):
-                    item = dataset[int(source_idx)]
-                    output.add_frame(_frame_from_source_item(dataset, item))
-                    written_frames += 1
-                output.save_episode()
-    finally:
-        output.finalize()
+    if fast_skip_reason is None:
+        _run_fast_aggregate(
+            source_specs=source_specs,
+            output_repo_id=output_repo_id,
+            output_root=output_root,
+            output_cfg=output_cfg,
+        )
+        written_frames = total_input_frames
+    else:
+        logger.info("[FAST] Not used: %s", fast_skip_reason)
+        written_frames = _run_frame_rewrite_merge(
+            source_specs=source_specs,
+            loaded_metadata=loaded_sources,
+            output_repo_id=output_repo_id,
+            output_root=output_root,
+            output_cfg=output_cfg,
+            download_videos=download_videos,
+        )
 
     summary["written_frames"] = written_frames
-    summary["written_episodes"] = int(output.meta.total_episodes)
+    summary["written_episodes"] = total_output_episodes
     _write_summary(output_root, summary)
     logger.info(
         "[DONE] output=%s root=%s episodes=%d frames=%d",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import argparse
+import copy
 import logging
 import shutil
 from pathlib import Path
@@ -20,6 +21,36 @@ logger = logging.getLogger(__name__)
 def _load_config(path: Path) -> dict[str, Any]:
     with open(path, "r") as f:
         return yaml.safe_load(f)["preprocess_dataset"]
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _expand_job_configs(cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    jobs = cfg.get("jobs")
+    if jobs is None:
+        return [cfg]
+    if not isinstance(jobs, list) or len(jobs) == 0:
+        raise ValueError("preprocess_dataset.jobs must be a non-empty list when set.")
+
+    base_cfg = {key: value for key, value in cfg.items() if key != "jobs"}
+    expanded = []
+    for idx, job in enumerate(jobs):
+        if not isinstance(job, dict):
+            raise ValueError(f"preprocess_dataset.jobs[{idx}] must be a mapping.")
+        job_cfg = _deep_merge(base_cfg, job)
+        if "source" not in job_cfg or "output" not in job_cfg:
+            raise ValueError(f"preprocess_dataset.jobs[{idx}] must define source and output.")
+        job_cfg["_job_name"] = str(job.get("name") or job_cfg["output"].get("repo_id") or f"job_{idx}")
+        expanded.append(job_cfg)
+    return expanded
 
 
 def _as_path_or_none(value: str | None) -> Path | None:
@@ -444,6 +475,10 @@ def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRob
 
 
 def preprocess_dataset(cfg: dict[str, Any]) -> None:
+    job_name = cfg.get("_job_name")
+    if job_name:
+        logger.info("[JOB] %s", job_name)
+
     source_cfg = cfg["source"]
     source = LeRobotDataset(
         source_cfg["repo_id"],
@@ -527,14 +562,20 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
-    if args.dry_run:
-        cfg["dry_run"] = True
-    if args.max_episodes is not None:
-        cfg["source"]["max_episodes"] = args.max_episodes
-    if args.overwrite:
-        cfg["output"]["overwrite"] = True
 
-    preprocess_dataset(cfg)
+    job_cfgs = _expand_job_configs(cfg)
+    if len(job_cfgs) > 1:
+        logger.info("[BATCH] preprocessing %d datasets sequentially", len(job_cfgs))
+    for job_idx, job_cfg in enumerate(job_cfgs):
+        if args.dry_run:
+            job_cfg["dry_run"] = True
+        if args.max_episodes is not None:
+            job_cfg["source"]["max_episodes"] = args.max_episodes
+        if args.overwrite:
+            job_cfg["output"]["overwrite"] = True
+        if len(job_cfgs) > 1:
+            logger.info("[BATCH] %d/%d", job_idx + 1, len(job_cfgs))
+        preprocess_dataset(job_cfg)
 
 
 if __name__ == "__main__":
