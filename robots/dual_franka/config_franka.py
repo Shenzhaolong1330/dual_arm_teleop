@@ -56,4 +56,10 @@ class FrankaDualArmConfig(RobotConfig):
     max_cartesian_delta: float | None = None
     max_rotation_delta: float | None = None
 
+    # Optional JSONL recorder for debugging teleop action/state timing.
+    action_state_log_enabled: bool = False
+    action_state_log_dir: str = "logs/franka_action_state"
+    action_state_log_every_n: int = 1
+    action_state_log_raw_rpc: bool = False
+
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

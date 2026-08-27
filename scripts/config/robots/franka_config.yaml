@@ -6,14 +6,15 @@ teleop:
   oculus_config:
     ip:
     use_gripper: true
-    left_pose_scaler: [0.8, 0.8]
+    action_smoothing_alpha: 0.65
+    left_pose_scaler: [0.5, 0.65]
     left_channel_signs: [1, 1, 1, -1, -1, 1]
-    right_pose_scaler: [0.8, 0.8]
+    right_pose_scaler: [0.5, 0.65]
     right_channel_signs: [1, 1, 1, -1, -1, 1]
-    action_deadband_translation: 0.0002  # meters per frame; keep fine teleop motion responsive
-    action_deadband_rotation: 0.003      # radians per frame; keep fine teleop rotation responsive
-    action_spike_translation: 0.04       # meters per frame; ignore tracking jumps
-    action_spike_rotation: 0.09          # radians per frame; ignore tracking jumps before Franka clipping
+    action_deadband_translation: 0.0003  # meters per frame; keep fine teleop motion responsive
+    action_deadband_rotation: 0.0005      # radians per frame; keep fine teleop rotation responsive
+    action_spike_translation: 0.1       # meters per frame; ignore tracking jumps
+    action_spike_rotation: 0.2          # radians per frame; ignore tracking jumps before Franka clipping
     mirror_teleop: true
     visualize_placo: false
 
@@ -35,6 +36,10 @@ robot:
   go_home_rate_hz: 50.0
   max_cartesian_delta: 0.06
   max_rotation_delta: 0.08
+  action_state_log_enabled: false
+  action_state_log_dir: logs/franka_action_state
+  action_state_log_every_n: 1
+  action_state_log_raw_rpc: false
 
 cameras:
   left_wrist_cam_serial: "347622074336"
