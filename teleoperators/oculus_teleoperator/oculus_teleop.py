@@ -12,6 +12,7 @@ import time
 from typing import Any, Dict, Optional
 
 from lerobot.teleoperators.teleoperator import Teleoperator
+from robots.dual_arm_schema import action_features as x_embodiment_action_features
 from .config_oculus_teleop import OculusTeleopConfig
 from .oculus.oculus_dual_arm_robot import OculusDualArmRobot
 
@@ -56,19 +57,8 @@ class OculusTeleop(Teleoperator):
     
     @property
     def action_features(self) -> dict:
-        """Return action features for dual-arm oculus mode (delta ee pose only)."""
-        features = {}
-        # Delta EE poses for both arms
-        for arm in ["left", "right"]:
-            for axis in ["x", "y", "z", "rx", "ry", "rz"]:
-                features[f"{arm}_delta_ee_pose.{axis}"] = float
-        
-        # Gripper commands
-        if self.cfg.use_gripper:
-            features["left_gripper_cmd"] = float
-            features["right_gripper_cmd"] = float
-        
-        return features
+        """Return X-embodiment EE-delta and physical-width actions."""
+        return x_embodiment_action_features(use_gripper=self.cfg.use_gripper)
     
     @property
     def feedback_features(self) -> dict:
@@ -158,13 +148,13 @@ class OculusTeleop(Teleoperator):
                 else:
                     action[key] = 0.0
         
-        # Gripper commands
+        # Quest trigger values are normalized; the public action contract uses
+        # physical target widths in metres, shared by Nero, Franka and Flexiv.
         if self.cfg.use_gripper:
-            # Accept both new and legacy key names to avoid key-mismatch regressions.
-            action["left_gripper_cmd"] = float(
+            action["left_gripper_width"] = self._gripper_width_from_trigger(
                 obs.get("left_gripper_cmd", obs.get("left_gripper_cmd_bin", 1.0))
             )
-            action["right_gripper_cmd"] = float(
+            action["right_gripper_width"] = self._gripper_width_from_trigger(
                 obs.get("right_gripper_cmd", obs.get("right_gripper_cmd_bin", 1.0))
             )
         
@@ -187,6 +177,12 @@ class OculusTeleop(Teleoperator):
         self._log_timing_debug(oculus_read_ms)
         
         return action
+
+    def _gripper_width_from_trigger(self, value: Any) -> float:
+        normalized = min(1.0, max(0.0, float(value)))
+        minimum = max(0.0, float(self.cfg.gripper_min_width))
+        maximum = max(minimum, float(self.cfg.gripper_max_open))
+        return minimum + normalized * (maximum - minimum)
 
     def _log_timing_debug(self, total_ms: float) -> None:
         if not self.cfg.timing_debug:
@@ -261,9 +257,9 @@ if __name__ == "__main__":
             reset_flag = " [RESET]" if action.get("reset_requested", False) else ""
             
             print(f"\rL: X={action['left_delta_ee_pose.x']:+.4f} Y={action['left_delta_ee_pose.y']:+.4f} "
-                  f"Z={action['left_delta_ee_pose.z']:+.4f} G={action['left_gripper_cmd']:.2f} | "
+                  f"Z={action['left_delta_ee_pose.z']:+.4f} G={action['left_gripper_width']:.3f}m | "
                   f"R: X={action['right_delta_ee_pose.x']:+.4f} Y={action['right_delta_ee_pose.y']:+.4f} "
-                  f"Z={action['right_delta_ee_pose.z']:+.4f} G={action['right_gripper_cmd']:.2f}"
+                  f"Z={action['right_delta_ee_pose.z']:+.4f} G={action['right_gripper_width']:.3f}m"
                   f"{reset_flag}    ", end="")
             
             time.sleep(0.01)

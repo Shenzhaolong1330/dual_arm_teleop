@@ -33,6 +33,10 @@ class OculusTeleopConfig(TeleoperatorConfig):
     
     # Gripper control
     use_gripper: bool = True
+    # The Quest reports a normalized trigger; teleop publishes the canonical
+    # physical target aperture after applying these limits.
+    gripper_min_width: float = 0.0
+    gripper_max_open: float = 0.085
     # Left gripper: Left Trigger (LTr)
     # Right gripper: Right Trigger (RTr)
     # Trims noisy analog trigger endpoints before mapping trigger to gripper.

@@ -51,6 +51,8 @@ logging.basicConfig(level=logging.INFO, format="%(message)s", force=True)
 RUN_MIX_MOVEMENT_EPS = 1e-4
 RUN_MIX_CHANGE_EPS = 5e-3
 RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS = 0.1
+RUN_MIX_WIDTH_CHANGE_EPS = 5e-4
+RUN_MIX_WIDTH_SOFT_TAKEOVER_EPS = 5e-3
 SUCCESS_ANNOTATION_TRUE = {
     "y",
     "yes",
@@ -90,8 +92,8 @@ POLICY_RUN_MODES = {RUN_MODE_POLICY, RUN_MODE_MIX}
 VALID_RUN_MODES = {RUN_MODE_RECORD, RUN_MODE_POLICY, RUN_MODE_MIX}
 RESET_REQUEST_KEY = "reset_requested"
 GRIPPER_COMMAND_KEY_CANDIDATES = {
-    "left": ("left_gripper_cmd", "left_gripper_cmd_bin"),
-    "right": ("right_gripper_cmd", "right_gripper_cmd_bin"),
+    "left": ("left_gripper_width", "left_gripper_cmd", "left_gripper_cmd_bin"),
+    "right": ("right_gripper_width", "right_gripper_cmd", "right_gripper_cmd_bin"),
 }
 BASE_ROBOT_CONFIG_KEYS = {
     "robot_ip",
@@ -508,6 +510,8 @@ class RecordConfig:
             if self.dual_arm:
                 return OculusTeleopConfig(
                     use_gripper=self.use_gripper,
+                    gripper_min_width=float(self.robot_extra_config.get("gripper_min_width", 0.0)),
+                    gripper_max_open=self.gripper_max_open,
                     ip=self.oculus_ip,
                     left_pose_scaler=self.left_pose_scaler,
                     right_pose_scaler=self.right_pose_scaler,
@@ -537,6 +541,8 @@ class RecordConfig:
                 )
             return OculusTeleopConfig(
                 use_gripper=self.use_gripper,
+                gripper_min_width=float(self.robot_extra_config.get("gripper_min_width", 0.0)),
+                gripper_max_open=self.gripper_max_open,
                 ip=self.oculus_ip,
                 pose_scaler=self.pose_scaler,
                 channel_signs=self.channel_signs,
@@ -678,6 +684,18 @@ def _clip_gripper_cmd(value: float) -> float:
     return min(1.0, max(0.0, value))
 
 
+def _is_gripper_width_key(key: str | None) -> bool:
+    return bool(key and key.endswith("_gripper_width"))
+
+
+def _clip_gripper_action_value(value: float, key: str | None) -> float:
+    """Keep physical widths non-negative; robot adapters apply upper limits."""
+
+    if _is_gripper_width_key(key):
+        return max(0.0, float(value))
+    return _clip_gripper_cmd(float(value))
+
+
 def _flatten_feature_names(names: Any) -> list[str]:
     if names is None:
         return []
@@ -755,7 +773,7 @@ def _gripper_command_value(
             continue
         value = _float_or_none(source.get(key))
         if value is not None:
-            return _clip_gripper_cmd(value)
+            return _clip_gripper_action_value(value, key)
     return None
 
 
@@ -768,6 +786,11 @@ def normalize_gripper_command_keys(
     normalized = dict(action)
     for arm, expected_key in gripper_keys.items():
         if expected_key in normalized:
+            continue
+        # A legacy normalized command cannot be copied into a physical-width
+        # field without robot-specific limits. New X-embodiment teleop already
+        # emits widths; keep old aliases only for legacy schemas.
+        if _is_gripper_width_key(expected_key):
             continue
         for candidate in _candidate_gripper_keys(arm, gripper_keys):
             if candidate in normalized:
@@ -847,6 +870,8 @@ def _gripper_request_reason(
         return None
 
     delta = current - previous
+    expected_key = gripper_keys.get(arm)
+    change_eps = RUN_MIX_WIDTH_CHANGE_EPS if _is_gripper_width_key(expected_key) else change_eps
     if abs(delta) > change_eps:
         return f"{arm}_gripper_trigger_changed"
     return None
@@ -874,7 +899,7 @@ def _clip_gripper_channels(action: dict[str, Any], gripper_keys: dict[str, str])
             continue
         value = _float_or_none(action.get(key))
         if value is not None:
-            action[key] = _clip_gripper_cmd(value)
+            action[key] = _clip_gripper_action_value(value, key)
 
 
 def _apply_gripper_channel_control(
@@ -932,7 +957,7 @@ def _apply_gripper_channel_control(
     teleop_cmd = _float_or_none(expert_action[key])
     if teleop_cmd is None:
         return False, None
-    teleop_cmd = _clip_gripper_cmd(teleop_cmd)
+    teleop_cmd = _clip_gripper_action_value(teleop_cmd, key)
 
     if arm_state["hold"] is None:
         hold = _current_gripper_cmd(
@@ -950,10 +975,15 @@ def _apply_gripper_channel_control(
         if last_teleop_raw_action is not None:
             previous_teleop_cmd = _gripper_command_value(arm, last_teleop_raw_action, gripper_keys)
 
-        takeover_matched = abs(teleop_cmd - hold) <= RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS
+        takeover_eps = (
+            RUN_MIX_WIDTH_SOFT_TAKEOVER_EPS
+            if _is_gripper_width_key(key)
+            else RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS
+        )
+        takeover_matched = abs(teleop_cmd - hold) <= takeover_eps
         if previous_teleop_cmd is not None:
             takeover_matched = takeover_matched or (
-                abs(previous_teleop_cmd - hold) <= RUN_MIX_GRIPPER_SOFT_TAKEOVER_EPS
+                abs(previous_teleop_cmd - hold) <= takeover_eps
             )
 
         if takeover_matched:
@@ -1365,6 +1395,52 @@ def _set_episode_success_annotation(
             np.array([inferred_from_recorded_episode], dtype=np.bool_)
             for _ in range(size)
         ]
+
+
+def label_gripper_actions_from_next_observation(dataset: LeRobotDataset) -> None:
+    """Set canonical gripper actions to the following frame's measured width.
+
+    X-embodiment uses the current absolute EE pose as observation and a delta
+    EE action. Its gripper component is deliberately the *next* physical
+    aperture, rather than a robot-specific trigger/command value. This runs
+    on the in-memory episode buffer immediately before saving, so it applies
+    consistently to teleop, policy, and run-mix collection.
+
+    The final frame has no successor; it keeps its measured current width as a
+    terminal no-op label.
+    """
+
+    buffer = dataset.episode_buffer
+    if buffer is None:
+        return
+
+    size = int(buffer.get("size", 0) or 0)
+    if size == 0:
+        return
+
+    action_feature = dataset.features.get(ACTION, {})
+    state_feature = dataset.features.get(f"{OBS_STR}.state", {})
+    action_names = list(action_feature.get("names") or [])
+    state_names = list(state_feature.get("names") or [])
+    action_values = buffer.get(ACTION)
+    state_values = buffer.get(f"{OBS_STR}.state")
+    if not action_values or not state_values:
+        return
+
+    index_pairs = [
+        (action_names.index(name), state_names.index(name))
+        for name in ("left_gripper_width", "right_gripper_width")
+        if name in action_names and name in state_names
+    ]
+    if not index_pairs:
+        return
+
+    for frame_index in range(size):
+        source_index = min(frame_index + 1, size - 1)
+        action_vector = action_values[frame_index]
+        next_state_vector = state_values[source_index]
+        for action_index, state_index in index_pairs:
+            action_vector[action_index] = float(next_state_vector[state_index])
 
 
 def _is_reset_requested_action(action: dict[str, Any] | None) -> bool:
@@ -2090,6 +2166,7 @@ def run_record(record_cfg: RecordConfig):
                             inferred_from_recorded_episode=False,
                         )
                         mix_stats["success_policy"] = record_cfg.success_policy
+                    label_gripper_actions_from_next_observation(dataset)
                     dataset.save_episode()
                 else:
                     logging.warning(
@@ -2097,6 +2174,7 @@ def run_record(record_cfg: RecordConfig):
                         episode_idx + 1,
                     )
             else:
+                label_gripper_actions_from_next_observation(dataset)
                 dataset.save_episode()
 
             # Reset the environment between episodes, and also before a re-record attempt.
