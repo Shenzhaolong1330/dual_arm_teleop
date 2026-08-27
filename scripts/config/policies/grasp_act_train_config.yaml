@@ -1,0 +1,40 @@
+# Grasp-ACT training policy configuration.
+# The policy consumes ee_pose and gripper state from the raw dual-Franka state.
+
+device: cuda
+use_amp: false
+n_obs_steps: 1
+chunk_size: 60
+n_action_steps: 15
+low_dim_state_indices: [14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]
+
+normalization_mapping:
+  VISUAL: MEAN_STD
+  STATE: MEAN_STD
+  ACTION: MEAN_STD
+
+vision_backbone: resnet18
+pretrained_backbone_weights: ResNet18_Weights.IMAGENET1K_V1
+replace_final_stride_with_dilation: false
+
+pre_norm: false
+dim_model: 512
+n_heads: 8
+dim_feedforward: 3200
+feedforward_activation: relu
+n_encoder_layers: 4
+n_decoder_layers: 1
+
+use_vae: true
+latent_dim: 32
+n_vae_encoder_layers: 4
+
+kl_weight: 10
+dropout: 0.1
+optimizer_lr: 0.00001
+optimizer_weight_decay: 0.0001
+optimizer_lr_backbone: 0.00001
+
+push_to_hub: false
+pretrained_path: null
+temporal_ensemble_coeff: null

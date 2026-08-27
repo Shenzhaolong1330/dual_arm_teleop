@@ -1,5 +1,5 @@
 record:
-  repo_id: &repo_id "flexiv_dual_arm/oculus_smoke_test"
+  repo_id: &repo_id "franka_dual_arm_test/fallen_tube_rack"
   # repo_id: &repo_id "nero_task3_step1/2mL_empty_right"
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
   # <description>: https://github.com/wbcdcompetition/wbcd_tasks/tree/main/track-3-lab-experiments
@@ -17,14 +17,14 @@ record:
 
   debug:
     robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
-  user_notes: "Flexiv Rizon4s dual-arm Oculus teleop template; fill serial numbers and cameras before real collection."
+  user_notes: "Dual-arm task: pick up a fallen test tube and place it into the test tube rack."
   # user_notes:  # any additional notes about the dataset
   fps: 30 # dataset and camera frame rate
   run_mode: "run_record" # run_record | run_policy | run_mix
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
-  robot_type: &robot_type "flexiv_dual_arm"
+  robot_type: &robot_type "franka_dual_arm"
   # robot_type: &robot_type "nero_dual_arm"
 
   # Optional explicit override if you do not want the robot_type default mapping:
@@ -34,19 +34,19 @@ record:
   # das_config_path: scripts/config/robots/arx_config.yaml
 
   policy:
-    # 策略类型: act | diffusion | dp | diffusion_policy
+    # 策略类型: act | grasp_act | diffusion | dp | diffusion_policy
     # 轮次式 DAgger 的 run_mix 采集目前只实现 ACT checkpoint 推理。
 
     # Franka:
     # For ACT:
-    # type: "act"
-    # config_path: scripts/config/policies/act_reason_config.yaml
-    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/act_left_right_pick_20260526_E150/checkpoints/last/pretrained_model"
+    type: "grasp_act"
+    config_path: scripts/config/policies/grasp_act_reason_config.yaml
+    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/grasp_act_fallen_tube_rack_75_20260625_merged/checkpoints/last/pretrained_model"
 
     # For diffusion:
-    type: "diffusion"
-    config_path: scripts/config/policies/diffusion_reason_config.yaml
-    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/dp_left_right_pick_20260529_E150/checkpoints/last/pretrained_model"
+    # type: "diffusion"
+    # config_path: scripts/config/policies/diffusion_reason_config.yaml
+    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/diffusion_fallen_tube_rack_75_20260624_merged/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:
@@ -60,8 +60,9 @@ record:
     # Policy hyperparameters live in scripts/config/policies/*_reason_config.yaml.
 
   task:
-    description: "pick up small vials and insert them in the empty rack" # task description
-    num_episodes: 50 # number of episodes to record
+    # description: "pick up the bigger ring and toss on the stick, then pick up the smaller ring and toss on the stick" # task description
+    description: "use both arms to pick up a fallen test tube and place it into the test tube rack" # task description
+    num_episodes: 25 # number of episodes to record
     display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: # dataset to resume from if resume is true
@@ -79,16 +80,16 @@ record:
     push_to_hub: false # whether to push the dataset to your HuggingFace repo after recording
 
 replay:
-  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  dataset_name: franka_dual_arm/fallen_tube_rack_20260624_v02
   # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
-  episode_idx: 0 # episode index to replay
+  episode_idx: 22 # episode index to replay
   # episode_idx: 15
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
   robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
-  dataset_name: franka_dual_arm/left_right_pick_merged_E150
+  dataset_name: franka_dual_arm/fallen_tube_rack_20260625_v06
   # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
   episode_index: 0 # episode index to visualize
   # episode_index: 15
