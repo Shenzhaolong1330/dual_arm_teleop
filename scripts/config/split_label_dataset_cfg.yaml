@@ -52,8 +52,10 @@ split_label_dataset:
     # Rule-based segmentation is now an auxiliary/fallback signal. The VLM semantic
     # splitter below should decide the final subtask boundaries when enabled.
     prefer_action_gripper: true
-    open_threshold: 0.75
-    closed_threshold: 0.25
+    # X-embodiment gripper fields are physical widths in metres. These values
+    # work for the 85--100 mm grippers configured in this repository.
+    open_threshold: 0.075
+    closed_threshold: 0.025
     debounce_frames: 5
     close_is_low: true
     context_before_sec: 1.5
