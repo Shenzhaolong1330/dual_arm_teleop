@@ -48,6 +48,8 @@ class NeroDualArm(Robot):
         
         # Gripper settings
         self._gripper_force = config.gripper_force
+        self._left_gripper_target_width = None
+        self._right_gripper_target_width = None
         self._left_gripper_width = float(config.gripper_max_open)
         self._right_gripper_width = float(config.gripper_max_open)
 
@@ -152,6 +154,8 @@ class NeroDualArm(Robot):
                 width=self.config.gripper_max_open,
                 force=self._gripper_force
                 )
+            self._left_gripper_target_width = float(self.config.gripper_max_open)
+            self._right_gripper_target_width = float(self.config.gripper_max_open)
             self._left_gripper_width = float(self.config.gripper_max_open)
             self._right_gripper_width = float(self.config.gripper_max_open)
             logger.info("[RIGHT GRIPPER] Initialized successfully")
@@ -159,6 +163,7 @@ class NeroDualArm(Robot):
         except Exception as e:
             logger.error("===== [ERROR] Failed to initialize grippers =====")
             logger.error(f"Exception: {e}\n")
+            raise
 
 
     def reset(self) -> None:
@@ -177,6 +182,8 @@ class NeroDualArm(Robot):
                 width=self.config.gripper_max_open,
                 force=self._gripper_force
             )
+            self._left_gripper_target_width = float(self.config.gripper_max_open)
+            self._right_gripper_target_width = float(self.config.gripper_max_open)
             self._left_gripper_width = float(self.config.gripper_max_open)
             self._right_gripper_width = float(self.config.gripper_max_open)
         
@@ -194,7 +201,7 @@ class NeroDualArm(Robot):
     
     @property
     def action_features(self) -> dict[str, type]:
-        """Canonical action: EE delta and next-frame gripper width in metres."""
+        """Canonical action: EE delta and commanded target gripper width in metres."""
         return x_embodiment_action_features(use_gripper=self.config.use_gripper)
 
     def _clip_gripper_width(self, width: float) -> float:
@@ -228,11 +235,11 @@ class NeroDualArm(Robot):
 
         width = self._clip_gripper_width(width)
         width_attr = f"_{arm_side}_gripper_width"
-        last_width = getattr(self, width_attr)
+        last_width = getattr(self, f"_{arm_side}_gripper_target_width", None)
 
         # Skip redundant command writes to reduce RPC blocking and gripper bus load.
         if last_width is not None and abs(width - last_width) < self.config.gripper_command_epsilon:
-            return width
+            return float(last_width)
         
         try:
             if arm_side == "left":
@@ -246,8 +253,10 @@ class NeroDualArm(Robot):
                     force=self._gripper_force
                 )
             setattr(self, width_attr, width)
+            setattr(self, f"_{arm_side}_gripper_target_width", width)
         except Exception as e:
             logger.warning(f"[{arm_side.upper()} GRIPPER] zerorpc error: {e}")
+            raise
         return width
     
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
@@ -279,6 +288,7 @@ class NeroDualArm(Robot):
                     
             except Exception as e:
                 logger.warning(f"[ROBOT] Action failed: {e}")
+                raise
         
         # Public actions are physical target widths. Return the clipped values
         # so replay and recorded labels exactly match the executable command.
@@ -320,6 +330,7 @@ class NeroDualArm(Robot):
                     
             except Exception as e:
                 logger.warning(f"[DUAL ARM] servo_p_OL failed: {e}")
+                raise
         
         # t_cart_end = time.perf_counter()
         # logger.info(f"[TIMING] send_action_cartesian total: {(t_cart_end-t_cart_start)*1000:.2f}ms")

@@ -354,6 +354,41 @@ teleop:
 - 按 `Y` 可将左夹爪交还给策略，按 `B` 可将右夹爪交还给策略；交还后需要先松开对应扳机，才能再次手动接管该夹爪。
 - 使用左箭头丢弃失败、不完整、质量差或不适合作为训练示范的 episode。`full_episode.success_policy` 为 `recorded_is_success` 时，这一点尤其重要。
 
+### 米制夹爪数据语义（Franka / NERO / ARX / Flexiv）
+
+`run_record.py` 不再在保存时用下一帧状态覆盖夹爪动作。`observation.state` 中的夹爪维度仍是当前反馈开口；`action` 中的夹爪维度来自 `robot.send_action()` 返回的实际目标，包含单位/方向转换、限幅，以及重复命令时保持的上次目标。例如命令关闭到 0 mm、物体阻挡后反馈 15 mm，保存的是 action=0 m、state=0.015 m，最后一帧也一样。机械臂动作来源、14D 顺序及米制单位不变。混合采集的 `policy_action`、`expert_action` 保留原义，`action` 的夹爪维度与 `sent_action` 一致。
+
+新建数据集自动写入 `meta/info.json`：`"gripper_action_semantics": "command_target_width_v1"`。使用原来的 `robot-record` 命令和配置，但请设置新的 `dataset_name` / `dataset_root`；只允许续录具有同一标记的数据集。缺失或非有限的下发目标、下发异常会终止录制，不用反馈或零值补动作标签。
+
+米制实例请求回 home 时，先保存当前非空片段，再重置；回程不录制。按右方向键开始新的 episode，保存的片段计入 `num_episodes`，空片段不计数。重置截断的混合片段标记为未成功，不应用 `recorded_is_success` 推断；持续按住重置键不会重复回 home。ARX 的 `reset()` 也执行已有的双臂平滑回 home。
+
+普通/快速合并会在创建或覆盖输出前拒绝不同语义的数据；普通/快速清洗和合并保留标记及夹爪目标。新数据须保持 `action_smoothing.smooth_gripper: false`，显式开启会报不兼容；可以只平滑机械臂动作。
+
+旧数据、归一化统计和 checkpoint 未修改。旧 checkpoint 仍学习原来的反馈宽度标签，修复采集不会改变它的预测或自动改善夹紧；以后用新数据训练时需重新计算对应归一化统计。本次不迁移旧数据、不重训，也不改变现有推理夹紧策略。
+
+离线验证（模拟机器人，不连接硬件）：
+
+```bash
+python -m unittest discover -s tests -p test_x_embodiment_schema.py
+python -m unittest robots.dual_franka.test_franka_dual_arm
+```
+
+### 旧数据夹爪稳定段重标注
+
+`python scripts/tools/relabel_gripper_actions.py --dry-run` 扫描旧的反馈宽度动作；去掉 `--dry-run` 才生成副本。默认源为 `~/.cache/huggingface/lerobot/franka_dual_arm/insert_tube_rack_all_E1984`，输出为同级 `insert_tube_rack_all_E1984_gripper_relabel_v01`。也可用 `--source`、`--output` 指定路径；不允许原地修改或覆盖已存在的输出。
+
+左右按 episode 独立检测，累计下降 2 mm 确认关闭，累计回升 2 mm 确认张开，并将关闭终点回溯到此前最后一个最低点。只把关闭阶段中连续 0.5 秒（30 FPS 下 15 帧）、窗口极差不超过 0.5 mm、窗口最大宽度严格小于 84 mm 的稳定窗口覆盖帧置为 0；关闭/张开的过渡保持原值。允许容差内的微小波动。初始就处于小开口、没有观察到下降的段不改。判断始终使用原始 action，不从 state 重建。
+
+参数均可配置：`--stable-seconds 0.5`、`--stable-range 0.0005`、`--closing-drop 0.002`、`--opening-rise 0.002`、`--open-width 0.085`、`--open-tolerance 0.001`；除持续时间外单位均为米。该方法无法区分夹住物体与操作者有意保持的中间开口，也无法恢复原始遥操作命令。
+
+工具直接重写 Parquet 中选中的 action 分量，保持 state、其他动作、行数、episode 和视频索引不变；视频独立复制，不解码、不重编码、不使用链接。每个 episode 和全局 action 统计使用修改后数值重算，分位数采用精确分位数。其他字段统计保持原值。
+
+输出带有 `gripper_action_semantics: heuristic_closed_plateau_zero_v1`，与真实下发命令标签区分。现有工具会拒绝把它与旧的无标记数据或 `command_target_width_v1` 数据混合合并；也不能把它作为新命令语义的续录目标。工具拒绝再次处理已有语义标记的输入。
+
+完整参数、左右修改帧数、每个区间（结束索引不含）、源文件 SHA-256 和校验结果保存在输出的 `meta/gripper_relabel_report.json`。通过文件及数值校验后才发布最终目录；失败时保留 `.relabel-staging` 目录供检查。旧数据、旧训练归一化文件和 checkpoint 均不修改；使用新副本训练前，要重新计算对应的训练归一化统计。
+
+离线测试：`python -m unittest discover -s tests -p test_relabel_gripper_actions.py`。
+
 ### 坐标系映射
 
 实际映射由 `*_pose_scaler` 和 `*_channel_signs` 配置。常见 Oculus 到机器人坐标映射如下：

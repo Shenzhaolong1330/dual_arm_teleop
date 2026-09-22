@@ -355,6 +355,26 @@ If `mirror_teleop` is enabled, the left/right controller assignment is swapped a
 - Press `Y` for the left gripper or `B` for the right gripper to hand that gripper back to the policy. The trigger must be released before that gripper can be manually reacquired.
 - Use the left arrow to discard failed, incomplete, low-quality, or not-trainable episodes before saving. This is required when `full_episode.success_policy` is `recorded_is_success`.
 
+### Metric gripper labels (Franka / NERO / ARX / Flexiv)
+
+`observation.state` keeps the current measured aperture. Gripper dimensions in `action` now come from `robot.send_action()`'s effective target after conversion, reversal and clipping, including the previous target when a duplicate command is suppressed. A 0 mm close command blocked at 15 mm is recorded as action=0 m and state=0.015 m, including the final frame. Arm labels, the 14D ordering and metre units are unchanged. Mixed recording keeps the original meanings of `policy_action` and `expert_action`; the gripper dimensions of `action` match `sent_action`. Missing/nonfinite returned targets or dispatch failures abort recording.
+
+New datasets automatically carry `"gripper_action_semantics": "command_target_width_v1"` in `meta/info.json`. Use the existing recording command/config with a **new dataset name/root**. Resume requires the same marker. Normal and fast merging reject different semantics before creating or overwriting output; normal and fast preprocessing/merging preserve the marker. Keep `action_smoothing.smooth_gripper: false` for new data; enabling it is incompatible. Arm-only smoothing remains supported.
+
+For metric schemas, a home request saves the nonempty segment first, resets without recording the return motion, then waits for Right arrow to start a separate episode. Saved segments count toward `num_episodes`; empty segments do not. Reset-truncated mixed segments are marked unsuccessful, even with `recorded_is_success`. A held reset button does not repeat home. ARX `reset()` now invokes its existing smooth home motion.
+
+Old datasets, normalization statistics and checkpoints are untouched. Existing checkpoints still learned feedback-width labels; changing recording does not change their predictions or inference clamping. Future training on new data needs its own normalization statistics. No migration or retraining is performed here. Offline coverage is in `tests/test_x_embodiment_schema.py` and `robots/dual_franka/test_franka_dual_arm.py` and uses simulated hardware only.
+
+### Relabel legacy closed-gripper plateaus
+
+Run `python scripts/tools/relabel_gripper_actions.py --dry-run` to analyze all episodes; omit `--dry-run` to create the verified copy. Defaults are `~/.cache/huggingface/lerobot/franka_dual_arm/insert_tube_rack_all_E1984` and its sibling `insert_tube_rack_all_E1984_gripper_relabel_v01`. Override with `--source` / `--output`. In-place edits, existing outputs and previously marked inputs are refused.
+
+Each hand is analyzed independently within each episode, using original actions. A cumulative 2 mm drop confirms closing; a 2 mm rise confirms opening and backdates the closing end to the last preceding trough. Only closing-phase stable windows of at least 0.5 s (15 frames at 30 FPS), range at most 0.5 mm, and maximum strictly below 84 mm are labeled zero. Closing/opening transitions and initial small apertures without an observed closing motion are retained. Parameters: `--stable-seconds`, `--stable-range`, `--closing-drop`, `--opening-rise`, `--open-width`, `--open-tolerance`; widths are in metres. Intentional intermediate-width holds may be mislabeled: this heuristic cannot recover the original commands.
+
+The tool rewrites selected Parquet action components, recomputes episode/global action statistics with exact quantiles, and independently copies videos without decoding or encoding. State, other action components, all indices and other statistics remain unchanged. The output is marked `heuristic_closed_plateau_zero_v1`, distinct from measured-width legacy data and `command_target_width_v1`; existing resume/merge checks prevent mixing these semantics. Parameters, changed intervals, counts, source SHA-256 hashes and verification results are in `meta/gripper_relabel_report.json`. A staging directory is published only after validation and retained on failure. Old data/checkpoints/training normalization assets are untouched; recompute training normalization for the new dataset.
+
+Offline tests: `python -m unittest discover -s tests -p test_relabel_gripper_actions.py`.
+
 ### Coordinate Mapping
 
 The exact mapping is configured by `*_pose_scaler` and `*_channel_signs`. A common Oculus-to-robot mapping is:

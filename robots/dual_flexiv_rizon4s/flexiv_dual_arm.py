@@ -18,6 +18,7 @@ from robots.dual_arm_schema import (
     AXES,
     action_features as x_embodiment_action_features,
     clip_gripper_width,
+    finite_gripper_value,
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
 )
@@ -796,21 +797,15 @@ class FlexivDualArm(Robot):
         self._right_robot.SendJointPosition(right_q, zeros, max_vel, max_acc)
 
     def _update_gripper_cache(self, action: dict[str, Any]) -> None:
+        if not self.config.use_gripper:
+            return
         for side in ("left", "right"):
             width = self._gripper_width_from_action(action, side)
             if width is None:
                 continue
-            width = self._clip_gripper_width(width)
+            width = self._move_gripper_to_width_if_needed(side, width)
             command = self._gripper_command_from_width(width)
-            if side == "left":
-                self._left_gripper_cmd = command
-            else:
-                self._right_gripper_cmd = command
-            gripper = self._left_gripper if side == "left" else self._right_gripper
-            if gripper is None:
-                self._set_cached_gripper_width(side, width)
-            else:
-                self._move_gripper_to_width_if_needed(side, width, command=command)
+            setattr(self, f"_{side}_gripper_cmd", command)
             action[f"{side}_gripper_width"] = width
 
     def _gripper_width_from_action(self, action: dict[str, Any], side: str) -> float | None:
@@ -866,6 +861,8 @@ class FlexivDualArm(Robot):
         return float(np.clip((float(width) - min_width) / span, 0.0, 1.0))
 
     def move_gripper_width(self, width_m: float, side: str = "both", wait: bool = True) -> None:
+        self._left_gripper_target_width = None
+        self._right_gripper_target_width = None
         if not self.config.use_gripper:
             return
 
@@ -1010,9 +1007,7 @@ class FlexivDualArm(Robot):
                     target_width,
                 )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[FLEXIV] %s gripper params unavailable before Move: %s", side, exc)
-            velocity = float(self.config.gripper_speed)
-            force_limit = float(self.config.gripper_force)
+            raise RuntimeError(f"{side} gripper hardware limits unavailable") from exc
         return target_width, velocity, force_limit
 
     def _move_gripper_to_width_if_needed(
@@ -1020,19 +1015,19 @@ class FlexivDualArm(Robot):
         side: str,
         width: float,
         command: float | None = None,
-    ) -> None:
+    ) -> float:
         gripper = self._left_gripper if side == "left" else self._right_gripper
         if gripper is None:
-            return
+            raise RuntimeError(f"{side} gripper is unavailable")
 
         prepared = self._prepare_gripper_move(side, gripper, width)
         if prepared is None:
-            return
-        target_width, velocity, force_limit = prepared
+            raise RuntimeError(f"{side} gripper target could not be prepared")
+        target_width, velocity, force_limit = map(finite_gripper_value, prepared)
 
-        last_width = self._left_gripper_width if side == "left" else self._right_gripper_width
+        last_width = getattr(self, f"_{side}_gripper_target_width", None)
         if last_width is not None and abs(target_width - last_width) < self.config.gripper_command_epsilon:
-            return
+            return float(last_width)
 
         logger.info(
             "[FLEXIV] %s gripper Move width=%.4f command=%s velocity=%.3f force=%.1f",
@@ -1043,7 +1038,9 @@ class FlexivDualArm(Robot):
             force_limit,
         )
         gripper.Move(target_width, velocity, force_limit)
+        setattr(self, f"_{side}_gripper_target_width", target_width)
         self._set_cached_gripper_width(side, target_width)
+        return target_width
 
     @staticmethod
     def _read_gripper_state(gripper: Any) -> tuple[float | None, bool | None, float | None]:

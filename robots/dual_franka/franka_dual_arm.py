@@ -425,6 +425,8 @@ class FrankaDualArm(Robot):
 
         if server_action:
             step_result = self._robot.step(server_action)
+            if isinstance(step_result, Mapping) and step_result.get("ok") is False:
+                raise RuntimeError(f"Franka rejected action: {step_result}")
             rpc_steps.append({"action": dict(server_action), "result": self._summarize_step_result(step_result)})
             self._update_cached_rpc_state_from_step(step_result)
             for side, open_fraction in gripper_updates:
@@ -790,11 +792,11 @@ class FrankaDualArm(Robot):
 
             if side == "left":
                 if self._last_left_gripper_open is not None and abs(open_fraction - self._last_left_gripper_open) < 1e-4:
-                    return width
+                    return self._last_left_gripper_open * self.config.gripper_max_open
                 side_key = "left_arm"
             else:
                 if self._last_right_gripper_open is not None and abs(open_fraction - self._last_right_gripper_open) < 1e-4:
-                    return width
+                    return self._last_right_gripper_open * self.config.gripper_max_open
                 side_key = "right_arm"
 
             server_action.setdefault(side_key, {})["gripper"] = {

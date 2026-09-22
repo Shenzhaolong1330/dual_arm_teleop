@@ -33,6 +33,7 @@ from robots.dual_arm_schema import (
     AXES,
     action_features as x_embodiment_action_features,
     clip_gripper_width,
+    finite_gripper_value,
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
 )
@@ -117,6 +118,8 @@ class ArxDualArm(Robot):
         open_command = self._gripper_command_from_width(config.gripper_max_open)
         self._last_left_gripper_cmd = open_command
         self._last_right_gripper_cmd = open_command
+        self._left_gripper_target_width = None
+        self._right_gripper_target_width = None
         self._left_gripper_width = float(config.gripper_max_open)
         self._right_gripper_width = float(config.gripper_max_open)
 
@@ -313,6 +316,8 @@ class ArxDualArm(Robot):
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
 
         logger.info("[ROBOT] Resetting dual-arm system...")
+        if not self.config.debug:
+            self._smooth_reset_arms(True, True)
 
         # 刷新缓存
         state = self._client.get_full_state()
@@ -334,6 +339,8 @@ class ArxDualArm(Robot):
             self._client.set_right_gripper(open_command)
             self._last_left_gripper_cmd = open_command
             self._last_right_gripper_cmd = open_command
+            self._left_gripper_target_width = open_width
+            self._right_gripper_target_width = open_width
             self._left_gripper_width = open_width
             self._right_gripper_width = open_width
 
@@ -531,7 +538,7 @@ class ArxDualArm(Robot):
         # *_gripper_cmd_bin=1 meant close and 0 meant open.
         for key in (f"{side}_gripper_cmd", f"{side}_gripper_cmd_bin"):
             if key in action and action[key] is not None:
-                close_fraction = float(np.clip(float(action[key]), 0.0, 1.0))
+                close_fraction = float(np.clip(finite_gripper_value(action[key]), 0.0, 1.0))
                 return width_from_normalized_command(
                     1.0 - close_fraction,
                     self.config.gripper_min_width,
@@ -575,12 +582,12 @@ class ArxDualArm(Robot):
 
         width = self._clip_gripper_width(width)
         width_attr = f"_{side}_gripper_width"
-        last_width = float(getattr(self, width_attr))
+        last_width = getattr(self, f"_{side}_gripper_target_width", None)
         command = self._gripper_command_from_width(width)
         command_attr = f"_last_{side}_gripper_cmd"
 
-        if abs(width - last_width) < float(self.config.gripper_command_epsilon):
-            return width
+        if last_width is not None and abs(width - last_width) < float(self.config.gripper_command_epsilon):
+            return last_width
 
         if side == "left":
             self._client.set_left_gripper(command)
@@ -588,6 +595,7 @@ class ArxDualArm(Robot):
             self._client.set_right_gripper(command)
         setattr(self, command_attr, command)
         setattr(self, width_attr, width)
+        setattr(self, f"_{side}_gripper_target_width", width)
         return width
 
     # ============================================================

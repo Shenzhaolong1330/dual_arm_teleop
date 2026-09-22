@@ -10,6 +10,10 @@ from robots import (
     create_robot_config,
     create_robot,
 )
+from robots.dual_arm_schema import (
+    GRIPPER_ACTION_SEMANTICS, GRIPPER_ACTION_SEMANTICS_KEY,
+    metric_gripper_keys, command_target_action, validate_recording_semantics, finite_gripper_value,
+)
 from teleoperators import (
     OculusTeleopConfig,
     OculusTeleop,
@@ -26,7 +30,7 @@ import threading
 import time
 from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import hw_to_dataset_features, build_dataset_frame
+from lerobot.datasets.utils import hw_to_dataset_features, build_dataset_frame, write_info, load_info
 from lerobot.utils.control_utils import sanity_check_dataset_robot_compatibility
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.utils import make_robot_action
@@ -692,7 +696,7 @@ def _clip_gripper_action_value(value: float, key: str | None) -> float:
     """Keep physical widths non-negative; robot adapters apply upper limits."""
 
     if _is_gripper_width_key(key):
-        return max(0.0, float(value))
+        return max(0.0, finite_gripper_value(value))
     return _clip_gripper_cmd(float(value))
 
 
@@ -1092,6 +1096,10 @@ def run_mix_record_loop(
             robot_type=robot.robot_type,
         )
         policy_action_processed = make_robot_action(policy_action, dataset.features)
+        for key in metric_gripper_keys(dataset.features):
+            if key not in policy_action_processed:
+                raise ValueError(f"Policy did not produce gripper target {key}")
+            finite_gripper_value(policy_action_processed[key])
         policy_action_processed = _complete_action_dict(policy_action_processed, action_names)
         policy_action_processed = normalize_gripper_command_keys(policy_action_processed, gripper_action_keys)
 
@@ -1250,6 +1258,15 @@ def run_mix_record_loop(
             _complete_action_dict(dict(robot_action_to_send), action_names, fallback_action=exec_action),
             gripper_action_keys,
         )
+        reset_action = dict(robot_action_to_send)
+        if _is_reset_requested_action(teleop_raw_action):
+            reset_action[RESET_REQUEST_KEY] = True
+        if _metric_reset_boundary(reset_action, dataset.features, events):
+            if events.get("reset_episode", False):
+                break
+            busy_wait(1 / fps)
+            timestamp_s = time.perf_counter() - start_episode_t
+            continue
         if reset_requested:
             sent_action[RESET_REQUEST_KEY] = True
             sent_action, reset_saved_steps = _record_run_mix_reset_motion(
@@ -1279,6 +1296,7 @@ def run_mix_record_loop(
             continue
 
         sent_action_raw = robot.send_action(sent_action)
+        effective_targets = command_target_action({}, sent_action_raw, dataset.features)
         sent_action = normalize_gripper_command_keys(
             _complete_action_dict(
                 dict(sent_action_raw or sent_action),
@@ -1287,6 +1305,7 @@ def run_mix_record_loop(
             ),
             gripper_action_keys,
         )
+        sent_action.update(effective_targets)
         last_exec_action = dict(sent_action)
 
         if action_source in {"expert", "mixed"}:
@@ -1397,54 +1416,21 @@ def _set_episode_success_annotation(
         ]
 
 
-def label_gripper_actions_from_next_observation(dataset: LeRobotDataset) -> None:
-    """Set canonical gripper actions to the following frame's measured width.
-
-    X-embodiment uses the current absolute EE pose as observation and a delta
-    EE action. Its gripper component is deliberately the *next* physical
-    aperture, rather than a robot-specific trigger/command value. This runs
-    on the in-memory episode buffer immediately before saving, so it applies
-    consistently to teleop, policy, and run-mix collection.
-
-    The final frame has no successor; it keeps its measured current width as a
-    terminal no-op label.
-    """
-
-    buffer = dataset.episode_buffer
-    if buffer is None:
-        return
-
-    size = int(buffer.get("size", 0) or 0)
-    if size == 0:
-        return
-
-    action_feature = dataset.features.get(ACTION, {})
-    state_feature = dataset.features.get(f"{OBS_STR}.state", {})
-    action_names = list(action_feature.get("names") or [])
-    state_names = list(state_feature.get("names") or [])
-    action_values = buffer.get(ACTION)
-    state_values = buffer.get(f"{OBS_STR}.state")
-    if not action_values or not state_values:
-        return
-
-    index_pairs = [
-        (action_names.index(name), state_names.index(name))
-        for name in ("left_gripper_width", "right_gripper_width")
-        if name in action_names and name in state_names
-    ]
-    if not index_pairs:
-        return
-
-    for frame_index in range(size):
-        source_index = min(frame_index + 1, size - 1)
-        action_vector = action_values[frame_index]
-        next_state_vector = state_values[source_index]
-        for action_index, state_index in index_pairs:
-            action_vector[action_index] = float(next_state_vector[state_index])
-
-
 def _is_reset_requested_action(action: dict[str, Any] | None) -> bool:
-    return isinstance(action, dict) and bool(action.get(RESET_REQUEST_KEY, False))
+    return isinstance(action, dict) and any(bool(action.get(key, False)) for key in (
+        RESET_REQUEST_KEY, "left_arm_reset_requested", "right_arm_reset_requested",
+    ))
+
+
+def _metric_reset_boundary(action, features, events) -> bool:
+    """Latch a reset press; the outer loop saves first and resets outside recording."""
+    if not metric_gripper_keys(features):
+        return False
+    pressed = _is_reset_requested_action(action)
+    if pressed and not events.get("metric_reset_held", False):
+        events["reset_episode"] = True
+    events["metric_reset_held"] = pressed
+    return pressed
 
 
 def _clear_robot_observation_cache(robot) -> None:
@@ -1739,6 +1725,16 @@ def record_loop_with_recorded_resets(
 
         robot_action_to_send = robot_action_processor((action_values, obs))
 
+        reset_action = dict(robot_action_to_send)
+        if _is_reset_requested_action(action_values):
+            reset_action[RESET_REQUEST_KEY] = True
+        if _metric_reset_boundary(reset_action, dataset.features if dataset is not None else {}, events):
+            if events.get("reset_episode", False):
+                break
+            busy_wait(1 / fps)
+            timestamp = time.perf_counter() - start_episode_t
+            continue
+
         if _is_reset_requested_action(action_values) or _is_reset_requested_action(robot_action_to_send):
             if _is_reset_requested_action(action_values):
                 robot_action_to_send = dict(robot_action_to_send)
@@ -1756,8 +1752,9 @@ def record_loop_with_recorded_resets(
                 initial_obs_processed=obs_processed,
             )
         else:
-            robot.send_action(robot_action_to_send)
+            sent_action = robot.send_action(robot_action_to_send)
             if dataset is not None:
+                action_values = command_target_action(action_values, sent_action, dataset.features)
                 action_frame = build_dataset_frame(dataset.features, action_values, prefix=ACTION)
                 dataset.add_frame({**observation_frame, **action_frame, "task": single_task})
             if display_data:
@@ -1777,7 +1774,8 @@ def _wait_for_next_episode_with_teleop(
     robot_action_processor,
     robot_observation_processor,
     display_data: bool,
-) -> None:
+) -> bool:
+    moved = False
     logging.info("====== [WAIT] Press Right arrow to start the next episode ======")
     if teleop is None:
         logging.info("[WAIT] No teleop device is connected; waiting for Right arrow without robot control.")
@@ -1790,7 +1788,7 @@ def _wait_for_next_episode_with_teleop(
                 events["exit_early"] = False
                 break
             busy_wait(0.05)
-        return
+        return False
 
     while not events["stop_recording"]:
         loop_start_t = time.perf_counter()
@@ -1812,13 +1810,20 @@ def _wait_for_next_episode_with_teleop(
             act = teleop.get_action()
             action_values = teleop_action_processor((act, obs))
             robot_action_to_send = robot_action_processor((action_values, obs))
+            if any(key in robot.action_features for key in ("left_gripper_width", "right_gripper_width")):
+                events["metric_reset_held"] = _is_reset_requested_action(robot_action_to_send)
+                if events["metric_reset_held"]:
+                    busy_wait(1 / fps)
+                    continue
             robot.send_action(robot_action_to_send)
+            moved = True
 
         if display_data and action_values is not None:
             log_rerun_data(observation=obs_processed, action=action_values)
 
         dt_s = time.perf_counter() - loop_start_t
         busy_wait(1 / fps - dt_s)
+    return moved
 
 
 def run_record(record_cfg: RecordConfig):
@@ -1826,6 +1831,7 @@ def run_record(record_cfg: RecordConfig):
     dataset_name = None
     dataset_root = None
     dataset = None
+    created_dataset = False
     robot = None
     teleop = None
     try:
@@ -1988,6 +1994,7 @@ def run_record(record_cfg: RecordConfig):
             )
 
         if record_cfg.resume:
+            validate_recording_semantics(load_info(dataset_root), dataset_features)
             dataset = LeRobotDataset(
                 dataset_name,
                 root=dataset_root,
@@ -2007,6 +2014,10 @@ def run_record(record_cfg: RecordConfig):
                 use_videos=True,
                 image_writer_threads=4,
             )
+            created_dataset = True
+            if metric_gripper_keys(dataset_features):
+                dataset.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = GRIPPER_ACTION_SEMANTICS
+                write_info(dataset.meta.info, dataset.root)
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
 
@@ -2061,9 +2072,11 @@ def run_record(record_cfg: RecordConfig):
         loop_robot = ResetHomeOnRequestRobot(robot) if teleop is not None else robot
 
         episode_idx = 0
+        home_at_finish = False
         run_mix_episode_stats: list[dict[str, Any]] = []
 
         while episode_idx < record_cfg.num_episodes and not events["stop_recording"]:
+            events["reset_episode"] = False
             logging.info(f"====== [RECORD] Recording episode {episode_idx + 1} of {record_cfg.num_episodes} ======")
             if record_cfg.run_mode == RUN_MODE_MIX:
                 mix_stats = run_mix_record_loop(
@@ -2084,7 +2097,6 @@ def run_record(record_cfg: RecordConfig):
                     success_policy=record_cfg.success_policy,
                 )
                 mix_stats["episode_index"] = episode_idx
-                run_mix_episode_stats.append(mix_stats)
                 logging.info(
                     "[run_mix] policy_exec_steps=%d expert_exec_steps=%d saved_steps=%d "
                     "expert_frame_ratio=%.4f interventions=%d complete_expert_labels=%d",
@@ -2113,6 +2125,10 @@ def run_record(record_cfg: RecordConfig):
                     display_data=record_cfg.display,
                 )
 
+            if dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
+                home_at_finish = False
+            reset_boundary = bool(events.pop("reset_episode", False))
+            saved_episode = False
             rerecord_requested = bool(events["rerecord_episode"])
             if rerecord_requested:
                 logging.info("Re-recording episode requested: discard current episode and enter reset state.")
@@ -2126,7 +2142,15 @@ def run_record(record_cfg: RecordConfig):
                     dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0
                 )
                 if has_recorded_frames:
-                    if (
+                    if reset_boundary:
+                        _set_episode_success_annotation(
+                            dataset, success=False, success_policy=record_cfg.success_policy,
+                            inferred_from_recorded_episode=False,
+                        )
+                        mix_stats["success"] = False
+                        mix_stats["success_policy"] = record_cfg.success_policy
+                        mix_stats["success_inferred_from_recorded_episode"] = False
+                    elif (
                         record_cfg.success_policy == SUCCESS_POLICY_EXPLICIT
                         and record_cfg.annotate_success
                     ):
@@ -2166,22 +2190,29 @@ def run_record(record_cfg: RecordConfig):
                             inferred_from_recorded_episode=False,
                         )
                         mix_stats["success_policy"] = record_cfg.success_policy
-                    label_gripper_actions_from_next_observation(dataset)
                     dataset.save_episode()
+                    saved_episode = True
                 else:
                     logging.warning(
                         "[run_mix] episode %d has no recorded frames; skip saving this episode.",
                         episode_idx + 1,
                     )
-            else:
-                label_gripper_actions_from_next_observation(dataset)
+            elif dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
                 dataset.save_episode()
+                saved_episode = True
 
-            # Reset the environment between episodes, and also before a re-record attempt.
-            if not events["stop_recording"] and (episode_idx < record_cfg.num_episodes - 1 or rerecord_requested):
+            if saved_episode:
+                if record_cfg.run_mode == RUN_MODE_MIX:
+                    run_mix_episode_stats.append(mix_stats)
+                episode_idx += 1
+            more_episodes = episode_idx < record_cfg.num_episodes and not events["stop_recording"]
+            # Save the nonempty segment before moving home; no return trajectory is recorded.
+            if reset_boundary or (more_episodes and (saved_episode or rerecord_requested)):
                 logging.info("====== [RESET] Resetting robot to home ======")
                 robot.reset()
-                _wait_for_next_episode_with_teleop(
+                home_at_finish = True
+            if more_episodes:
+                moved_while_waiting = _wait_for_next_episode_with_teleop(
                     robot=robot,
                     teleop=teleop,
                     events=events,
@@ -2191,17 +2222,14 @@ def run_record(record_cfg: RecordConfig):
                     robot_observation_processor=robot_observation_processor,
                     display_data=record_cfg.display,
                 )
-
-            if rerecord_requested:
-                continue
-
-            episode_idx += 1
+                # Waiting permits manual motion; do not assume the robot is still home.
+                home_at_finish = home_at_finish and not moved_while_waiting
 
         # Clean up
         logging.info("Stop recording")
 
         # Reset robot to home position at the end (same intent as pressing A in teleop).
-        if record_cfg.reset_on_finish:
+        if record_cfg.reset_on_finish and not home_at_finish:
             try:
                 robot.reset()
             except Exception as reset_err:
@@ -2261,7 +2289,8 @@ def run_record(record_cfg: RecordConfig):
             except Exception as cleanup_err:  # noqa: BLE001
                 logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path)
+        if created_dataset:
+            handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
@@ -2282,7 +2311,8 @@ def run_record(record_cfg: RecordConfig):
             except Exception as cleanup_err:  # noqa: BLE001
                 logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
-        handle_incomplete_dataset(dataset_path)
+        if created_dataset:
+            handle_incomplete_dataset(dataset_path)
         sys.exit(1)
 
 
