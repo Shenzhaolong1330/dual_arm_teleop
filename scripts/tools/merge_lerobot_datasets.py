@@ -13,11 +13,18 @@ import argparse
 import json
 import logging
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Direct script execution must prefer this repository over ROS's `scripts` package.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.utils.dataset_utils import GRIPPER_ACTION_SEMANTICS_KEY, validate_merge_semantics
 
 try:  # Keep --help/import usable outside the LeRobot runtime environment.
     import numpy as np
@@ -225,6 +232,7 @@ def _validate_compatible_sources(
 ) -> None:
     reference_meta = _metadata(reference)
     candidate_meta = _metadata(candidate)
+    validate_merge_semantics(reference_meta.info, candidate_meta.info)
 
     if int(candidate_meta.fps) != int(reference_meta.fps):
         raise ValueError(
@@ -414,6 +422,11 @@ def _run_frame_rewrite_merge(
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
 
+    if GRIPPER_ACTION_SEMANTICS_KEY in _metadata(reference).info:
+        from lerobot.datasets.utils import write_info
+        output.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = _metadata(reference).info[GRIPPER_ACTION_SEMANTICS_KEY]
+        write_info(output.meta.info, output.root)
+
     written_frames = 0
     try:
         for spec, dataset, episodes in loaded_datasets:
@@ -461,15 +474,6 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
     )
 
     _assert_output_is_separate(output_root, source_specs)
-    if output_root.exists() and not dry_run:
-        if output_cfg.get("overwrite", False):
-            shutil.rmtree(output_root)
-        else:
-            raise FileExistsError(
-                f"Output dataset already exists: {output_root}. "
-                "Set output.overwrite=true or pass --overwrite to replace it."
-            )
-
     loaded_sources = _load_sources(
         source_specs,
         download_videos=download_videos,
@@ -534,6 +538,15 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
         )
         return summary
 
+    if output_root.exists() and not dry_run:
+        if output_cfg.get("overwrite", False):
+            shutil.rmtree(output_root)
+        else:
+            raise FileExistsError(
+                f"Output dataset already exists: {output_root}. "
+                "Set output.overwrite=true or pass --overwrite to replace it."
+            )
+
     if fast_skip_reason is None:
         _run_fast_aggregate(
             source_specs=source_specs,
@@ -553,6 +566,17 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
             download_videos=download_videos,
         )
 
+    if GRIPPER_ACTION_SEMANTICS_KEY in _metadata(reference).info:
+        from lerobot.datasets.utils import load_info, write_info
+        output_info = load_info(output_root)
+        output_info[GRIPPER_ACTION_SEMANTICS_KEY] = _metadata(reference).info[GRIPPER_ACTION_SEMANTICS_KEY]
+        write_info(output_info, output_root)
+
+    # Older LeRobot aggregation can retain source file indices after appending
+    # their parquet rows to a different physical destination file.
+    from dataset_integrity import repair_data_references
+
+    summary["repaired_data_references"] = repair_data_references(output_root)
     summary["written_frames"] = written_frames
     summary["written_episodes"] = total_output_episodes
     _write_summary(output_root, summary)

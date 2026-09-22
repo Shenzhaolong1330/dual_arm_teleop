@@ -2,8 +2,10 @@
 
 import argparse
 import copy
+import functools
 import logging
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +14,13 @@ import torch
 import yaml
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
-from lerobot.datasets.utils import DEFAULT_FEATURES
+import lerobot.datasets.lerobot_dataset as lerobot_dataset_module
+from lerobot.datasets.utils import DEFAULT_FEATURES, write_info
+# Direct script execution must prefer this repository over ROS's `scripts` package.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from scripts.utils.dataset_utils import GRIPPER_ACTION_SEMANTICS_KEY, validate_gripper_smoothing
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -124,20 +132,49 @@ def _expanded_mask(event_mask: np.ndarray, radius: int) -> np.ndarray:
     return keep
 
 
-def _gripper_event_mask(actions: np.ndarray, action_names: list[str], cfg: dict[str, Any]) -> np.ndarray:
+def _gripper_event_mask(
+    actions: np.ndarray,
+    action_names: list[str],
+    cfg: dict[str, Any],
+    states: np.ndarray | None = None,
+    state_names: list[str] | None = None,
+) -> np.ndarray:
+    """Protect gripper changes within ONE episode, in action OR measured state.
+
+    Physical width features are in metres, not normalized trigger units. Fail
+    on legacy normalized thresholds rather than silently losing all events.
+    """
     gripper_cfg = cfg.get("gripper_events", {}) or {}
     if not gripper_cfg.get("enabled", False):
         return np.zeros(actions.shape[0], dtype=bool)
 
-    indices = _gripper_indices(action_names)
-    if not indices or actions.shape[0] == 0:
-        return np.zeros(actions.shape[0], dtype=bool)
-
-    threshold = float(gripper_cfg.get("change_threshold", 0.5))
-    diffs = np.abs(np.diff(actions[:, indices], axis=0))
     event_mask = np.zeros(actions.shape[0], dtype=bool)
-    event_mask[1:] = (diffs >= threshold).any(axis=1)
-    event_mask[:-1] |= (diffs >= threshold).any(axis=1)
+    signals = [(actions, action_names)]
+    if gripper_cfg.get("include_observation_state", True):
+        if states is not None:
+            if len(states) != len(actions):
+                raise ValueError("Gripper action/state episode lengths differ")
+            signals.append((states, state_names or []))
+        elif gripper_cfg.get("require_observation_state", False):
+            raise ValueError("Gripper protection requires observation.state")
+    for values, names in signals:
+        indices = _gripper_indices(names)
+        if not indices:
+            if gripper_cfg.get("require_gripper_features", False):
+                raise ValueError("Required gripper features are missing")
+            continue
+        width_features = all("width" in names[index].lower() for index in indices)
+        threshold = float(gripper_cfg.get("change_threshold", 0.0001 if width_features else 0.5))
+        if not np.isfinite(threshold) or threshold <= 0:
+            raise ValueError("gripper_events.change_threshold must be positive and finite")
+        if width_features and threshold >= 0.01:
+            raise ValueError("Gripper widths are metres: threshold >= 0.01 m is unsafe; use a width threshold such as 0.0001 m")
+        widths = values[:, indices]
+        if not np.isfinite(widths).all():
+            raise ValueError("Non-finite gripper values; refusing to trim")
+        changed = (np.abs(np.diff(widths, axis=0)) >= threshold).any(axis=1)
+        event_mask[1:] |= changed
+        event_mask[:-1] |= changed
     return _expanded_mask(event_mask, int(gripper_cfg.get("keep_radius_frames", 15)))
 
 
@@ -445,7 +482,66 @@ def _frame_from_source_item(
     return frame
 
 
+def _write_kept_frames_batched(
+    source: LeRobotDataset,
+    output: LeRobotDataset,
+    *,
+    episode_index: int,
+    episode_start: int,
+    keep_indices: np.ndarray,
+    smoothed_actions: np.ndarray,
+    batch_size: int,
+) -> None:
+    """Copy retained frames in video batches instead of seeking once per frame.
+
+    `LeRobotDataset.__getitem__` opens/seeks a decoder for every individual frame.  That
+    is correct but extremely expensive for dense retained ranges.  Querying all timestamps
+    for a small, ordered batch lets the configured decoder decode each camera sequentially,
+    while the normal ``add_frame``/``save_episode`` path keeps LeRobot's parquet and video
+    metadata handling unchanged.
+    """
+    source._ensure_hf_dataset_loaded()
+    raw_dataset = source.hf_dataset.with_format("torch")
+    video_keys = list(source.meta.video_keys)
+
+    for batch_start in range(0, len(keep_indices), batch_size):
+        source_batch_indices = [
+            int(index) for index in keep_indices[batch_start : batch_start + batch_size]
+        ]
+        raw_batch = raw_dataset[source_batch_indices]
+
+        video_batch: dict[str, torch.Tensor] = {}
+        if video_keys:
+            timestamps = raw_batch["timestamp"]
+            if isinstance(timestamps, torch.Tensor):
+                timestamps = timestamps.detach().cpu().tolist()
+            else:
+                timestamps = list(timestamps)
+            video_batch = source._query_videos(
+                {video_key: timestamps for video_key in video_keys},
+                episode_index,
+            )
+            if len(source_batch_indices) == 1:
+                # _query_videos squeezes the leading singleton frame axis.
+                video_batch = {key: value.unsqueeze(0) for key, value in video_batch.items()}
+
+        for batch_offset, source_index in enumerate(source_batch_indices):
+            item = {key: value[batch_offset] for key, value in raw_batch.items()}
+            for video_key, frames in video_batch.items():
+                item[video_key] = frames[batch_offset]
+
+            task_index = item["task_index"]
+            if isinstance(task_index, torch.Tensor):
+                task_index = task_index.item()
+            item["task"] = str(source.meta.tasks.iloc[int(task_index)].name)
+
+            local_index = source_index - episode_start
+            frame = _frame_from_source_item(source, item, smoothed_actions[local_index])
+            output.add_frame(frame)
+
+
 def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRobotDataset:
+    validate_gripper_smoothing(source.meta.info, cfg)
     _assert_output_is_separate_from_source(source, cfg)
     output_cfg = cfg["output"]
     output_root = _as_path_or_none(output_cfg.get("root"))
@@ -458,20 +554,51 @@ def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRob
                 "Set output.overwrite=true to replace it."
             )
 
-    return LeRobotDataset.create(
+    output_features = {
+        key: copy.deepcopy(value)
+        for key, value in source.features.items()
+        if key not in DEFAULT_FEATURES
+    }
+    for feature in output_features.values():
+        if feature.get("dtype") == "video":
+            feature.pop("info", None)
+
+    output = LeRobotDataset.create(
         repo_id=output_cfg["repo_id"],
         root=output_root,
         fps=source.fps,
-        features={
-            key: value
-            for key, value in source.features.items()
-            if key not in DEFAULT_FEATURES
-        },
+        features=output_features,
         robot_type=source.meta.info.get("robot_type"),
         use_videos=len(source.meta.video_keys) > 0,
         image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
+
+    if GRIPPER_ACTION_SEMANTICS_KEY in source.meta.info:
+        output.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = source.meta.info[GRIPPER_ACTION_SEMANTICS_KEY]
+        write_info(output.meta.info, output.root)
+    return output
+
+
+def _configured_video_encoder(cfg: dict[str, Any]):
+    """Temporarily apply output video settings to LeRobot's episode encoder."""
+    encoding_cfg = cfg.get("output", {}).get("video_encoding") or {}
+    codec = encoding_cfg.get("codec")
+    if not codec:
+        return None
+
+    original = lerobot_dataset_module.encode_video_frames
+    kwargs = {"vcodec": str(codec)}
+    for config_key, function_key in (
+        ("pixel_format", "pix_fmt"),
+        ("gop", "g"),
+        ("crf", "crf"),
+        ("fast_decode", "fast_decode"),
+    ):
+        if config_key in encoding_cfg:
+            kwargs[function_key] = encoding_cfg[config_key]
+    lerobot_dataset_module.encode_video_frames = functools.partial(original, **kwargs)
+    return original
 
 
 def preprocess_dataset(cfg: dict[str, Any]) -> None:
@@ -483,13 +610,16 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
     source = LeRobotDataset(
         source_cfg["repo_id"],
         root=_as_path_or_none(source_cfg.get("root")),
+        video_backend=source_cfg.get("video_backend"),
     )
+    validate_gripper_smoothing(source.meta.info, cfg)
     episodes = _select_episodes(source, cfg)
     action_names = source.features["action"]["names"]
     state_names = source.features.get("observation.state", {}).get("names") or []
     state_names = [str(name) for name in state_names]
     dry_run = bool(cfg.get("dry_run", False))
 
+    original_video_encoder = None if dry_run else _configured_video_encoder(cfg)
     output = None if dry_run else _create_output_dataset(source, cfg)
     total_in = 0
     total_out = 0
@@ -504,7 +634,7 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
             states = arrays.get("observation.state")
 
             smoothed_actions = _smooth_actions(actions, action_names, cfg)
-            gripper_keep = _gripper_event_mask(actions, action_names, cfg)
+            gripper_keep = _gripper_event_mask(actions, action_names, cfg, states, state_names)
             motion, motion_source = _motion_mask(
                 smoothed_actions,
                 action_names,
@@ -533,15 +663,29 @@ def preprocess_dataset(cfg: dict[str, Any]) -> None:
             if dry_run:
                 continue
 
-            for source_idx in keep_indices:
-                local_idx = int(source_idx - start)
-                item = source[int(source_idx)]
-                frame = _frame_from_source_item(source, item, smoothed_actions[local_idx])
-                output.add_frame(frame)
+            decode_batch_size = int(source_cfg.get("video_decode_batch_size", 1))
+            if decode_batch_size > 1:
+                _write_kept_frames_batched(
+                    source,
+                    output,
+                    episode_index=int(ep_idx),
+                    episode_start=start,
+                    keep_indices=keep_indices,
+                    smoothed_actions=smoothed_actions,
+                    batch_size=decode_batch_size,
+                )
+            else:
+                for source_idx in keep_indices:
+                    local_idx = int(source_idx - start)
+                    item = source[int(source_idx)]
+                    frame = _frame_from_source_item(source, item, smoothed_actions[local_idx])
+                    output.add_frame(frame)
             output.save_episode()
     finally:
         if output is not None:
             output.finalize()
+        if original_video_encoder is not None:
+            lerobot_dataset_module.encode_video_frames = original_video_encoder
 
     logger.info(
         "[DONE] frames %d -> %d (%.1f%% kept)%s",
@@ -559,11 +703,23 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="Only report frame counts; do not write output.")
     parser.add_argument("--max-episodes", type=int, default=None, help="Override source.max_episodes.")
     parser.add_argument("--overwrite", action="store_true", help="Override output.overwrite=true.")
+    parser.add_argument(
+        "--job",
+        action="append",
+        help="Run only the named job from preprocess_dataset.jobs; repeat to select multiple jobs.",
+    )
     args = parser.parse_args()
 
     cfg = _load_config(args.config)
 
     job_cfgs = _expand_job_configs(cfg)
+    if args.job:
+        requested_jobs = set(args.job)
+        job_cfgs = [job_cfg for job_cfg in job_cfgs if job_cfg.get("_job_name") in requested_jobs]
+        found_jobs = {job_cfg.get("_job_name") for job_cfg in job_cfgs}
+        missing_jobs = sorted(requested_jobs - found_jobs)
+        if missing_jobs:
+            raise ValueError(f"Unknown preprocess job(s): {missing_jobs}")
     if len(job_cfgs) > 1:
         logger.info("[BATCH] preprocessing %d datasets sequentially", len(job_cfgs))
     for job_idx, job_cfg in enumerate(job_cfgs):

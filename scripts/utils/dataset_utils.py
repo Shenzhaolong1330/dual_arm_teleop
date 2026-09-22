@@ -2,6 +2,21 @@ import re
 from pathlib import Path
 from datetime import datetime
 
+GRIPPER_ACTION_SEMANTICS_KEY = "gripper_action_semantics"
+GRIPPER_ACTION_SEMANTICS = "command_target_width_v1"
+
+
+def validate_merge_semantics(reference_info, candidate_info) -> None:
+    if reference_info.get(GRIPPER_ACTION_SEMANTICS_KEY) != candidate_info.get(GRIPPER_ACTION_SEMANTICS_KEY):
+        raise ValueError("Cannot merge datasets with different gripper_action_semantics (including old/unknown)")
+
+
+def validate_gripper_smoothing(info, cfg) -> None:
+    if (info.get(GRIPPER_ACTION_SEMANTICS_KEY) == GRIPPER_ACTION_SEMANTICS
+            and (cfg.get("action_smoothing") or {}).get("smooth_gripper", False)):
+        raise ValueError("Gripper smoothing is incompatible with command_target_width_v1")
+
+
 def generate_dataset_name(cfg):
     """
     Generate dataset name: [description]_[YYYYMMDD]_[vXX]

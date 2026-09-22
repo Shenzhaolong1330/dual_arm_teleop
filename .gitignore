@@ -29,3 +29,4 @@ calibration/*
 !calibration/charuco_calibration.py
 !calibration/hand_eye_calibration.py
 tests/transition.json
+reports/
