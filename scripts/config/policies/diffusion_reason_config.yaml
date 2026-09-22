@@ -9,8 +9,8 @@ pretrained_path: null # move to record_cfg_*.yaml
 device: cuda  # common: cuda | cpu. Validated by PreTrainedConfig/torch availability; cuda:N is normalized by policy_config_utils.
 use_amp: false  # inference autocast flag used by run_record/predict_action on CUDA.
 n_obs_steps: 4  # int > 0. Number of observation frames cached before diffusion sampling.
-horizon: 32  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
-n_action_steps: 12  # int > 0 and <= horizon - n_obs_steps + 1. Number of sampled actions queued/executed per denoising call.
+horizon: 16  # int > 0. Diffusion action trajectory length; must be divisible by 2 ** len(down_dims).
+n_action_steps: 4  # int > 0 and <= horizon - n_obs_steps + 1. Number of sampled actions queued/executed per denoising call.
 
 # =========================
 # Model / policy architecture
@@ -21,7 +21,7 @@ normalization_mapping:  # supported modes: MIN_MAX | MEAN_STD | IDENTITY | QUANT
   ACTION: MIN_MAX  # Used by postprocessor action unnormalization.
 
 vision_backbone: resnet18  # must start with "resnet"; passed to torchvision.models.<vision_backbone>.
-crop_shape: [160, 160]  # null or [H, W] with positive dims; must fit image features inferred from dataset metadata.
+crop_shape: [224, 224]  # null or [H, W] with positive dims; must fit image features inferred from dataset metadata.
 crop_is_random: false  # reason config should be false for deterministic deployment; eval path center crops.
 pretrained_backbone_weights: null  # options not enumerated in LeRobot; passed to torchvision backbone weights.
 use_group_norm: true  # Diffusion RGB encoder option; cannot be true with pretrained_backbone_weights set.

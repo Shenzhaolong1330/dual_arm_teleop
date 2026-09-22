@@ -1,26 +1,14 @@
 record:
-  repo_id: &repo_id "franka_dual_arm_test/fallen_tube_rack"
-  # repo_id: &repo_id "nero_task3_step1/2mL_empty_right"
+  repo_id: &repo_id "franka_dual_arm/B-CARE"
+  # repo_id: &repo_id "franka_dual_arm/insert_tube_rack_hard" # dataset repo name on HuggingFace
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
-  # <description>: https://github.com/wbcdcompetition/wbcd_tasks/tree/main/track-3-lab-experiments
-  #   step1:
-  #     2mL_empty: Seat a 2 mL vial into the 2 mL empty rack
-  #     2ml_filled: Seat a filled 2 mL vial into the 2 mL filled rack
-  #     8mL_empty: Seat an 8 mL vial into the 8 mL empty rack
-  #     8mL_filled: Seat a filled 8 mL vial into the 8 mL filled rack
-  #   step2 opc
-  #   step3:
-  #     remove_cap: Remove the cap from the source bottle
-  #     remove_tubing: Remove the tubing from the source bottle
-  #     insert_tubing: Insert the tubing into the target bottle
-  #     replace_cap: Replace the cap on the source bottle
+
 
   debug:
     robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
-  user_notes: "Dual-arm task: pick up a fallen test tube and place it into the test tube rack."
-  # user_notes:  # any additional notes about the dataset
+  user_notes: "Dual-arm task: pick up a test tube and place it into the test tube rack."
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_record" # run_record | run_policy | run_mix
+  run_mode: "run_policy" # run_record | run_policy | run_mix
 
   # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
@@ -39,14 +27,14 @@ record:
 
     # Franka:
     # For ACT:
-    type: "grasp_act"
-    config_path: scripts/config/policies/grasp_act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/grasp_act_fallen_tube_rack_75_20260625_merged/checkpoints/last/pretrained_model"
+    type: "act"
+    config_path: scripts/config/policies/act_reason_config.yaml
+    pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/act_insert_tube_0831/checkpoints/last/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"
     # config_path: scripts/config/policies/diffusion_reason_config.yaml
-    # pretrained_path: "/home/deepcybo/Le-nero/outputs/train/franka_dual_arm/diffusion_fallen_tube_rack_75_20260624_merged/checkpoints/last/pretrained_model"
+    # pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/diffusion_insert_tube_0831/checkpoints/last/pretrained_model"
 
     # Nero:
     # For ACT:
@@ -60,9 +48,8 @@ record:
     # Policy hyperparameters live in scripts/config/policies/*_reason_config.yaml.
 
   task:
-    # description: "pick up the bigger ring and toss on the stick, then pick up the smaller ring and toss on the stick" # task description
-    description: "use both arms to pick up a fallen test tube and place it into the test tube rack" # task description
-    num_episodes: 25 # number of episodes to record
+    description: "use both arms to pick up a test tube and place it into the test tube rack" # task description
+    num_episodes: 50 # number of episodes to record
     display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: # dataset to resume from if resume is true
@@ -80,16 +67,12 @@ record:
     push_to_hub: false # whether to push the dataset to your HuggingFace repo after recording
 
 replay:
-  dataset_name: franka_dual_arm/fallen_tube_rack_20260624_v02
-  # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
-  episode_idx: 22 # episode index to replay
-  # episode_idx: 15
+  dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
+  episode_idx: 24 # episode index to replay
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
   robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
-  dataset_name: franka_dual_arm/fallen_tube_rack_20260625_v06
-  # dataset_name: nero_task3_step1/2mL_empty_20260430_v01
-  episode_index: 0 # episode index to visualize
-  # episode_index: 15
+  dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
+  episode_index: 29 # episode index to visualize

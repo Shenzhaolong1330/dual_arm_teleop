@@ -48,3 +48,5 @@ cameras:
   head_cam_serial: "348522072761"
   width: 424
   height: 240
+  # width: 640
+  # height: 480
