@@ -1,0 +1,12 @@
+checkpoint: /user/users/szl/runs/primeu_native_20261012/diffusion_60d_smoke/checkpoints/000020/pretrained_model
+host: 127.0.0.1
+port: 5559
+device: cuda
+seed: 42
+dataset_root: /user/users/szl/dataset/primeu/demo_step1_grab_pipe_lerobot_v3
+repo_id: primeu/demo_step1_grab_pipe_lerobot_v3
+frame_indices:
+- 0
+- 200
+- 600
+report: /user/users/szl/runs/primeu_native_20261012/diffusion_replay.json

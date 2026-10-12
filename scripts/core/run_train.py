@@ -13,7 +13,7 @@ import time
 from contextlib import nullcontext
 from pathlib import Path
 from pprint import pformat
-from typing import Any, Dict
+from typing import Any, Callable, Dict
 
 import yaml
 
@@ -81,7 +81,9 @@ from lerobot.configs.default import DatasetConfig, EvalConfig, WandBConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
-from lerobot.datasets.utils import cycle
+from lerobot.datasets.utils import cycle, dataset_to_policy_features
+from lerobot.configs.types import FeatureType, PolicyFeature
+from lerobot.processor import ImageCropResizeProcessorStep, NormalizerProcessorStep
 from lerobot.envs.factory import make_env
 from lerobot.envs.utils import close_envs
 from lerobot.optim import OptimizerConfig
@@ -335,6 +337,14 @@ class TrainPipelineConfig(HubMixin):
             if key in dataset:
                 dataset_kwargs[key] = dataset[key]
         self.dataset: DatasetConfig = DatasetConfig(**dataset_kwargs)
+        # Stored with the checkpoint processor so inference uses the same resize.
+        resize = dataset.get("image_resize")
+        self.image_resize = tuple(resize) if resize is not None else None
+        if self.image_resize is not None and (
+            len(self.image_resize) != 2
+            or any(type(v) is not int or v <= 0 for v in self.image_resize)
+        ):
+            raise ValueError("dataset.image_resize must be [height, width] with positive integers")
 
         # self.env: envs.EnvConfig | None = envs.EnvConfig(
         #     env_name = env["env_name"],
@@ -664,7 +674,12 @@ def update_policy(
     return train_metrics, output_dict
 
 
-def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
+def run_train(
+    cfg: TrainPipelineConfig,
+    accelerator: Accelerator | None = None,
+    *,
+    checkpoint_callback: Callable[[Path], None] | None = None,
+):
     """
     Main function to train a policy.
 
@@ -679,6 +694,7 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     Args:
         cfg: A `TrainPipelineConfig` object containing all training configurations.
         accelerator: Optional Accelerator instance. If None, one will be created automatically.
+        checkpoint_callback: Optional main-process export hook, called before publishing last.
     """
     cfg.validate()
     device_state = setup_training_device(
@@ -760,6 +776,16 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info("Creating policy")
     _validate_local_pretrained_path(cfg.policy.pretrained_path)
+    if cfg.image_resize is not None:
+        features = dataset_to_policy_features(dataset.meta.features)
+        inputs = cfg.policy.input_features or {
+            k: v for k, v in features.items() if v.type != FeatureType.ACTION
+        }
+        cfg.policy.input_features = {
+            k: PolicyFeature(type=v.type, shape=(v.shape[0], *cfg.image_resize))
+            if v.type == FeatureType.VISUAL else v
+            for k, v in inputs.items()
+        }
     policy = make_policy(
         cfg=cfg.policy,
         ds_meta=dataset.meta,
@@ -798,6 +824,16 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         **processor_kwargs,
         **postprocessor_kwargs,
     )
+    if cfg.image_resize is not None:
+        resize_steps = [s for s in preprocessor.steps if isinstance(s, ImageCropResizeProcessorStep)]
+        if resize_steps:
+            if len(resize_steps) != 1 or tuple(resize_steps[0].resize_size or ()) != cfg.image_resize:
+                raise ValueError("dataset.image_resize differs from the checkpoint processor")
+        elif cfg.policy.pretrained_path is not None:
+            raise ValueError("Checkpoint has no saved resize; do not silently change its preprocessing")
+        else:
+            position = next(i for i, s in enumerate(preprocessor.steps) if isinstance(s, NormalizerProcessorStep))
+            preprocessor.steps.insert(position, ImageCropResizeProcessorStep(resize_size=cfg.image_resize))
 
     if is_main_process:
         logging.info("Creating optimizer and scheduler")
@@ -981,6 +1017,8 @@ def run_train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     preprocessor=preprocessor,
                     postprocessor=postprocessor,
                 )
+                if checkpoint_callback is not None:
+                    checkpoint_callback(checkpoint_dir / "pretrained_model")
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)

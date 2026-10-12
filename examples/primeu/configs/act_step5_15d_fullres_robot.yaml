@@ -1,0 +1,21 @@
+# Pair with the Step5 full-resolution ACT service; no ROS action runs on load.
+server:
+  host: 127.0.0.1
+  port: 5559
+  timeout_s: 10
+  expected_model_family: act
+  expected_model_action_dim: 15
+  expected_horizon: 60
+  expected_basis_sha256:
+    left: db4033fe056dae0c8543bd0331435fe73be654957f66359be02cd66b8cca7577
+  expected_image_sizes:
+    head: [720, 1280]
+    left_wrist: [480, 640]
+    right_wrist: [480, 640]
+runtime:
+  workspace: /home/owen/prime_ros2
+  setup_file: install/setup.bash
+  ros_setup_file: null
+  node: /primeu_vla_runtime
+  task_description: Dispense the liquid from the pipette into the Petri dish.
+  service_timeout_s: 10

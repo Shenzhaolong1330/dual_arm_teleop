@@ -1,0 +1,45 @@
+train:
+  batch_size: 2
+  dataset:
+    repo_id: primeu/demo_step1_grab_pipe_lerobot_v3
+    root: /user/users/szl/dataset/primeu/demo_step1_grab_pipe_lerobot_v3
+    video_backend: torchcodec
+    use_imagenet_stats: true
+    skip_bad_video_samples: false
+    image_resize:
+    - 256
+    - 256
+  env: null
+  eval:
+    batch_size: 8
+    n_episodes: 10
+  eval_freq: 0
+  job_name: primeu_diffusion_60d_smoke
+  log_freq: 1
+  num_workers: 0
+  output_dir: /user/users/szl/runs/primeu_native_20261012/diffusion_60d_smoke
+  policy:
+    type: diffusion
+    config_path: policies/diffusion.yaml
+  resume: false
+  save_checkpoint: true
+  save_freq: 20
+  seed: 42
+  steps: 20
+  training:
+    device: cuda
+    gpu:
+      enabled: true
+      visible_devices: '0'
+      max_num_gpus: 1
+      memory_fraction: null
+      allow_tf32: true
+      cudnn_benchmark: false
+      log_gpu_info: true
+      fail_if_cuda_unavailable: true
+  use_policy_training_preset: true
+  wandb:
+    disable_artifact: true
+    enable: false
+    mode: disabled
+    project: primeu-lerobot

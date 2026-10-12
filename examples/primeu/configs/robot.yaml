@@ -1,0 +1,18 @@
+server:
+  host: 127.0.0.1
+  port: 5559
+  timeout_s: 10
+  expected_model_family: act
+  expected_model_action_dim: 60
+  expected_horizon: 60
+  expected_basis_sha256: {}
+  expected_image_size:
+  - 256
+  - 256
+runtime:
+  workspace: /home/owen/prime_ros2
+  setup_file: install/setup.bash
+  ros_setup_file: null
+  node: /primeu_vla_runtime
+  task_description: Pick up the pipette with your right hand.
+  service_timeout_s: 10

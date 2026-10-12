@@ -1,0 +1,3 @@
+source: /user/datasets/primeu_data/demo_step1_grab_pipe_left8_right5_nonlinear
+output: /user/users/szl/dataset/primeu/demo_step1_grab_pipe_left8_right5_nonlinear_lerobot_v3
+video_source_root: /user/datasets/primeu_data/demo_step1_grab_pipe

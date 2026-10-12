@@ -1,0 +1,6 @@
+# Use after checkpoint 050000 has been saved; training completion is not implied.
+checkpoint: /user/users/szl/runs/primeu_act/step5_left8_15d_fullres_b32_50k/checkpoints/050000/pretrained_model
+host: 127.0.0.1
+port: 5559
+device: cuda
+seed: 42

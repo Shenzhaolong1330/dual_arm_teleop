@@ -1,0 +1,5 @@
+checkpoint: /user/users/szl/runs/primeu_native_20261012/act_60d_smoke/checkpoints/000020/pretrained_model
+host: 127.0.0.1
+port: 5559
+device: cuda
+seed: 42

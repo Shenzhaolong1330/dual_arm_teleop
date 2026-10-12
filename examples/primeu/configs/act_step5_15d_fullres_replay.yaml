@@ -1,0 +1,14 @@
+# Use after checkpoint 050000 has been saved. Replay never initializes a robot.
+checkpoint: /user/users/szl/runs/primeu_act/step5_left8_15d_fullres_b32_50k/checkpoints/050000/pretrained_model
+host: 127.0.0.1
+port: 5559
+device: cuda
+seed: 42
+mode: compare
+dataset_root: /user/users/szl/dataset/primeu/demo_step5_release_liquid_1010_left8_15d_lerobot_v3
+repo_id: primeu/demo_step5_release_liquid_1010_left8_15d_lerobot_v3
+frame_indices:
+- 0
+- 200
+- 600
+report: /user/users/szl/runs/primeu_act/step5_left8_15d_fullres_b32_50k/replay_050000.json

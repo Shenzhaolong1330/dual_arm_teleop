@@ -8,6 +8,8 @@ setup(
     packages=find_packages(
         where=".",
         include=[
+            "examples",
+            "examples.primeu*",
             "scripts*",
             "scripts.*",
             "robots*",

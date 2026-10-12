@@ -29,3 +29,19 @@ calibration/*
 !calibration/charuco_calibration.py
 !calibration/hand_eye_calibration.py
 tests/transition.json
+
+# Local training artifacts and credentials
+.env
+.env.*
+!.env.example
+wandb/
+checkpoints/
+deployment_records/
+/runs/
+/datasets/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+.pytest_cache/
+.ruff_cache/

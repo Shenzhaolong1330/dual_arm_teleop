@@ -1,0 +1,44 @@
+train:
+  batch_size: 32
+  dataset:
+    repo_id: primeu/demo_step5_release_liquid_1010_left8_15d_lerobot_v3
+    root: /user/users/szl/dataset/primeu/demo_step5_release_liquid_1010_left8_15d_lerobot_v3
+    video_backend: torchcodec
+    use_imagenet_stats: true
+    skip_bad_video_samples: false
+    image_resize: null
+  env: null
+  eval:
+    batch_size: 8
+    n_episodes: 10
+  eval_freq: 0
+  job_name: primeu_act_step5_left8_15d_fullres_b32_50k
+  log_freq: 100
+  num_workers: 8
+  output_dir: /user/users/szl/runs/primeu_act/step5_left8_15d_fullres_b32_50k
+  policy:
+    type: act
+    config_path: policies/act.yaml
+  resume: false
+  save_checkpoint: true
+  save_freq: 10000
+  seed: 42
+  steps: 50000
+  training:
+    device: cuda
+    gpu:
+      enabled: true
+      visible_devices: '0'
+      max_num_gpus: 1
+      memory_fraction: null
+      allow_tf32: true
+      cudnn_benchmark: false
+      log_gpu_info: true
+      fail_if_cuda_unavailable: true
+  use_policy_training_preset: true
+  wandb:
+    disable_artifact: true
+    enable: false
+    mode: disabled
+    project: primeu-lerobot
+    entity: shenzhaolong1330-beihang-university

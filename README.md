@@ -10,6 +10,8 @@ The current registry supports these robot adapters: Dobot dual arm, AgileX Nero 
 
 ## Repository Setup and Environment
 
+PRIMEU 数据的开发机 Conda 环境、ACT/Diffusion 配置及验证方法见 [PRIMEU 训练与部署](examples/primeu/README.md)。
+
 For a first-time clone:
 
 ```bash
