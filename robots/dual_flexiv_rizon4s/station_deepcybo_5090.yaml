@@ -1,0 +1,137 @@
+# Common station world: origin between bases, +Y left, +Z up; base spacing 0.32 m.
+# T_world_base uses [x,y,z,qw,qx,qy,qz]. Rotation inverts the existing action mount_yaw.
+teleop:
+  control_mode: oculus
+  dual_arm: true
+  oculus_config:
+    ip: null
+    use_gripper: true
+    left_pose_scaler:
+    - 1.0
+    - 1.0
+    left_channel_signs:
+    - -1
+    - 1
+    - 1
+    - 1
+    - -1
+    - 1
+    right_pose_scaler:
+    - 1.0
+    - 1.0
+    right_channel_signs:
+    - 1
+    - -1
+    - 1
+    - -1
+    - 1
+    - 1
+    position_axis_order:
+    - 1
+    - 0
+    - 2
+    rotation_axis_order:
+    - 1
+    - 0
+    - 2
+    action_smoothing_method: one_euro
+    action_smoothing_alpha: 0.25
+    action_smoothing_freq: 30.0
+    action_smoothing_min_cutoff: 0.8
+    action_smoothing_beta: 0.25
+    action_smoothing_d_cutoff: 1.0
+    action_missing_hold_frames: 2
+    action_missing_decay: 0.5
+    action_deadband_translation: 0.0002
+    action_deadband_rotation: 0.003
+    action_spike_translation: 0.05
+    action_spike_rotation: 0.1
+    gripper_trigger_deadzone: 0.0
+    gripper_trigger_gamma: 0.7
+    mirror_teleop: true
+    visualize_placo: false
+robot:
+  left_robot_sn: Rizon4s-063173
+  right_robot_sn: Rizon4s-063278
+  use_gripper: true
+  left_gripper_name: Flexiv-GN01
+  right_gripper_name: Flexiv-GN01
+  left_tool_name: Flexiv-GN01-rs
+  right_tool_name: Flexiv-GN01-rs
+  switch_tool_on_connect: true
+  initialize_gripper_on_connect: false
+  gripper_min_width: 0.0
+  gripper_max_open: 0.1
+  gripper_speed: 0.2
+  gripper_force: 10.0
+  gripper_command_epsilon: 0.0005
+  gripper_init_timeout_sec: 10.0
+  gripper_init_settle_sec: 0.5
+  action_debug: false
+  action_debug_every_n: 30
+  send_arms_parallel: true
+  use_cartesian_servo_thread: true
+  cartesian_servo_hz: 200.0
+  cartesian_servo_alpha: 0.25
+  gripper_reverse: false
+  close_threshold: 0.5
+  enable_on_connect: true
+  clear_fault_on_connect: true
+  switch_cartesian_mode_on_connect: true
+  go_home_on_connect: false
+  reset_go_home: false
+  home_plan_name: PLAN-Home
+  left_home_joints:
+  - -0.17
+  - -0.89
+  - 0.13
+  - 1.5
+  - 0.85
+  - 0.56
+  - -0.71
+  right_home_joints:
+  - 0.27
+  - -0.91
+  - 0.06
+  - 1.82
+  - -1.04
+  - 0.56
+  - 1.17
+  home_joint_max_vel: 0.5
+  home_joint_max_acc: 2.0
+  home_joint_tolerance: 0.01
+  home_joint_timeout_sec: 20.0
+  zero_ft_sensor_on_connect: false
+  max_cartesian_delta: 0.02
+  max_rotation_delta: 0.04
+  cartesian_max_linear_vel: 0.8
+  cartesian_max_angular_vel: 1.2
+  cartesian_max_linear_acc: 3.0
+  cartesian_max_angular_acc: 6.0
+  left_mount_yaw_deg: 45.0
+  right_mount_yaw_deg: -45.0
+  camera_read_timeout_ms: 2000
+  camera_warmup_attempts: 10
+  observation_pose_frame: world
+  left_base_pose_in_world:
+  - 0.0
+  - 0.16
+  - 0.0
+  - 0.9238795325112867
+  - 0.0
+  - 0.0
+  - -0.3826834323650898
+  right_base_pose_in_world:
+  - 0.0
+  - -0.16
+  - 0.0
+  - 0.9238795325112867
+  - 0.0
+  - 0.0
+  - 0.3826834323650898
+cameras:
+  left_wrist_cam_serial: '347622072061'
+  right_wrist_cam_serial: '347622074732'
+  head_cam_serial: '344522070241'
+  width: 424
+  height: 240

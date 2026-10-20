@@ -23,6 +23,7 @@ from robots.dual_arm_schema import (
     width_from_normalized_command,
 )
 from .config_flexiv import FlexivDualArmConfig
+from .pose_frames import BaseToWorldTransform
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,19 @@ class FlexivDualArm(Robot):
     def __init__(self, config: FlexivDualArmConfig):
         super().__init__(config)
         self.config = config
+        if config.observation_pose_frame not in {"base", "world"}:
+            raise ValueError("observation_pose_frame must be 'base' or 'world'.")
+        self._observation_transforms: dict[str, BaseToWorldTransform] = {}
+        if config.observation_pose_frame == "world":
+            for side in ("left", "right"):
+                field_name = f"{side}_base_pose_in_world"
+                extrinsic = getattr(config, field_name)
+                if extrinsic is None:
+                    raise ValueError(
+                        f"{field_name} is required for observation_pose_frame='world'. "
+                        "Provide T_world_base as [x, y, z, qw, qx, qy, qz]."
+                    )
+                self._observation_transforms[side] = BaseToWorldTransform(extrinsic, name=field_name)
         self.cameras = make_cameras_from_configs(config.cameras)
         self._is_connected = False
         self._flexivrdk = None
@@ -1131,92 +1145,41 @@ class FlexivDualArm(Robot):
         targets: dict[str, tuple[Any, float, float, float]],
     ) -> None:
         timeout_sec = max(0.0, float(self.config.gripper_init_timeout_sec))
-        retry_interval_sec = max(1.0, float(self.config.gripper_init_settle_sec))
         tolerance = max(
             GRIPPER_WAIT_TOLERANCE_FLOOR,
             float(self.config.gripper_command_epsilon),
         )
-        settle_sec = max(0.0, float(self.config.gripper_init_settle_sec))
         deadline = None if timeout_sec <= 0.0 else time.monotonic() + timeout_sec
-        next_log_time = {side: time.monotonic() + 1.0 for side in targets}
-        next_retry_time = {side: time.monotonic() + retry_interval_sec for side in targets}
         last_widths: dict[str, float | None] = {side: None for side in targets}
-        stable_since: dict[str, float | None] = {side: None for side in targets}
         reached: set[str] = set()
 
         logger.info(
-            "[FLEXIV] Waiting for gripper home sides=%s timeout=%.1fs tolerance=%.4f settle=%.1fs",
+            "[FLEXIV] Waiting for gripper home sides=%s timeout=%.1fs tolerance=%.4f",
             ",".join(targets),
             timeout_sec,
             tolerance,
-            settle_sec,
         )
         while len(reached) < len(targets):
             now = time.monotonic()
-            for side, (gripper, target_width, velocity, force_limit) in targets.items():
+            for side, (gripper, target_width, _velocity, _force_limit) in targets.items():
                 if side in reached:
                     continue
 
-                width, is_moving, force = self._read_gripper_state(gripper)
+                width, is_moving, _force = self._read_gripper_state(gripper)
                 if width is not None:
                     last_widths[side] = width
-                    near_target = abs(width - target_width) <= tolerance
-                    settled = near_target and is_moving is False
-                    if settled:
-                        if stable_since[side] is None:
-                            stable_since[side] = now
-                        if now - stable_since[side] >= settle_sec:
-                            logger.info(
-                                "[FLEXIV] %s gripper settled at width=%.4f target=%.4f moving=%s",
-                                side,
-                                width,
-                                target_width,
-                                is_moving,
-                            )
-                            self._set_cached_gripper_width(side, width)
-                            reached.add(side)
-                            continue
-                    else:
-                        stable_since[side] = None
-
-                    if near_target and is_moving is not False and now >= next_log_time[side]:
+                    if abs(width - target_width) <= tolerance and is_moving is False:
                         logger.info(
-                            "[FLEXIV] %s gripper width near target but still moving width=%.4f target=%.4f moving=%s",
+                            "[FLEXIV] %s gripper reached width=%.4f target=%.4f",
                             side,
                             width,
                             target_width,
-                            is_moving,
                         )
-                        next_log_time[side] = now + 1.0
+                        self._set_cached_gripper_width(side, width)
+                        reached.add(side)
 
-                if (
-                    is_moving is False
-                    and width is not None
-                    and abs(width - target_width) > tolerance
-                    and now >= next_retry_time[side]
-                ):
-                    logger.warning(
-                        "[FLEXIV] %s gripper stopped before home; retry Move "
-                        "target=%.4f width=%.4f force=%s",
-                        side,
-                        target_width,
-                        width,
-                        "unknown" if force is None else f"{force:.2f}",
-                    )
-                    gripper.Move(target_width, velocity, force_limit)
-                    next_retry_time[side] = now + retry_interval_sec
-
-                if now >= next_log_time[side]:
-                    logger.info(
-                        "[FLEXIV] waiting for %s gripper home target=%.4f width=%s moving=%s force=%s",
-                        side,
-                        target_width,
-                        "unknown" if width is None else f"{width:.4f}",
-                        is_moving,
-                        "unknown" if force is None else f"{force:.2f}",
-                    )
-                    next_log_time[side] = now + 1.0
-
+            if len(reached) == len(targets):
+                return
             if deadline is not None and now >= deadline:
                 break
 
@@ -1283,13 +1246,17 @@ class FlexivDualArm(Robot):
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
         if np.linalg.norm(pose7[3:7]) < 1e-12:
             pose7[3] = 1.0
-        pose6 = _pose7_to_pose6(pose7)
 
+        # Motion/servo targets must stay in the RDK base frame. Transform only
+        # the public observation, after caching the unmodified SDK pose.
         if side == "left":
             self._cached_left_pose7 = pose7.copy()
         else:
             self._cached_right_pose7 = pose7.copy()
 
+        transform = self._observation_transforms.get(side)
+        observed_pose7 = transform.apply(pose7) if transform is not None else pose7
+        pose6 = _pose7_to_pose6(observed_pose7)
         for index, axis in enumerate(AXES):
             obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
 

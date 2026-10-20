@@ -1,0 +1,49 @@
+Flexiv common-world TCP observations
+
+observation_pose_frame: base (default) keeps the original RDK observations.
+observation_pose_frame: world applies explicit left/right base poses to the
+public left_ee_pose.* and right_ee_pose.* observations before dataset packing.
+Positions remain in metres; rx/ry/rz remain rotation-vector components in radians.
+
+Each base pose is T_world_base, encoded [x, y, z, qw, qx, qy, qz]. Both translation
+and orientation are transformed: T_world_tcp = T_world_base * T_base_tcp.
+The internal RDK pose caches and Cartesian servo targets remain in base frames.
+The existing action mappings and the common multi-robot dataset schema are preserved.
+
+deepcybo-5090 station convention (operator dimensions, 2026-10-20):
+  Base centres are 0.32 m apart at the same height, 0.16 m on each side of origin.
+  Origin: midpoint of the two base centres, at base height.
+  +Y: toward the left base; +Z: up; +X: Y cross Z (right-handed).
+  Left base position:  [0, +0.16, 0] m.
+  Right base position: [0, -0.16, 0] m.
+  Existing mount_yaw maps common action increments into RDK base coordinates.
+  Its inverse maps observations from base to world: left -45 deg, right +45 deg.
+  These are installation-based extrinsics, not a new precision calibration.
+
+station_deepcybo_5090.yaml contains the recording hardware configuration;
+station_deepcybo_5090_readonly.yaml disables robot enabling, homing and servo control.
+The workstation entry points use these repository configs through their existing paths.
+Other installations must set their own measured base poses before enabling world mode.
+Missing or invalid extrinsics fail before connecting hardware.
+
+Previously recorded base-frame datasets are unchanged. They must be converted
+explicitly before combining with newly collected common-world observations.
+
+Hardware-free verification from the dual_arm_teleop repository root:
+  python -m unittest discover -s robots/dual_flexiv_rizon4s/tests -p 'test_*.py' -v
+
+Manual reset entry (reset_station.py):
+  python -m robots.dual_flexiv_rizon4s.reset_station --dry-run
+  The existing workstation robot-reset launcher points to this branch's entry.
+  Home velocity is 0.5 rad/s: 50% of the original 1.0 rad/s.
+  Original acceleration 2.0 rad/s^2 and original 20-second home timeout are restored.
+  There is no automatic homing when connecting during ordinary recording.
+  Explicit reset enables GN01 initialization before sending the opening command;
+  the recording connect configuration and read-only diagnostics keep Init disabled.
+  Gripper home sends Move once and finishes when measured width is reached and
+  motion stops. It does not repeatedly resend Move or add a post-arrival settle delay.
+  The existing 10-second gripper timeout is retained to detect actual failures.
+  GN01 hardware initialization itself took about 7.2 seconds in the physical test;
+  subsequent opening/closing each took about one second at the configured speed.
+  Both empty grippers completed open-close-open and were left open, without any
+  arm trajectory commands. Results: flexiv-local/logs/gripper-reset-fix-probe.json.

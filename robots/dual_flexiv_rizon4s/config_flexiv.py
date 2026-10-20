@@ -76,6 +76,16 @@ class FlexivDualArmConfig(RobotConfig):
     left_mount_yaw_deg: float = 0.0
     right_mount_yaw_deg: float = 0.0
 
+    # Public TCP observations can use a common station world frame. Keep "base"
+    # as the default for existing setups and datasets. Explicit extrinsics are
+    # required for both arms when selecting "world"; no spacing is assumed.
+    observation_pose_frame: str = "base"  # base | world
+    # T_world_base: [x, y, z, qw, qx, qy, qz], metres / quaternion (RDK order).
+    # Existing mount_yaw maps action increments WORLD -> BASE, so its inverse
+    # gives BASE -> WORLD when defining a world aligned with the action frame.
+    left_base_pose_in_world: list[float] | None = None
+    right_base_pose_in_world: list[float] | None = None
+
     num_joints_per_arm: int = 7
     cameras: dict[str, CameraConfig] = field(default_factory=dict)
     camera_read_timeout_ms: int = 1000
