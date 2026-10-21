@@ -29,7 +29,7 @@ record:
     # For ACT:
     type: "act"
     config_path: scripts/config/policies/act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/act_insert_tube_0831/checkpoints/last/pretrained_model"
+    pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/act_insert_tube_0828/checkpoints/last/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"
@@ -68,11 +68,11 @@ record:
 
 replay:
   dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
-  episode_idx: 24 # episode index to replay
+  episode_idx: 1734 # episode index to replay
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
   robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
 
 visualize:
   dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
-  episode_index: 29 # episode index to visualize
+  episode_index: 1734 # episode index to visualize
