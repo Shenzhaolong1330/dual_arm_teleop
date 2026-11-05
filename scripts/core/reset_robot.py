@@ -8,6 +8,9 @@ from robots import (
     create_robot,
 )
 import logging
+from scripts.core.robot_selection import (
+    ROBOT_DETAIL_CONFIG_FILES, ROBOT_CONFIG_DIR, add_selection_arguments, load_selected_robot,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -18,17 +21,6 @@ def _default_scripts_dir() -> Path:
 
 def _default_record_cfg_path() -> Path:
     return _default_scripts_dir() / "config" / "record_cfg.yaml"
-
-
-ROBOT_DETAIL_CONFIG_FILES = {
-    "dobot_dual_arm": "dobot_config.yaml",
-    "franka": "franka_config.yaml",
-    "franka_dual_arm": "franka_config.yaml",
-    "nero_dual_arm": "nero_cofig.yaml",
-    "arx_dual_arm": "arx_config.yaml",
-    "flexiv_dual_arm": "flexiv_config.yaml",
-}
-ROBOT_CONFIG_DIR = Path("config") / "robots"
 
 
 def _apply_reset_runtime_overrides(robot_type: str, robot_cfg: Dict[str, Any]) -> None:
@@ -91,6 +83,7 @@ def _load_record_cfg_yaml(cfg_path: Path) -> Dict[str, Any]:
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Reset a configured robot to its home position.")
+    add_selection_arguments(parser)
     parser.add_argument(
         "--config",
         "--config-path",
@@ -100,11 +93,10 @@ def main(argv: list[str] | None = None):
         help="Path to record_cfg.yaml.",
     )
     args = parser.parse_args(argv)
-    cfg = _load_record_cfg_yaml(args.config_path)
-
-    record_cfg = cfg["record"]
-    robot_type = record_cfg.get("robot_type", "dobot_dual_arm")
-    robot_cfg = dict(record_cfg.get("robot") or _load_robot_cfg_from_das(robot_type))
+    robot_type, robot_cfg = load_selected_robot(
+        args.config_path, robot_type=args.robot_type, station_path=args.station_config,
+        use_station=not args.no_station_config,
+    )
     robot_cfg["debug"] = False
     _apply_reset_runtime_overrides(robot_type, robot_cfg)
 

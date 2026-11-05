@@ -22,6 +22,9 @@ class FlexivDualArmConfig(RobotConfig):
 
     left_robot_sn: str = ""
     right_robot_sn: str = ""
+    # RDK expects local interface IPv4 addresses, not device names or robot IPs.
+    network_interface_whitelist: list[str] = field(default_factory=list)
+    enable_timeout_sec: float = 30.0
 
     control_mode: str = "oculus"
     debug: bool = True
@@ -33,12 +36,20 @@ class FlexivDualArmConfig(RobotConfig):
     right_tool_name: str = ""
     switch_tool_on_connect: bool = True
     initialize_gripper_on_connect: bool = False
+    gripper_init_strategy: str = "always"  # always | if_needed
+    gripper_ready_timeout_sec: float = 2.0
     gripper_min_width: float = 0.0
     gripper_reverse: bool = False
     close_threshold: float = 0.5
     gripper_max_open: float = 0.085
     gripper_force: float = 10.0
     gripper_speed: float = 0.2
+    gripper_control_mode: str = "move"  # move | force_feedback (GN01)
+    gripper_feedback_force_limit: float = 5.0  # intermediate apertures only
+    gripper_feedback_timeout_sec: float = 0.25
+    # These two settings apply only to the legacy Move path.
+    gripper_min_command_interval_sec: float = 0.0
+    gripper_continuous_speed: float | None = None
     gripper_command_epsilon: float = 0.0005
     gripper_init_timeout_sec: float = 30.0
     gripper_init_settle_sec: float = 0.5
@@ -65,6 +76,8 @@ class FlexivDualArmConfig(RobotConfig):
     home_joint_max_acc: float = 2.0
     home_joint_tolerance: float = 0.01
     home_joint_timeout_sec: float = 20.0
+    # Explicit zeroing outside Cartesian mode. Entering Cartesian motion-force
+    # mode always requires zeroing after tool setup, regardless of this flag.
     zero_ft_sensor_on_connect: bool = False
 
     max_cartesian_delta: float | None = 0.03

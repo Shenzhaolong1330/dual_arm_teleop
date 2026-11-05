@@ -4,17 +4,11 @@ teleop:
   control_mode: "oculus"
   dual_arm: true
   oculus_config:
+    processing_profile: cross_embodiment_v1
     ip:
     use_gripper: true
-    action_smoothing_alpha: 0.65
-    left_pose_scaler: [0.5, 0.65]
     left_channel_signs: [1, 1, 1, -1, -1, 1]
-    right_pose_scaler: [0.5, 0.65]
     right_channel_signs: [1, 1, 1, -1, -1, 1]
-    action_deadband_translation: 0.0003  # meters per frame; keep fine teleop motion responsive
-    action_deadband_rotation: 0.0005      # radians per frame; keep fine teleop rotation responsive
-    action_spike_translation: 0.1       # meters per frame; ignore tracking jumps
-    action_spike_rotation: 0.2          # radians per frame; ignore tracking jumps before Franka clipping
     # Operator stands opposite the robot: right controller drives left arm.
     mirror_teleop: true
     visualize_placo: false
@@ -24,6 +18,7 @@ robot:
   robot_port: 4242
   rpc_timeout_sec: 30.0
   schema_mode: "x_embodiment"
+  observation_pose_frame: world # already supplied by the RPC server
   use_gripper: true
   close_threshold: 0.7
   gripper_reverse: false

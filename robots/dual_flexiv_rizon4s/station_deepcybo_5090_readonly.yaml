@@ -4,11 +4,9 @@ teleop:
   control_mode: oculus
   dual_arm: true
   oculus_config:
+    processing_profile: cross_embodiment_v1
     ip: null
     use_gripper: true
-    left_pose_scaler:
-    - 1.0
-    - 1.0
     left_channel_signs:
     - -1
     - 1
@@ -16,9 +14,6 @@ teleop:
     - 1
     - -1
     - 1
-    right_pose_scaler:
-    - 1.0
-    - 1.0
     right_channel_signs:
     - 1
     - -1
@@ -34,25 +29,14 @@ teleop:
     - 1
     - 0
     - 2
-    action_smoothing_method: one_euro
-    action_smoothing_alpha: 0.25
-    action_smoothing_freq: 30.0
-    action_smoothing_min_cutoff: 0.8
-    action_smoothing_beta: 0.25
-    action_smoothing_d_cutoff: 1.0
-    action_missing_hold_frames: 2
-    action_missing_decay: 0.5
-    action_deadband_translation: 0.0002
-    action_deadband_rotation: 0.003
-    action_spike_translation: 0.05
-    action_spike_rotation: 0.1
-    gripper_trigger_deadzone: 0.0
-    gripper_trigger_gamma: 0.7
     mirror_teleop: true
     visualize_placo: false
 robot:
   left_robot_sn: Rizon4s-063173
   right_robot_sn: Rizon4s-063278
+  network_interface_whitelist:
+  - 192.168.2.200
+  enable_timeout_sec: 30.0
   use_gripper: true
   left_gripper_name: Flexiv-GN01
   right_gripper_name: Flexiv-GN01
@@ -108,8 +92,8 @@ robot:
   cartesian_max_angular_vel: 1.2
   cartesian_max_linear_acc: 3.0
   cartesian_max_angular_acc: 6.0
-  left_mount_yaw_deg: 45.0
-  right_mount_yaw_deg: -45.0
+  left_mount_yaw_deg: 0.0
+  right_mount_yaw_deg: 0.0
   camera_read_timeout_ms: 2000
   camera_warmup_attempts: 10
   open_grippers_on_connect: false
@@ -120,18 +104,18 @@ robot:
   - 0.0
   - 0.16
   - 0.0
-  - 0.9238795325112867
+  - 1.0
   - 0.0
   - 0.0
-  - -0.3826834323650898
+  - 0.0
   right_base_pose_in_world:
   - 0.0
   - -0.16
   - 0.0
-  - 0.9238795325112867
+  - 1.0
   - 0.0
   - 0.0
-  - 0.3826834323650898
+  - 0.0
 cameras:
   left_wrist_cam_serial: '347622072061'
   right_wrist_cam_serial: '347622074732'

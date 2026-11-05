@@ -25,6 +25,7 @@ from robots.dual_franka.franka_dual_arm import FrankaDualArm
 from robots.dual_arm_schema import action_feature_names, observation_state_feature_names
 from scripts.core import run_record as recording
 from robots.dual_arm_schema import (
+    ACTION_SEMANTICS, ACTION_SEMANTICS_KEY,
     GRIPPER_ACTION_SEMANTICS, GRIPPER_ACTION_SEMANTICS_KEY,
     validate_recording_semantics, width_from_normalized_command,
 )
@@ -36,6 +37,7 @@ from scripts.tools import merge_lerobot_datasets as merging
 from scripts.tools import preprocess_dataset as cleaning
 
 from teleoperators.oculus_teleoperator.config_oculus_teleop import OculusTeleopConfig
+from teleoperators.oculus_teleoperator.processing_profiles import CROSS_EMBODIMENT_PROFILE
 from teleoperators.oculus_teleoperator.oculus_teleop import OculusTeleop
 
 
@@ -400,6 +402,8 @@ class RecordingCommandTargetTests(unittest.TestCase):
                                   robot_type="mock", use_videos=False)
         if marked:
             ds.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = GRIPPER_ACTION_SEMANTICS
+            ds.meta.info[ACTION_SEMANTICS_KEY] = ACTION_SEMANTICS
+            ds.meta.info["quest_processing"] = OculusTeleopConfig(processing_profile=CROSS_EMBODIMENT_PROFILE).processing_metadata()
             write_info(ds.meta.info, ds.root)
         return ds
 
@@ -454,11 +458,11 @@ class RecordingCommandTargetTests(unittest.TestCase):
                     np.testing.assert_allclose(row["action"][-2:], [0.0, 0.06])
                     np.testing.assert_allclose(row["observation.state"][-2:], [0.015, 0.025])
                     if mode == "mixed":
-                        np.testing.assert_array_equal(row["action"][-2:], row["sent_action"][-2:])
+                        np.testing.assert_array_equal(row["action"], row["sent_action"])
                         self.assertAlmostEqual(float(row["policy_action"][-1]), 0.07)
                         self.assertAlmostEqual(float(row["expert_action"][-1]), 0.07)
                     else:
-                        self.assertAlmostEqual(float(row["action"][0]), 0.123)
+                        self.assertAlmostEqual(float(row["action"][0]), 0.0)
 
     def test_missing_or_nonfinite_return_aborts_without_recording(self):
         for returned in ({}, {"left_gripper_width": float("nan"), "right_gripper_width": 0.05}):
@@ -512,13 +516,13 @@ class RecordingCommandTargetTests(unittest.TestCase):
                 teleop = Mock()
                 teleop.get_action.side_effect = sequence
                 cfg = SimpleNamespace(
-                    dataset_name=mode, dataset_root=root, run_mode=mode, fps=10,
+                    dataset_name=mode, dataset_root=root, run_mode=mode, fps=30,
                     left_wrist_cam_serial="fake", right_wrist_cam_serial="fake", head_cam_serial="fake",
                     cam_width=64, cam_height=64, robot_ip="none", robot_port=0,
                     debug=True, use_gripper=True, gripper_max_open=0.085, gripper_force=10,
                     gripper_speed=0.1, close_threshold=0.5, gripper_reverse=False,
                     control_mode="oculus", robot_extra_config={}, robot_type="mock", resume=False,
-                    create_teleop_config=lambda: None, save_meta_period=1, display=False,
+                    create_teleop_config=lambda: OculusTeleopConfig(processing_profile=CROSS_EMBODIMENT_PROFILE), save_meta_period=1, display=False,
                     num_episodes=2, episode_time_sec=10, reset_time_sec=10, task_description="test",
                     reset_on_finish=True, disconnect_on_finish=True, push_to_hub=False,
                     success_policy=recording.SUCCESS_POLICY_RECORDED_IS_SUCCESS,
@@ -558,6 +562,7 @@ class RecordingCommandTargetTests(unittest.TestCase):
                 self.assertEqual(loaded.num_episodes, 2)
                 self.assertEqual(len(loaded), 2)
                 self.assertEqual(loaded.meta.info[GRIPPER_ACTION_SEMANTICS_KEY], GRIPPER_ACTION_SEMANTICS)
+                self.assertEqual(loaded.meta.info["quest_processing"]["profile"], CROSS_EMBODIMENT_PROFILE)
                 for row in loaded:
                     if mode == recording.RUN_MODE_MIX:
                         self.assertFalse(bool(row["success"]))
@@ -614,7 +619,8 @@ class RecordingCommandTargetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Cannot resume"):
             validate_recording_semantics(old.meta.info, old.features)
         self.assertEqual((old.root / "meta/info.json").read_bytes(), before)
-        validate_recording_semantics({GRIPPER_ACTION_SEMANTICS_KEY: GRIPPER_ACTION_SEMANTICS}, self.features)
+        validate_recording_semantics({GRIPPER_ACTION_SEMANTICS_KEY: GRIPPER_ACTION_SEMANTICS,
+                                      ACTION_SEMANTICS_KEY: ACTION_SEMANTICS}, self.features)
 
     def test_both_merge_modes_reject_before_overwrite_or_create(self):
         self.fill(self.dataset("new"))
@@ -676,13 +682,15 @@ class RecordingCommandTargetTests(unittest.TestCase):
         cfg = {"source": {"repo_id": "source", "root": str(source.root)},
                "output": {"repo_id": "clean", "root": str(self.root / "clean")},
                "static_trim": {"enabled": False},
-               "action_smoothing": {"enabled": True, "smooth_cartesian": True, "smooth_gripper": False}}
+               "action_smoothing": {"enabled": True, "smooth_cartesian": False, "smooth_gripper": False}}
         cleaning.preprocess_dataset(cfg)
         for fast in (False, True):
             name = "merge_" + str(fast)
             summary = merging.merge_lerobot_datasets(self.merge_config(["source", "clean"], name, fast))
             loaded = LeRobotDataset(name, root=self.root / name)
             self.assertEqual(loaded.meta.info[GRIPPER_ACTION_SEMANTICS_KEY], GRIPPER_ACTION_SEMANTICS)
+            self.assertEqual(loaded.meta.info[ACTION_SEMANTICS_KEY], ACTION_SEMANTICS)
+            self.assertEqual(loaded.meta.info["quest_processing"]["profile"], CROSS_EMBODIMENT_PROFILE)
             self.assertEqual(len(loaded), 6)
             self.assertEqual(summary["merge_mode"], "fast_aggregate" if fast else "frame_rewrite")
             for row in loaded:

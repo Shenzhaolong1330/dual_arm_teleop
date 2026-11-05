@@ -10,6 +10,7 @@ Core Commands:
   robot-replay           Replay a recorded dataset
   robot-visualize        Visualize recorded dataset
   robot-reset            Reset the robot to initial state
+  robot-stop             Stop selected robot (Nero damped stop / Flexiv IDLE)
   robot-train            Train a policy on the recorded dataset
   robot-dagger           Run DAgger rounds for policy improvement
   robot-dagger-export    Export DAgger data from raw run_mix logs

@@ -35,6 +35,7 @@ setup(
             "robot-replay = scripts.core.run_replay:main",
             "robot-visualize = scripts.core.run_visualize:main",
             "robot-reset = scripts.core.reset_robot:main",
+            "robot-stop = scripts.core.stop_robot:main",
             "robot-train = scripts.core.run_train:main",
             "robot-dagger = scripts.core.run_dagger_rounds:main",
             "robot-dagger-export = scripts.core.run_dagger_export:main",

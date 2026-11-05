@@ -30,3 +30,6 @@ calibration/*
 !calibration/hand_eye_calibration.py
 tests/transition.json
 reports/
+
+# Machine-specific runtime settings; shared defaults remain versioned.
+scripts/config/station.local.yaml

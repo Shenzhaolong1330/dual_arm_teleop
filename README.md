@@ -553,3 +553,8 @@ Common key controls during collection:
 - Left arrow: discard the current episode.
 - Esc: stop the recording session.
 - Ctrl+C: interrupt and clean up the incomplete dataset.
+# Unified collection on X-embodiment
+
+Franka, Nero and Flexiv share `robot-record --robot-type <embodiment>`.
+Keep machine settings in `scripts/config/station.local.yaml`.
+See the [unified collection guide](docs/unified_collection.md).

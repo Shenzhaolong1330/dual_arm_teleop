@@ -45,6 +45,9 @@ class FrankaDualArmConfig(RobotConfig):
     # Public LeRobot feature contract. X-embodiment is the default shared by
     # all supported dual-arm adapters; legacy modes remain load-only options.
     schema_mode: str = "x_embodiment"
+    # Declares the upstream RPC frame; poses are already transformed there.
+    # This adapter must not apply a second base-to-world transform.
+    observation_pose_frame: str = "world"
     debug: bool = True
 
     num_joints_per_arm: int = 7

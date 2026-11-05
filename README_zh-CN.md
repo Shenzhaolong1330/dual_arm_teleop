@@ -567,3 +567,8 @@ robot-record --config scripts/config/record_cfg.yaml
 - 左箭头：丢弃当前 episode。
 - Esc：停止整个录制任务。
 - Ctrl+C：中断并清理未完成数据集。
+# 三本体统一数采（X-embodiment）
+
+Franka、Nero、Flexiv 共用 `robot-record --robot-type <本体>`；机器差异写入
+`scripts/config/station.local.yaml`。使用方式和统一数据契约见
+[统一数采说明](docs/unified_collection.md)。

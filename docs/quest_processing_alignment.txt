@@ -1,0 +1,68 @@
+Shared Quest response profile (2026-10-24)
+
+Franka, Nero and Flexiv recording configs now select:
+  teleop.oculus_config.processing_profile: cross_embodiment_v1
+
+The single source of response parameters is:
+  teleoperators/oculus_teleoperator/processing_profiles.py
+
+Profile v1 (30 Hz recordings):
+  Both hands' translation/rotation scales: [1.0, 1.0].
+  Smoothing: One Euro, freq=30 Hz, min_cutoff=0.8, beta=0.25, d_cutoff=1.0.
+  EMA alpha=0.25 is recorded consistently but is inactive in One Euro mode.
+  Translation/rotation deadband: 0.0002 m / 0.003 rad, using vector norms.
+  Translation/rotation spike rejection: 0.05 m / 0.1 rad per sample.
+  Missing-transform hold: up to two frames, decay=0.5, using the existing common
+  implementation (successive held amplitudes are 0.5 and 0.125 of the prior
+  filtered output, then zero). No new tracking-loss algorithm is introduced.
+  Analog trigger endpoint deadzone: 0.02 at each end.
+  Trigger curve: gamma=1.0, continuous and linear between the endpoint deadzones.
+
+For a raw trigger t in [0,1]:
+  shaped_trigger = clip((t - 0.02) / 0.96, 0, 1)
+  normalized_opening = 1 - shaped_trigger
+  target_width_m = min_width + normalized_opening * (max_width - min_width)
+The same normalized response is used by all grippers. Physical ranges remain
+robot-specific: currently Franka 0..0.085 m; Nero and Flexiv 0..0.1 m. A half
+trigger requests 50% opening (42.5 mm versus 50 mm), rather than pretending that
+different grippers have the same physical travel.
+
+Installation geometry is kept outside the shared profile:
+  - left/right_channel_signs and position/rotation_axis_order;
+  - mirror_teleop and the resulting hand-to-arm routing;
+  - world/base extrinsics, mounting yaw, and TCP conventions;
+  - physical gripper limits and robot-side command/servo settings.
+The existing configuration differences remain intentional: main Franka/Nero
+configs keep their mirrored routing, while the active Flexiv station keeps
+same-side routing. The Flexiv read-only installation also retains its existing
+mapping. The active workstation config paths are symlinks to the repository's
+station files, so both ordinary and workstation launchers resolve profile v1.
+
+RecordConfig resolves the named profile before creating OculusTeleopConfig.
+Direct OculusTeleopConfig construction uses the same numeric defaults. Named
+profiles reject conflicting local response overrides and unknown profile names;
+v1 requires record.fps=30 to match the fixed-rate One Euro filter. Deliberately
+custom experiments can use processing_profile: null and explicit settings.
+Installation/routing overrides remain possible without opting out of v1.
+
+New dataset metadata contains quest_processing with the profile name, all
+effective response parameters, installation mapping, and physical width limits.
+Resume checks the entire snapshot. Merge checks profile/response equality and
+permits different installation mappings and gripper ranges; existing robot-type
+and frame compatibility checks still apply. Preprocessing and both merge paths
+preserve this metadata. run_policy generates commands directly from the policy;
+Quest parameters describe its configured teleoperator and are not reapplied to
+policy outputs. No previous dataset is rewritten by these code/config changes.
+
+Offline tests replay identical, asymmetric left/right Quest 4x4-pose streams
+through all five config entries. After undoing only installation/routing, the
+complete response traces match, including deadband, spikes, filter tails,
+missing transforms, clutch release/re-engagement and trigger endpoints.
+Installation snapshots verify that mapping/geometry/ranges were retained.
+Existing effective-command tests still compare saved parquet actions with
+accepted robot target increments. Physical dynamics and robot-specific limits
+remain separate from Quest response alignment.
+
+Tests run without connecting Quest, RPC servers, or physical robot controllers.
+Restart the recording process to load the new profile; live processes do not
+automatically reload Python modules or YAML settings.

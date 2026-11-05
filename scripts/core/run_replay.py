@@ -7,6 +7,7 @@ logging.basicConfig(level=logging.WARNING, format="%(message)s")
 from pathlib import Path
 from typing import Dict, Any
 from robots import SUPPORTED_ROBOTS, create_robot_config, create_robot
+from scripts.core.robot_selection import add_selection_arguments, load_session_config, merge_config
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.robot_utils import busy_wait
 from lerobot.utils.utils import log_say
@@ -56,15 +57,14 @@ def _hydrate_replay_robot_details(cfg: Dict[str, Any]) -> Dict[str, Any]:
         return hydrated
 
     detail_cfg = _load_das_config(robot_type)
-    hydrated.setdefault("robot", copy.deepcopy(detail_cfg["robot"]))
+    hydrated["robot"] = merge_config(detail_cfg["robot"], hydrated.get("robot", {}))
     teleop_cfg = detail_cfg.get("teleop", {})
     hydrated.setdefault("control_mode", teleop_cfg.get("control_mode", "oculus"))
     return hydrated
 
 
-def _load_record_cfg_yaml(cfg_path: Path) -> Dict[str, Any]:
-    with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
+def _load_record_cfg_yaml(cfg_path: Path, **selection) -> Dict[str, Any]:
+    cfg = load_session_config(cfg_path, **selection)
     if not isinstance(cfg, dict) or "replay" not in cfg:
         raise ValueError(f"Replay config must contain a top-level `replay` mapping: {cfg_path}")
     return cfg
@@ -153,6 +153,7 @@ def run_replay(replay_cfg: ReplayConfig):
 
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(description="Replay a recorded LeRobot episode.")
+    add_selection_arguments(parser)
     parser.add_argument(
         "--config",
         "--config-path",
@@ -162,7 +163,9 @@ def main(argv: list[str] | None = None):
         help="Path to record_cfg.yaml.",
     )
     args = parser.parse_args(argv)
-    cfg = _load_record_cfg_yaml(args.config_path)
+    cfg = _load_record_cfg_yaml(args.config_path, robot_type=args.robot_type,
+                                station_path=args.station_config,
+                                use_station=not args.no_station_config)
 
     replay_cfg = ReplayConfig(_hydrate_replay_robot_details(cfg["replay"]))
 
