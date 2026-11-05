@@ -23,6 +23,7 @@ from robots.dual_arm_schema import (
     width_from_normalized_command,
 )
 from .config_flexiv import FlexivDualArmConfig
+from .gripper_aperture import GripperApertureController
 from .pose_frames import BaseToWorldTransform
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,24 @@ class FlexivDualArm(Robot):
     def __init__(self, config: FlexivDualArmConfig):
         super().__init__(config)
         self.config = config
+        if config.gripper_control_mode not in {"move", "force_feedback"}:
+            raise ValueError("gripper_control_mode must be 'move' or 'force_feedback'.")
+        for field in ("gripper_feedback_force_limit", "gripper_feedback_timeout_sec"):
+            if not np.isfinite(getattr(config, field)) or getattr(config, field) <= 0:
+                raise ValueError(f"{field} must be positive and finite.")
+        self._gripper_feedback: dict[str, GripperApertureController] = {}
+        self._gripper_feedback_lock = threading.Lock()
+        if (not np.isfinite(config.gripper_min_command_interval_sec)
+                or config.gripper_min_command_interval_sec < 0):
+            raise ValueError("gripper_min_command_interval_sec must be finite and nonnegative.")
+        if (config.gripper_continuous_speed is not None
+                and (not np.isfinite(config.gripper_continuous_speed)
+                     or config.gripper_continuous_speed <= 0)):
+            raise ValueError("gripper_continuous_speed must be positive and finite, or None.")
+        if config.gripper_init_strategy not in {"always", "if_needed"}:
+            raise ValueError("gripper_init_strategy must be 'always' or 'if_needed'.")
+        if not np.isfinite(config.gripper_ready_timeout_sec) or config.gripper_ready_timeout_sec <= 0:
+            raise ValueError("gripper_ready_timeout_sec must be positive and finite.")
         if config.observation_pose_frame not in {"base", "world"}:
             raise ValueError("observation_pose_frame must be 'base' or 'world'.")
         self._observation_transforms: dict[str, BaseToWorldTransform] = {}
@@ -125,9 +144,12 @@ class FlexivDualArm(Robot):
         self._cached_right_pose7 = np.zeros(7, dtype=float)
         self._cached_left_pose7[3] = 1.0
         self._cached_right_pose7[3] = 1.0
+        self._actual_left_pose7: np.ndarray | None = None
+        self._actual_right_pose7: np.ndarray | None = None
         self._servo_lock = threading.Lock()
         self._servo_stop_event = threading.Event()
         self._servo_thread: threading.Thread | None = None
+        self._servo_error: Exception | None = None
         self._servo_left_target_pose7 = self._cached_left_pose7.copy()
         self._servo_right_target_pose7 = self._cached_right_pose7.copy()
         self._servo_left_command_pose7 = self._cached_left_pose7.copy()
@@ -173,9 +195,13 @@ class FlexivDualArm(Robot):
 
         self._flexivrdk = flexivrdk
         logger.info("[FLEXIV] Connecting left arm: %s", self.config.left_robot_sn)
-        self._left_robot = flexivrdk.Robot(self.config.left_robot_sn)
+        self._left_robot = flexivrdk.Robot(
+            self.config.left_robot_sn, self.config.network_interface_whitelist
+        )
         logger.info("[FLEXIV] Connecting right arm: %s", self.config.right_robot_sn)
-        self._right_robot = flexivrdk.Robot(self.config.right_robot_sn)
+        self._right_robot = flexivrdk.Robot(
+            self.config.right_robot_sn, self.config.network_interface_whitelist
+        )
 
         for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
             self._prepare_robot(side, robot)
@@ -200,23 +226,67 @@ class FlexivDualArm(Robot):
         logger.info("[FLEXIV] %s connected", self.name)
 
     def _prepare_robot(self, side: str, robot: Any) -> None:
+        timeout = float(self.config.enable_timeout_sec)
+        if not np.isfinite(timeout) or timeout <= 0:
+            raise ValueError("enable_timeout_sec must be positive and finite.")
         if self.config.clear_fault_on_connect and robot.fault():
             logger.warning("[FLEXIV] %s arm fault detected, clearing", side)
             if not robot.ClearFault():
                 raise RuntimeError(f"Failed to clear {side} Flexiv arm fault.")
 
         if self.config.enable_on_connect:
+            if robot.operational():
+                logger.info("[FLEXIV] %s arm already operational; skip redundant Enable", side)
+                return
             logger.info("[FLEXIV] Enabling %s arm", side)
-            robot.Enable()
+            try:
+                robot.Enable()
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    f"Failed to enable {side} Flexiv arm: {exc}. "
+                    f"Status after failure: {self._connection_status(robot)}. "
+                    "The enable request may have reached the controller even if its reply was lost. "
+                    "No automatic retry was sent. Check the robot Ethernet link, ARP/IP conflicts, "
+                    "and the controller's Remote/Ethernet mode before retrying."
+                ) from exc
+            deadline = time.monotonic() + timeout
             while not robot.operational():
+                status = self._connection_status(robot)
+                if status.get("connected") is False or status.get("fault") is True:
+                    raise RuntimeError(f"{side} Flexiv arm lost readiness while enabling: {status}")
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"{side} Flexiv arm did not become operational within {timeout:.1f}s "
+                        f"after Enable returned: {status}"
+                    )
                 time.sleep(0.2)
             logger.info("[FLEXIV] %s arm operational", side)
 
+    @staticmethod
+    def _connection_status(robot: Any) -> dict[str, Any]:
+        status = {}
+        for name in ("connected", "operational", "operational_status", "fault",
+                     "estop_released", "recovery", "reduced", "mode"):
+            method = getattr(robot, name, None)
+            if not callable(method):
+                continue
+            try:
+                value = method()
+                status[name] = value if isinstance(value, (bool, int, float)) else str(value)
+            except Exception as exc:  # Status reporting must not mask the original failure.
+                status[name] = f"unavailable: {exc}"
+        return status
+
     def _finish_prepare_robot(self, side: str, robot: Any) -> None:
-        if self.config.zero_ft_sensor_on_connect:
+        if self.config.debug:
+            return
+        # The 6DoF F/T controller requires calibration before entering this
+        # mode, even when all force-control axes will subsequently be disabled.
+        # Run after tool/gripper setup, which may invalidate calibration.
+        if self.config.zero_ft_sensor_on_connect or self.config.switch_cartesian_mode_on_connect:
             self._zero_ft_sensor(side, robot)
 
-        if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
+        if self.config.switch_cartesian_mode_on_connect:
             try:
                 robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
             except RuntimeError as exc:
@@ -327,6 +397,11 @@ class FlexivDualArm(Robot):
         if not grippers:
             return
 
+        if self.config.gripper_init_strategy == "if_needed":
+            grippers = self._grippers_requiring_init(grippers)
+            if not grippers:
+                return
+
         def make_init_call(side: str, gripper: Any) -> tuple[str, Any]:
             def init() -> None:
                 logger.info("[FLEXIV] Initializing %s gripper", side)
@@ -344,6 +419,44 @@ class FlexivDualArm(Robot):
             init_calls[0][1]()
 
         self._wait_grippers_idle_after_init(grippers)
+
+    def _grippers_requiring_init(self, grippers: dict[str, Any]) -> dict[str, Any]:
+        """Verify normal opening before repeating GN01's slow calibration.
+
+        RDK 1.9 does not expose an initialized flag. A measured, stopped gripper
+        at the opening target is sufficient for this startup operation. Never
+        infer readiness from commanded-width caches or a file from a prior run.
+        Delivery failures propagate; only a delivered move that fails to reach
+        its target falls back to Init (as on an uncalibrated GN01 after power-on).
+        """
+        tolerance = max(GRIPPER_WAIT_TOLERANCE_FLOOR, self.config.gripper_command_epsilon)
+        pending: dict[str, tuple[Any, float]] = {}
+        calls: list[tuple[str, Any]] = []
+        for side, gripper in grippers.items():
+            target, velocity, force = self._prepare_gripper_move(
+                side, gripper, self.config.gripper_max_open,
+            )
+            width, moving, _ = self._read_gripper_state(gripper)
+            if width is not None and abs(width - target) <= tolerance and moving is False:
+                self._set_cached_gripper_width(side, width)
+                logger.info("[FLEXIV] %s gripper already open; skip redundant Init", side)
+                continue
+            pending[side] = (gripper, target)
+            calls.append((side, lambda g=gripper, t=target, v=velocity, f=force: g.Move(t, v, f)))
+        if calls:
+            self._run_parallel_robot_calls(tuple(calls))
+        deadline = time.monotonic() + self.config.gripper_ready_timeout_sec
+        while pending:
+            for side, (gripper, target) in list(pending.items()):
+                width, moving, _ = self._read_gripper_state(gripper)
+                if width is not None and abs(width - target) <= tolerance and moving is False:
+                    self._set_cached_gripper_width(side, width)
+                    logger.info("[FLEXIV] %s gripper opened normally; skip redundant Init", side)
+                    del pending[side]
+            if not pending or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        return {side: gripper for side, (gripper, _) in pending.items()}
 
     def _execute_home_plan(self, side: str, robot: Any) -> None:
         logger.info("[FLEXIV] Moving %s arm with plan %s", side, self.config.home_plan_name)
@@ -444,6 +557,10 @@ class FlexivDualArm(Robot):
             time.sleep(0.2)
 
     def disconnect(self) -> None:
+        try:
+            self._close_gripper_feedback()
+        except Exception as exc:
+            logger.warning("[FLEXIV] aperture feedback stop failed during disconnect: %s", exc)
         if (
             not self.is_connected
             and self._left_robot is None
@@ -491,6 +608,7 @@ class FlexivDualArm(Robot):
     def reset(self) -> None:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        self._close_gripper_feedback()
         self._stop_cartesian_servo_thread()
         if self.config.reset_go_home:
             self._execute_home_for_sides(("left", "right"))
@@ -499,19 +617,25 @@ class FlexivDualArm(Robot):
             self._initialize_grippers()
             self.move_gripper_width(self.config.gripper_max_open, side="both", wait=True)
             if self.config.switch_cartesian_mode_on_connect and not self.config.debug:
-                self._left_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
-                self._right_robot.SwitchMode(self._flexivrdk.Mode.NRT_CARTESIAN_MOTION_FORCE)
+                for side, robot in (("left", self._left_robot), ("right", self._right_robot)):
+                    self._finish_prepare_robot(side, robot)
         self._refresh_cached_poses()
         self._start_cartesian_servo_thread()
 
     def send_action(self, action: dict[str, Any]) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        self._check_cartesian_servo_error()
 
         sent_action = dict(action)
         send_start_t = time.perf_counter()
         timing: dict[str, float] = {}
-        if not self.config.debug and "left_delta_ee_pose.x" in sent_action:
+        has_cartesian = any(f"{side}_delta_ee_pose.{axis}" in action for side in ("left", "right") for axis in AXES)
+        if self.config.debug and has_cartesian:
+            for side in ("left", "right"):
+                for axis in AXES:
+                    sent_action[f"{side}_delta_ee_pose.{axis}"] = 0.0
+        elif has_cartesian:
             cartesian_start_t = time.perf_counter()
             self._send_cartesian_delta(sent_action)
             timing["cartesian_ms"] = (time.perf_counter() - cartesian_start_t) * 1000.0
@@ -534,6 +658,8 @@ class FlexivDualArm(Robot):
     def _send_cartesian_delta(self, action: dict[str, Any]) -> None:
         left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+        if not np.all(np.isfinite(left_delta)) or not np.all(np.isfinite(right_delta)):
+            raise ValueError("Flexiv Cartesian actions must be finite")
         left_delta = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
         right_delta = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
         left_delta[:3] = _clip_norm(left_delta[:3], self.config.max_cartesian_delta)
@@ -549,13 +675,20 @@ class FlexivDualArm(Robot):
                 self._servo_right_target_pose7 = target_right
             self._cached_left_pose7 = target_left
             self._cached_right_pose7 = target_right
-            return
+        else:
+            target_left = _apply_delta_to_pose7(self._cached_left_pose7, left_delta)
+            target_right = _apply_delta_to_pose7(self._cached_right_pose7, right_delta)
+            self._send_cartesian_pose_targets(target_left, target_right)
+            self._cached_left_pose7 = target_left
+            self._cached_right_pose7 = target_right
 
-        target_left = _apply_delta_to_pose7(self._cached_left_pose7, left_delta)
-        target_right = _apply_delta_to_pose7(self._cached_right_pose7, right_delta)
-        self._send_cartesian_pose_targets(target_left, target_right)
-        self._cached_left_pose7 = target_left
-        self._cached_right_pose7 = target_right
+        # Labels describe the effective target increment, not the low-level
+        # servo's interpolation substeps. Undo only the hardware basis change;
+        # otherwise replay would apply mount_yaw twice.
+        for side, base_delta in (("left", left_delta), ("right", right_delta)):
+            public_delta = self._apply_mount_yaw(base_delta, -getattr(self.config, f"{side}_mount_yaw_deg"))
+            for index, axis in enumerate(AXES):
+                action[f"{side}_delta_ee_pose.{axis}"] = float(public_delta[index])
 
     def _send_cartesian_pose_targets(self, target_left: np.ndarray, target_right: np.ndarray) -> None:
         zero_cartesian = [0.0] * 6
@@ -611,7 +744,7 @@ class FlexivDualArm(Robot):
             thread.join()
         if errors:
             side, exc = errors[0]
-            raise RuntimeError(f"{side} Flexiv command failed during parallel send") from exc
+            raise RuntimeError(f"{side} Flexiv command failed during parallel send: {exc}") from exc
 
     def _log_action_debug(self, action: dict[str, Any]) -> None:
         if not self.config.action_debug:
@@ -628,10 +761,15 @@ class FlexivDualArm(Robot):
         right_mapped = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
         left_grip = self._gripper_width_from_action(action, "left")
         right_grip = self._gripper_width_from_action(action, "right")
+        left_error = (float(np.linalg.norm(self._cached_left_pose7[:3] - self._actual_left_pose7[:3]))
+                      if self._actual_left_pose7 is not None else None)
+        right_error = (float(np.linalg.norm(self._cached_right_pose7[:3] - self._actual_right_pose7[:3]))
+                       if self._actual_right_pose7 is not None else None)
         logger.info(
             "[FLEXIV ACTION] step=%d raw_left_xyz=%.6f raw_right_xyz=%.6f "
             "mapped_left_xyz=%.6f mapped_right_xyz=%.6f left_rot=%.6f right_rot=%.6f "
-            "left_grip=%s right_grip=%s target_left_xyz=[%.4f %.4f %.4f] target_right_xyz=[%.4f %.4f %.4f]",
+            "left_grip=%s right_grip=%s target_left_xyz=[%.4f %.4f %.4f] target_right_xyz=[%.4f %.4f %.4f] "
+            "left_tracking_error_m=%s right_tracking_error_m=%s servo_alive=%s",
             self._action_debug_count,
             float(np.linalg.norm(left_delta[:3])),
             float(np.linalg.norm(right_delta[:3])),
@@ -647,6 +785,9 @@ class FlexivDualArm(Robot):
             float(self._cached_right_pose7[0]),
             float(self._cached_right_pose7[1]),
             float(self._cached_right_pose7[2]),
+            None if left_error is None else f"{left_error:.4f}",
+            None if right_error is None else f"{right_error:.4f}",
+            self._servo_thread is not None and self._servo_thread.is_alive(),
         )
 
     def _log_timing_debug(self, stage: str, timing: dict[str, float]) -> None:
@@ -697,6 +838,7 @@ class FlexivDualArm(Robot):
         if self._servo_thread is not None and self._servo_thread.is_alive():
             return
         self._reset_servo_targets_from_cached()
+        self._servo_error = None
         self._servo_stop_event.clear()
         self._servo_thread = threading.Thread(
             target=self._cartesian_servo_loop,
@@ -746,9 +888,12 @@ class FlexivDualArm(Robot):
                 self._send_cartesian_pose_targets(left_command, right_command)
                 send_ms = (time.perf_counter() - send_start_t) * 1000.0
             except Exception as exc:  # noqa: BLE001
-                logger.warning("[FLEXIV] Cartesian servo send failed: %s", exc)
-                self._servo_stop_event.wait(timeout=0.05)
-                continue
+                # Surface a failed hardware send to the recording thread. Do not
+                # keep accepting goals while one arm has stopped following.
+                self._servo_error = exc
+                self._servo_stop_event.set()
+                logger.exception("[FLEXIV] Cartesian servo stopped after send failure: %s", exc)
+                return
 
             count += 1
             if self.config.timing_debug:
@@ -768,6 +913,10 @@ class FlexivDualArm(Robot):
 
             elapsed_s = time.perf_counter() - loop_start_t
             self._servo_stop_event.wait(timeout=max(0.0, period_s - elapsed_s))
+
+    def _check_cartesian_servo_error(self) -> None:
+        if self.config.use_cartesian_servo_thread and self._servo_error is not None:
+            raise RuntimeError(f"Flexiv Cartesian servo stopped: {self._servo_error}") from self._servo_error
 
     @staticmethod
     def _blend_pose7(current_pose7: np.ndarray, target_pose7: np.ndarray, alpha: float) -> np.ndarray:
@@ -813,14 +962,25 @@ class FlexivDualArm(Robot):
     def _update_gripper_cache(self, action: dict[str, Any]) -> None:
         if not self.config.use_gripper:
             return
+        calls: list[tuple[str, Any]] = []
         for side in ("left", "right"):
             width = self._gripper_width_from_action(action, side)
             if width is None:
                 continue
-            width = self._move_gripper_to_width_if_needed(side, width)
-            command = self._gripper_command_from_width(width)
-            setattr(self, f"_{side}_gripper_cmd", command)
-            action[f"{side}_gripper_width"] = width
+
+            def send(side: str = side, width: float = width) -> None:
+                target = self._move_gripper_to_width_if_needed(side, width)
+                setattr(self, f"_{side}_gripper_cmd", self._gripper_command_from_width(target))
+                action[f"{side}_gripper_width"] = target
+
+            calls.append((side, send))
+        # Move blocks for delivery, not finger arrival. Overlap controllers but
+        # join before returning so labels remain delivered, clipped targets.
+        if self.config.send_arms_parallel and len(calls) > 1:
+            self._run_parallel_robot_calls(tuple(calls))
+        else:
+            for _, send in calls:
+                send()
 
     def _gripper_width_from_action(self, action: dict[str, Any], side: str) -> float | None:
         width = action.get(f"{side}_gripper_width")
@@ -875,6 +1035,7 @@ class FlexivDualArm(Robot):
         return float(np.clip((float(width) - min_width) / span, 0.0, 1.0))
 
     def move_gripper_width(self, width_m: float, side: str = "both", wait: bool = True) -> None:
+        self._close_gripper_feedback()
         self._left_gripper_target_width = None
         self._right_gripper_target_width = None
         if not self.config.use_gripper:
@@ -1024,6 +1185,19 @@ class FlexivDualArm(Robot):
             raise RuntimeError(f"{side} gripper hardware limits unavailable") from exc
         return target_width, velocity, force_limit
 
+    def _close_gripper_feedback(self) -> None:
+        with self._gripper_feedback_lock:
+            controllers = list(self._gripper_feedback.values())
+            self._gripper_feedback.clear()
+        errors = []
+        for controller in controllers:
+            try:
+                controller.close()
+            except Exception as exc:
+                errors.append(exc)
+        if errors:
+            raise RuntimeError("Could not stop GN01 aperture feedback") from errors[0]
+
     def _move_gripper_to_width_if_needed(
         self,
         side: str,
@@ -1039,11 +1213,47 @@ class FlexivDualArm(Robot):
             raise RuntimeError(f"{side} gripper target could not be prepared")
         target_width, velocity, force_limit = map(finite_gripper_value, prepared)
 
+        if self.config.gripper_control_mode == "force_feedback":
+            with self._gripper_feedback_lock:
+                controller = self._gripper_feedback.get(side)
+                if controller is None:
+                    params = self._get_gripper_params(side, gripper)
+                    free_force = min(self.config.gripper_feedback_force_limit, force_limit)
+                    if params["min_force"] > -free_force or params["max_force"] < free_force:
+                        raise ValueError("GN01 feedback requires signed direct-force support")
+                    controller = GripperApertureController(
+                        gripper,
+                        min_width=max(self.config.gripper_min_width, params["min_width"]),
+                        max_width=min(self.config.gripper_max_open, params["max_width"]),
+                        speed=velocity, force_limit=force_limit,
+                        free_force_limit=free_force,
+                        timeout=self.config.gripper_feedback_timeout_sec,
+                    )
+                    self._gripper_feedback[side] = controller
+            target_width = controller.update(target_width)
+            setattr(self, f"_{side}_gripper_target_width", target_width)
+            self._set_cached_gripper_width(side, target_width)
+            return target_width
+
+        if self.config.gripper_continuous_speed is not None:
+            params = self._get_gripper_params(side, gripper)
+            min_width = max(self.config.gripper_min_width, params["min_width"])
+            max_width = min(self.config.gripper_max_open, params["max_width"])
+            epsilon = self.config.gripper_command_epsilon
+            if min_width + epsilon < target_width < max_width - epsilon:
+                velocity = min(velocity, max(params["min_vel"], self.config.gripper_continuous_speed))
+
         last_width = getattr(self, f"_{side}_gripper_target_width", None)
         if last_width is not None and abs(target_width - last_width) < self.config.gripper_command_epsilon:
             return float(last_width)
+        last_send = getattr(self, f"_{side}_gripper_last_send_time", None)
+        if (last_width is not None and last_send is not None
+                and time.monotonic() - last_send < self.config.gripper_min_command_interval_sec):
+            # No queue: the next recording frame supplies the newest desired
+            # width. Return the last delivered target for truthful action labels.
+            return float(last_width)
 
-        logger.info(
+        logger.debug(
             "[FLEXIV] %s gripper Move width=%.4f command=%s velocity=%.3f force=%.1f",
             side,
             target_width,
@@ -1053,6 +1263,7 @@ class FlexivDualArm(Robot):
         )
         gripper.Move(target_width, velocity, force_limit)
         setattr(self, f"_{side}_gripper_target_width", target_width)
+        setattr(self, f"_{side}_gripper_last_send_time", time.monotonic())
         self._set_cached_gripper_width(side, target_width)
         return target_width
 
@@ -1216,6 +1427,7 @@ class FlexivDualArm(Robot):
     def get_observation(self) -> dict[str, Any]:
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self.name} is not connected.")
+        self._check_cartesian_servo_error()
         try:
             obs_start_t = time.perf_counter()
             timing: dict[str, float] = {}
@@ -1246,6 +1458,7 @@ class FlexivDualArm(Robot):
         pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
         if np.linalg.norm(pose7[3:7]) < 1e-12:
             pose7[3] = 1.0
+        setattr(self, f"_actual_{side}_pose7", pose7.copy())
 
         # Motion/servo targets must stay in the RDK base frame. Transform only
         # the public observation, after caching the unmodified SDK pose.

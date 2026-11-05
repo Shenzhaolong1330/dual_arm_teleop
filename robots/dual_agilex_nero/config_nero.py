@@ -35,6 +35,12 @@ class NeroDualArmConfig(RobotConfig):
     # Control configuration
     control_mode: str = "oculus"
     debug: bool = True
+
+    # Public observations/actions use the same frame. World mode requires
+    # explicit T_world_base=[x,y,z,qw,qx,qy,qz] for both arms.
+    observation_pose_frame: str = "base"  # base | world
+    left_base_pose_in_world: list[float] | None = None
+    right_base_pose_in_world: list[float] | None = None
     
     # Joint configuration (7 DOF per arm)
     num_joints_per_arm: int = 7

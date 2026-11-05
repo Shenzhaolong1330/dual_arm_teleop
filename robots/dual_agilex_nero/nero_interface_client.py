@@ -20,7 +20,7 @@ class NeroDualArmClient:
         self.port = port
         
         try:
-            self.server = zerorpc.Client(heartbeat=20)
+            self.server = zerorpc.Client(heartbeat=20, timeout=35)
             self.server.connect(f"tcp://{ip}:{port}")
             log.info(f"[CLIENT] Connected to {ip}:{port}")
         except Exception as e:
@@ -134,7 +134,7 @@ class NeroDualArmClient:
         """Move both arms to home position."""
         if self.server is None:
             return
-        self.server.robot_go_home()
+        return self.server.robot_go_home()
     
     # ==================== ServoJ Control (Joint Servo) ====================
     
@@ -173,7 +173,7 @@ class NeroDualArmClient:
             delta: False=absolute, True=relative
         """
         if self.server is None:
-            return True
+            raise ConnectionError("Nero server is not connected")
         return self.server.servo_p_OL(robot_arm, pose.tolist(), delta)
     
     # ==================== Gripper ========
@@ -181,7 +181,7 @@ class NeroDualArmClient:
     def left_gripper_goto(self, width: float, force: float):
         if self.server is None:
             return
-        self.server.left_gripper_goto(width, force)
+        return self.server.left_gripper_goto(width, force)
     
     def left_gripper_grasp(self, force: float = 1.0, width: float = 0.05):
         if self.server is None:
@@ -196,7 +196,7 @@ class NeroDualArmClient:
     def right_gripper_goto(self, width: float, force: float):
         if self.server is None:
             return
-        self.server.right_gripper_goto(width, force)
+        return self.server.right_gripper_goto(width, force)
 
     def right_gripper_grasp(self, force: float = 1.0, width: float = 0.05):
         if self.server is None:
@@ -225,14 +225,15 @@ class NeroDualArmClient:
         except Exception as e:
             log.error(f"[CLIENT] Failed to stop {arm_name}: {e}")
     
-    def close(self):
-        """Close connection."""
+    def close(self, stop: bool = False):
+        """Close the RPC transport; stopping the robot requires explicit opt-in."""
         if self.server is not None:
-            try:
-                self.server.robot_stop("left_robot")
-                self.server.robot_stop("right_robot")
-            except Exception as e:
-                log.warning(f"[CLIENT] Error stopping robots: {e}")
+            if stop:
+                for arm in ("left_robot", "right_robot"):
+                    try:
+                        self.server.robot_stop(arm)
+                    except Exception as e:
+                        log.warning(f"[CLIENT] Error stopping {arm}: {e}")
             try:
                 self.server.close()
             except Exception as e:

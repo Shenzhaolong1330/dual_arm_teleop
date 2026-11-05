@@ -97,7 +97,8 @@ class OculusDualArmRobot(Robot):
     - RTr (Right Trigger): Controls right gripper (1.0 = open, 0.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
-    - A button: Request robot reset
+    - A button: Save episode, reset, and start next episode
+    - B button: Discard current episode, reset, and retry
     
     Coordinate Systems:
         Oculus: X(right), Y(up), Z(backward/towards user)
@@ -195,6 +196,8 @@ class OculusDualArmRobot(Robot):
         
         # Reset request
         self._reset_requested = False
+        self._save_episode_requested = False
+        self._discard_episode_requested = False
         self._left_grip_pressed = False
         self._right_grip_pressed = False
         self._left_trigger_value = 0.0
@@ -452,10 +455,17 @@ class OculusDualArmRobot(Robot):
         lg_pressed = buttons.get('LG', False)
         rg_pressed = buttons.get('RG', False)
         a_pressed = buttons.get('A', False)
+        b_pressed = buttons.get('B', False)
         left_release_requested = bool(buttons.get('Y', False))
-        right_release_requested = bool(buttons.get('B', False))
+        right_release_requested = False  # B is reserved for discarding the episode.
         
         self._reset_requested = bool(a_pressed)
+        self._save_episode_requested = bool(a_pressed)
+        self._discard_episode_requested = bool(b_pressed)
+        if a_pressed or b_pressed:
+            # Clear clutch/filter references while an episode button is held.
+            # The first frame after reset/release establishes a fresh reference.
+            lg_pressed = rg_pressed = False
         
         dof_per_arm = 7 if self._use_gripper else 6
         action = np.zeros(dof_per_arm * 2)
@@ -600,6 +610,8 @@ class OculusDualArmRobot(Robot):
             left_gripper_cmd_bin (legacy alias)
             right_gripper_cmd_bin (legacy alias)
             reset_requested
+            save_episode_requested
+            discard_episode_requested
         """
         action_data = self.get_action()
         
@@ -647,6 +659,8 @@ class OculusDualArmRobot(Robot):
         
         # Reset request flag
         obs_dict["reset_requested"] = self._reset_requested
+        obs_dict["save_episode_requested"] = self._save_episode_requested
+        obs_dict["discard_episode_requested"] = self._discard_episode_requested
         
         return obs_dict
 
@@ -670,7 +684,8 @@ if __name__ == "__main__":
     print("  - RG (Right Grip):   Press to enable RIGHT arm action")
     print("  - LTr (Left Trigger):  Control LEFT gripper")
     print("  - RTr (Right Trigger): Control RIGHT gripper")
-    print("  - A button: Request robot reset")
+    print("  - A button: Save episode, reset, and start next episode")
+    print("  - B button: Discard current episode, reset, and retry")
     print("Press Ctrl+C to exit\n")
     
     try:

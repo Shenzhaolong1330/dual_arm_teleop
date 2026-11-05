@@ -592,6 +592,11 @@ class FrankaDualArm(Robot):
         action: dict[str, Any],
     ) -> None:
         left_delta, right_delta = self._cartesian_deltas_from_action(action)
+        # A packet suppressed by the same threshold used below is a no-op,
+        # including in the returned action that becomes the training label.
+        for delta in (left_delta, right_delta):
+            if np.linalg.norm(delta) < 1e-9:
+                delta[:] = 0.0
         self._update_sent_cartesian_action(sent_action, left_delta, right_delta, action)
         if np.linalg.norm(left_delta) >= 1e-9:
             server_action.setdefault("left_arm", {})["motion"] = {
@@ -670,6 +675,9 @@ class FrankaDualArm(Robot):
         source_action: dict[str, Any],
     ) -> None:
         for index, axis in enumerate(AXES):
+            if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
+                sent_action[f"left_delta_ee_pose.{axis}"] = float(left_delta[index])
+                sent_action[f"right_delta_ee_pose.{axis}"] = float(right_delta[index])
             for left_key in self._cartesian_action_keys("left", axis):
                 if left_key in source_action:
                     sent_action[left_key] = float(left_delta[index])
@@ -956,6 +964,8 @@ class FrankaDualArm(Robot):
     def _update_cached_rpc_state_from_step(self, step_result: Any) -> None:
         if not isinstance(step_result, Mapping):
             return
+        if step_result.get("ok") is False:
+            raise RuntimeError(f"Franka rejected action: {step_result}")
         observation = step_result.get("observation")
         if isinstance(observation, Mapping):
             self._cached_rpc_state = dict(observation)

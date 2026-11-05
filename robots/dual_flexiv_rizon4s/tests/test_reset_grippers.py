@@ -58,10 +58,12 @@ class ResetGripperTests(unittest.TestCase):
         self.assertEqual(robot["home_joint_timeout_sec"], 20.0)
         self.assertEqual(robot["gripper_init_timeout_sec"], 10.0)
 
-    def test_gn01_init_enabled_only_for_explicit_reset(self):
+    def test_gn01_readiness_checked_for_recording_and_reset(self):
         recording = yaml.safe_load(self.station.read_text())["robot"]
         reset = build_reset_config(self.station)["record"]["robot"]
-        self.assertFalse(recording["initialize_gripper_on_connect"])
+        self.assertTrue(recording["initialize_gripper_on_connect"])
+        self.assertEqual(recording["gripper_init_strategy"], "if_needed")
+        self.assertEqual(reset["gripper_init_strategy"], "if_needed")
         self.assertTrue(reset["initialize_gripper_on_connect"])
         self.assertFalse(reset["go_home_on_connect"])
         self.assertTrue(reset["reset_go_home"])
@@ -70,6 +72,7 @@ class ResetGripperTests(unittest.TestCase):
 
     def test_reset_initializes_both_grippers_before_open(self):
         config = build_reset_config(self.station)["record"]["robot"]
+        config["gripper_init_strategy"] = "always"
         robot = FlexivDualArm(FlexivDualArmConfig(**config, cameras={}, debug=False))
         robot.is_connected = True
         robot._left_gripper = FakeGripper()

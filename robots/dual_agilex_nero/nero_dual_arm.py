@@ -20,6 +20,7 @@ from robots.dual_arm_schema import (
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
 )
+from robots.pose_frames import BaseToWorldTransform
 from .config_nero import NeroDualArmConfig
 from .nero_interface_client import NeroDualArmClient
 
@@ -41,10 +42,21 @@ class NeroDualArm(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
 
         self.config = config
+        if config.observation_pose_frame not in {"base", "world"}:
+            raise ValueError("observation_pose_frame must be 'base' or 'world'.")
+        self._pose_transforms = {}
+        if config.observation_pose_frame == "world":
+            for side in ("left", "right"):
+                name = f"{side}_base_pose_in_world"
+                extrinsic = getattr(config, name)
+                if extrinsic is None:
+                    raise ValueError(f"{name} is required for observation_pose_frame='world'.")
+                self._pose_transforms[side] = BaseToWorldTransform(extrinsic, name=name)
         self._is_connected = False
         self._robot: Optional[NeroDualArmClient] = None
         self._prev_observation = None
         self._num_joints_per_arm = 7
+        self._cartesian_rejections = {"left": 0, "right": 0}
         
         # Gripper settings
         self._gripper_force = config.gripper_force
@@ -65,7 +77,7 @@ class NeroDualArm(Robot):
 
     def _should_send_action(self) -> bool:
         """检查是否应该发送action（频率限制）"""
-        current_time = time.time()
+        current_time = time.monotonic()
         if current_time - self.last_action_send_time >= self.action_send_dt:
             self.last_action_send_time = current_time
             return True
@@ -175,6 +187,15 @@ class NeroDualArm(Robot):
         
         if self.config.use_gripper:
             self._robot.left_gripper_goto(
+                width=self.config.gripper_min_width,
+                force=self._gripper_force,
+            )
+            self._robot.right_gripper_goto(
+                width=self.config.gripper_min_width,
+                force=self._gripper_force,
+            )
+            self._wait_reset_grippers(opening=False)
+            self._robot.left_gripper_goto(
                 width=self.config.gripper_max_open,
                 force=self._gripper_force
             )
@@ -182,12 +203,51 @@ class NeroDualArm(Robot):
                 width=self.config.gripper_max_open,
                 force=self._gripper_force
             )
+            widths = self._wait_reset_grippers(opening=True)
             self._left_gripper_target_width = float(self.config.gripper_max_open)
             self._right_gripper_target_width = float(self.config.gripper_max_open)
-            self._left_gripper_width = float(self.config.gripper_max_open)
-            self._right_gripper_width = float(self.config.gripper_max_open)
+            self._left_gripper_width = widths["left"]
+            self._right_gripper_width = widths["right"]
         
         logger.info("===== [ROBOT] Dual-arm system reset successfully =====\n")
+
+    def _wait_reset_grippers(self, *, opening: bool, timeout: float = 5.0) -> dict[str, float]:
+        """Wait for a closed grip, or a settled open grip at its physical stroke limit."""
+        started = time.monotonic()
+        previous: dict[str, float] = {}
+        stable_width: dict[str, float] = {}
+        stable_since: dict[str, float] = {}
+        while time.monotonic() - started < timeout:
+            now = time.monotonic()
+            widths = {}
+            for side in ("left", "right"):
+                state = getattr(self._robot, f"{side}_gripper_get_state")()
+                if "width" not in state or not np.isfinite(state["width"]):
+                    raise RuntimeError(f"{side} gripper has no valid width feedback during reset")
+                width = float(state["width"])
+                widths[side] = width
+                if side not in stable_width or abs(width - stable_width[side]) > 0.0005:
+                    stable_since[side] = now
+                    stable_width[side] = width
+                previous[side] = width
+            if not opening and all(
+                # Physical closure and the encoder zero can differ slightly.
+                widths[side] <= self.config.gripper_min_width + 0.003
+                and now - stable_since[side] >= 0.15
+                for side in ("left", "right")
+            ):
+                logger.info("[GRIPPER] Reset closed widths: %s", widths)
+                return widths
+            if opening and now - started >= 0.5 and all(
+                widths[side] > self.config.gripper_min_width + 0.005
+                and now - stable_since[side] >= 0.3
+                for side in ("left", "right")
+            ):
+                logger.info("[GRIPPER] Reset open widths: %s", widths)
+                return widths
+            time.sleep(0.05)
+        phase = "open" if opening else "close"
+        raise RuntimeError(f"Gripper reset {phase} timed out; last widths: {previous}")
     
     @property
     def motor_features(self) -> dict[str, type]:
@@ -281,14 +341,7 @@ class NeroDualArm(Robot):
             self.reset()
             return sent_action
 
-        # Use joint servo control if joint positions are provided
-        if not self.config.debug:
-            try:
-                self.send_action_cartesian(action)
-                    
-            except Exception as e:
-                logger.warning(f"[ROBOT] Action failed: {e}")
-                raise
+        sent_action.update(self.send_action_cartesian(action))
         
         # Public actions are physical target widths. Return the clipped values
         # so replay and recorded labels exactly match the executable command.
@@ -302,38 +355,57 @@ class NeroDualArm(Robot):
 
         return sent_action
 
-    def send_action_cartesian(self, action: dict[str, Any]) -> None:
-        left_delta = np.array([action.get(f"left_delta_ee_pose.{axis}", 0.0) for axis in AXES])
-        right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES])
-        left_norm = float(np.linalg.norm(left_delta))
-        right_norm = float(np.linalg.norm(right_delta))
+    def send_action_cartesian(self, action: dict[str, Any]) -> dict[str, float]:
+        """Return only increments accepted by the RPC, in the public frame."""
+        deltas = {
+            side: np.array([action.get(f"{side}_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
+            for side in ("left", "right")
+        }
+        if any(not np.all(np.isfinite(delta)) for delta in deltas.values()):
+            raise ValueError("Nero Cartesian actions must be finite")
+        effective = {f"{side}_delta_ee_pose.{axis}": 0.0 for side in deltas for axis in AXES}
+        if self.config.debug or not self._should_send_action():
+            return effective
+        for side, public_delta in deltas.items():
+            transform = self._pose_transforms.get(side)
+            base_delta = transform.delta_to_base(public_delta) if transform is not None else public_delta
+            if np.linalg.norm(base_delta) < 0.001:
+                continue
+            accepted = self._robot.servo_p_OL(f"{side}_robot", base_delta, delta=True)
+            if accepted is False:
+                self._handle_cartesian_rejection(side)
+                # The server did not send this target. Keep its recorded delta
+                # at zero, discard it, and still process the other arm.
+                continue
+            self._cartesian_rejections[side] = 0
+            sent_delta = transform.delta_to_world(base_delta) if transform is not None else base_delta
+            effective.update({f"{side}_delta_ee_pose.{axis}": float(sent_delta[i]) for i, axis in enumerate(AXES)})
+        return effective
 
-        # 频率限制
-        if not self._should_send_action():
-            return
-
-        if not self.config.debug:
-            try:
-                # 左臂：直接传入增量
-                if left_norm >= 0.001:
-                    # t_servo_start = time.perf_counter()
-                    self._robot.servo_p_OL("left_robot", left_delta, delta=True)
-                    # t_servo_end = time.perf_counter()
-                    # logger.info(f"[TIMING] left servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
-                
-                # 右臂：直接传入增量
-                if right_norm >= 0.001:
-                    # t_servo_start = time.perf_counter()
-                    self._robot.servo_p_OL("right_robot", right_delta, delta=True)
-                    # t_servo_end = time.perf_counter()
-                    # logger.info(f"[TIMING] right servo_p_OL: {(t_servo_end-t_servo_start)*1000:.2f}ms")
-                    
-            except Exception as e:
-                logger.warning(f"[DUAL ARM] servo_p_OL failed: {e}")
-                raise
-        
-        # t_cart_end = time.perf_counter()
-        # logger.info(f"[TIMING] send_action_cartesian total: {(t_cart_end-t_cart_start)*1000:.2f}ms")
+    def _handle_cartesian_rejection(self, side: str) -> None:
+        """A rejected IK/workspace frame may be skipped only on a healthy arm."""
+        # Never suppress RPC failures or infer health from a False response.
+        status = getattr(self._robot, f"{side}_robot_get_arm_status")()
+        enabled = status.get("joint_enabled") if isinstance(status, dict) else None
+        healthy = (
+            isinstance(status, dict)
+            and status.get("arm_status") == 0
+            and status.get("all_joints_enabled") is True
+            and isinstance(enabled, (list, tuple))
+            and len(enabled) == 7
+            and all(enabled)
+        )
+        if not healthy:
+            raise RuntimeError(f"Nero rejected {side} Cartesian action; arm not confirmed healthy: {status}")
+        self._cartesian_rejections[side] += 1
+        count = self._cartesian_rejections[side]
+        if count == 1 or count % 100 == 0:
+            logger.warning(
+                "[NERO] Skipped %s Cartesian frame: server rejected target "
+                "(IK/workspace/cooldown); arm is normal and enabled. "
+                "Rejected delta discarded; consecutive rejected frames=%d.",
+                side, count,
+            )
 
 
     def get_observation(self) -> dict[str, Any]:
@@ -363,12 +435,16 @@ class NeroDualArm(Robot):
         obs_dict = {}
         
         server_axes = ("x", "y", "z", "rz", "ry", "rx")
-        left_pose_by_axis = dict(zip(server_axes, left_ee_pose, strict=True))
-        right_pose_by_axis = dict(zip(server_axes, right_ee_pose, strict=True))
-        for axis in AXES:
-            obs_dict[f"left_ee_pose.{axis}"] = float(left_pose_by_axis[axis])
-        for axis in AXES:
-            obs_dict[f"right_ee_pose.{axis}"] = float(right_pose_by_axis[axis])
+        # Preserve the existing RPC wire-axis convention, then transform the
+        # canonical [x,y,z,rotvec] pose. Absolute rotations compose on SO(3).
+        for side, raw_pose in (("left", left_ee_pose), ("right", right_ee_pose)):
+            pose_by_axis = dict(zip(server_axes, raw_pose, strict=True))
+            pose = np.array([pose_by_axis[axis] for axis in AXES], dtype=float)
+            transform = self._pose_transforms.get(side)
+            if transform is not None:
+                pose = transform.apply_pose6(pose)
+            for i, axis in enumerate(AXES):
+                obs_dict[f"{side}_ee_pose.{axis}"] = float(pose[i])
         
         # Gripper width is queried from the controller when available. Use the
         # last requested physical width as a safe fallback during RPC hiccups.

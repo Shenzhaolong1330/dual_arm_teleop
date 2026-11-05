@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock
 
 import numpy as np
 import yaml
 
 from scripts.core.run_record import RecordConfig
 from teleoperators.oculus_teleoperator.oculus.oculus_dual_arm_robot import OculusDualArmRobot
+from teleoperators.oculus_teleoperator.config_oculus_teleop import OculusTeleopConfig
+from teleoperators.oculus_teleoperator.oculus_teleop import OculusTeleop
 
 
 class _FakeOculusReader:
@@ -70,6 +74,31 @@ def _make_mirrored_oculus_robot() -> OculusDualArmRobot:
 
 
 class OculusMirrorTeleopTest(unittest.TestCase):
+    def test_episode_buttons_are_global_and_do_not_release_a_gripper_or_move(self):
+        for mirror in (False, True):
+            for button in ("A", "B"):
+                with self.subTest(mirror=mirror, button=button):
+                    core = _make_mirrored_oculus_robot()
+                    core._mirror_teleop = mirror
+                    core._left_one_euro = Mock()
+                    core._right_one_euro = Mock()
+                    poses, buttons = _FakeOculusReader().get_transformations_and_buttons()
+                    buttons.update(A=button == "A", B=button == "B", Y=False)
+                    core._oculus_reader = SimpleNamespace(get_transformations_and_buttons=lambda: (poses, buttons))
+                    teleop = OculusTeleop(OculusTeleopConfig(mirror_teleop=mirror))
+                    teleop._is_connected = True
+                    teleop.oculus_robot = core
+                    action = teleop.get_action()
+                    self.assertEqual(action["save_episode_requested"], button == "A")
+                    self.assertEqual(action["discard_episode_requested"], button == "B")
+                    self.assertFalse(action["left_gripper_release_requested"])
+                    self.assertFalse(action["right_gripper_release_requested"])
+                    self.assertFalse(action["left_grip_pressed"])
+                    self.assertFalse(action["right_grip_pressed"])
+                    for side in ("left", "right"):
+                        for axis in ("x", "y", "z", "rx", "ry", "rz"):
+                            self.assertEqual(action[f"{side}_delta_ee_pose.{axis}"], 0)
+
     def test_mirror_swaps_arms_grippers_and_release_buttons(self):
         robot = _make_mirrored_oculus_robot()
 
@@ -85,7 +114,7 @@ class OculusMirrorTeleopTest(unittest.TestCase):
         self.assertFalse(robot._left_gripper_release_requested)
         self.assertTrue(robot._right_gripper_release_requested)
 
-    def test_x_embodiment_robot_configs_enable_mirror(self):
+    def test_robot_configs_use_their_selected_mirror_mode(self):
         root = Path(__file__).resolve().parents[1]
         record = yaml.safe_load((root / "scripts/config/record_cfg.yaml").read_text())["record"]
 
@@ -93,15 +122,14 @@ class OculusMirrorTeleopTest(unittest.TestCase):
             cfg = deepcopy(record)
             cfg["robot_type"] = robot_type
             teleop_cfg = RecordConfig(cfg).create_teleop_config()
-            self.assertTrue(teleop_cfg.mirror_teleop, robot_type)
+            self.assertEqual(teleop_cfg.mirror_teleop, robot_type in {"arx_dual_arm", "franka_dual_arm"}, robot_type)
 
-    def test_flexiv_opposite_controller_signs_match_mirror_mapping(self):
-        mirror_signs = OculusDualArmRobot.MIRROR_ACTION_SIGNS
-        left_signs = np.array([-1, 1, 1, 1, -1, 1])
-        right_signs = np.array([1, -1, 1, -1, 1, 1])
-
-        np.testing.assert_array_equal(mirror_signs * right_signs, left_signs)
-        np.testing.assert_array_equal(mirror_signs * left_signs, right_signs)
+    def test_flexiv_same_side_controls_use_matching_axis_signs(self):
+        root = Path(__file__).resolve().parents[1]
+        config = yaml.safe_load((root / "scripts/config/robots/flexiv_config.yaml").read_text())
+        oculus = config["teleop"]["oculus_config"]
+        self.assertEqual(oculus["left_channel_signs"], [1, 1, 1, -1, -1, 1])
+        self.assertEqual(oculus["right_channel_signs"], oculus["left_channel_signs"])
 
 
 if __name__ == "__main__":

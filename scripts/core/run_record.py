@@ -12,12 +12,14 @@ from robots import (
 )
 from robots.dual_arm_schema import (
     GRIPPER_ACTION_SEMANTICS, GRIPPER_ACTION_SEMANTICS_KEY,
-    metric_gripper_keys, command_target_action, validate_recording_semantics, finite_gripper_value,
+    metric_gripper_keys, cartesian_action_keys, command_target_action,
+    recording_semantics, validate_recording_semantics, finite_gripper_value,
 )
 from teleoperators import (
     OculusTeleopConfig,
     OculusTeleop,
 )
+from teleoperators.oculus_teleoperator.processing_profiles import resolve_processing_config
 from lerobot.cameras.configs import ColorMode, Cv2Rotation
 from lerobot.cameras.realsense.camera_realsense import RealSenseCameraConfig
 from lerobot.processor import make_default_processors
@@ -46,6 +48,10 @@ from scripts.core.policy_config_utils import (
     load_policy_yaml,
     resolve_policy_config_path,
     self_test_policy_config_loader,
+)
+from scripts.core.robot_selection import (
+    ROBOT_DETAIL_CONFIG_FILES, ROBOT_CONFIG_DIR, LEGACY_ROBOT_CONFIG_DIR,
+    _resolve_das_config_path,
 )
 
 import logging
@@ -148,17 +154,6 @@ def _default_record_cfg_path() -> Path:
     return _default_scripts_dir() / "config" / "record_cfg.yaml"
 
 
-ROBOT_DETAIL_CONFIG_FILES = {
-    "dobot_dual_arm": "dobot_config.yaml",
-    "franka": "franka_config.yaml",
-    "franka_dual_arm": "franka_config.yaml",
-    "nero_dual_arm": "nero_cofig.yaml",
-    "arx_dual_arm": "arx_config.yaml",
-    "flexiv_dual_arm": "flexiv_config.yaml",
-}
-ROBOT_CONFIG_DIR = Path("config") / "robots"
-LEGACY_ROBOT_CONFIG_DIR = Path("DAS_config")
-
 ROBOT_DETAIL_CONFIG_KEYS = ("teleop", "robot", "cameras")
 
 
@@ -170,39 +165,6 @@ def _deep_merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[st
         else:
             merged[key] = copy.deepcopy(value)
     return merged
-
-
-def _resolve_das_config_path(
-    robot_type: str,
-    scripts_dir: Path,
-    project_root: Path,
-    explicit_path: str | Path | None = None,
-) -> Path:
-    if explicit_path:
-        path = Path(explicit_path).expanduser()
-        if path.is_absolute():
-            return path
-        candidates = (
-            project_root / path,
-            scripts_dir / path,
-            scripts_dir / ROBOT_CONFIG_DIR / path,
-            scripts_dir / ROBOT_CONFIG_DIR / path.name,
-            project_root / "scripts" / ROBOT_CONFIG_DIR / path.name,
-            scripts_dir / LEGACY_ROBOT_CONFIG_DIR / path,
-        )
-        for candidate in candidates:
-            if candidate.is_file():
-                return candidate
-        return candidates[0]
-
-    config_name = ROBOT_DETAIL_CONFIG_FILES.get(robot_type)
-    if config_name is None:
-        raise ValueError(
-            "No robot config mapping is defined for robot_type="
-            f"{robot_type!r}. Add record.das_config_path or extend "
-            "ROBOT_DETAIL_CONFIG_FILES."
-        )
-    return scripts_dir / ROBOT_CONFIG_DIR / config_name
 
 
 def _load_robot_detail_cfg(
@@ -336,7 +298,15 @@ class RecordConfig:
         debug_options = debug_cfg if isinstance(debug_cfg, dict) else {}
         
         # Global config
-        self.repo_id: str = cfg["repo_id"]
+        self.robot_type: str = cfg.get("robot_type", "dobot_dual_arm")
+        if self.robot_type not in SUPPORTED_ROBOTS:
+            raise ValueError(
+                f"Unsupported robot type: {self.robot_type}. "
+                f"Supported types: {SUPPORTED_ROBOTS}"
+            )
+        # YAML aliases cannot concatenate strings; expand the explicit token
+        # before deriving the default dataset path. Literal repo IDs stay valid.
+        self.repo_id: str = cfg["repo_id"].replace("{robot_type}", self.robot_type)
         self.debug: bool = bool(
             debug_options.get("robot_debug", cfg.get("robot_debug", False))
             if isinstance(debug_cfg, dict)
@@ -362,14 +332,6 @@ class RecordConfig:
         # Finish behavior: by default reset to home and keep connection to avoid server stop on close.
         self.reset_on_finish: bool = cfg.get("reset_on_finish", True)
         self.disconnect_on_finish: bool = cfg.get("disconnect_on_finish", False)
-        
-        # Robot type selection
-        self.robot_type: str = cfg.get("robot_type", "dobot_dual_arm")
-        if self.robot_type not in SUPPORTED_ROBOTS:
-            raise ValueError(
-                f"Unsupported robot type: {self.robot_type}. "
-                f"Supported types: {SUPPORTED_ROBOTS}"
-            )
         
         # Teleop config - parse based on control mode
         self.control_mode = teleop.get("control_mode", "oculus")
@@ -446,7 +408,11 @@ class RecordConfig:
     def _parse_teleop_config(self, teleop: Dict[str, Any]) -> None:
         """Parse teleoperation configuration based on control mode."""
         if self.control_mode == "oculus":
-            oculus_cfg = teleop.get("oculus_config", {})
+            oculus_cfg = resolve_processing_config(teleop.get("oculus_config", {}))
+            self.quest_processing_profile = oculus_cfg.get("processing_profile")
+            if (self.quest_processing_profile is not None
+                    and float(self.fps) != float(oculus_cfg["action_smoothing_freq"])):
+                raise ValueError("Quest processing_profile cross_embodiment_v1 requires fps=30")
             self.use_gripper = oculus_cfg.get("use_gripper", True)
             self.oculus_ip = oculus_cfg.get("ip", "192.168.110.62")
             self.pose_scaler = oculus_cfg.get("pose_scaler", [1.0, 1.0])
@@ -513,6 +479,7 @@ class RecordConfig:
         if self.control_mode == "oculus":
             if self.dual_arm:
                 return OculusTeleopConfig(
+                    processing_profile=self.quest_processing_profile,
                     use_gripper=self.use_gripper,
                     gripper_min_width=float(self.robot_extra_config.get("gripper_min_width", 0.0)),
                     gripper_max_open=self.gripper_max_open,
@@ -544,6 +511,7 @@ class RecordConfig:
                     visualize_placo=self.visualize_placo,
                 )
             return OculusTeleopConfig(
+                processing_profile=self.quest_processing_profile,
                 use_gripper=self.use_gripper,
                 gripper_min_width=float(self.robot_extra_config.get("gripper_min_width", 0.0)),
                 gripper_max_open=self.gripper_max_open,
@@ -581,6 +549,14 @@ def handle_incomplete_dataset(dataset_path):
             print("====== [DONE] Incomplete dataset folder deleted successfully. ======")
         else:
             print("====== [KEEP] Incomplete dataset folder retained, please check manually. ======")
+
+
+def _cleanup_unsaved_dataset(dataset, dataset_path: Path) -> None:
+    """Never offer whole-folder deletion after an episode has been saved."""
+    if dataset is not None and dataset.num_episodes > 0:
+        logging.warning("[KEEP] Preserving %d saved episodes at %s", dataset.num_episodes, dataset_path)
+        return
+    handle_incomplete_dataset(dataset_path)
 
 
 def _resolve_record_dataset_root(
@@ -1084,6 +1060,15 @@ def run_mix_record_loop(
         obs_processed = robot_observation_processor(raw_obs)
         observation_frame = build_dataset_frame(dataset.features, obs_processed, prefix=OBS_STR)
 
+        # Episode controls take priority over policy inference and robot actions.
+        teleop_raw_action = teleop.get_action()
+        if _episode_control_boundary(teleop_raw_action, events):
+            if events.get("episode_control"):
+                break
+            busy_wait(1 / fps)
+            timestamp_s = time.perf_counter() - start_episode_t
+            continue
+
         # (1) Policy inference.
         policy_action = predict_action(
             observation=observation_frame,
@@ -1111,7 +1096,6 @@ def run_mix_record_loop(
         frame_segment_id = -1
 
         # (3) Expert override is split by channel: arm/body and grippers are independent.
-        teleop_raw_action = teleop.get_action()
         expert_action_raw = normalize_gripper_command_keys(
             dict(teleop_action_processor((teleop_raw_action, raw_obs))),
             gripper_action_keys,
@@ -1422,9 +1406,23 @@ def _is_reset_requested_action(action: dict[str, Any] | None) -> bool:
     ))
 
 
+def _episode_control_boundary(action: dict[str, Any], events: dict) -> bool:
+    """Latch physical A/B presses across loops; simultaneous presses discard."""
+    save = bool(action.get("save_episode_requested", False))
+    discard = bool(action.get("discard_episode_requested", False))
+    pressed = save or discard
+    if pressed and not events.get("episode_control_held", False):
+        events["episode_control"] = "discard" if discard else "save"
+        events["reset_episode"] = True
+        if discard:
+            events["rerecord_episode"] = True
+    events["episode_control_held"] = pressed
+    return pressed
+
+
 def _metric_reset_boundary(action, features, events) -> bool:
     """Latch a reset press; the outer loop saves first and resets outside recording."""
-    if not metric_gripper_keys(features):
+    if not (metric_gripper_keys(features) or cartesian_action_keys(features)):
         return False
     pressed = _is_reset_requested_action(action)
     if pressed and not events.get("metric_reset_held", False):
@@ -1713,6 +1711,12 @@ def record_loop_with_recorded_resets(
             action_values = make_robot_action(action_values, dataset.features)
         elif teleop is not None:
             raw_action = teleop.get_action()
+            if _episode_control_boundary(raw_action, events):
+                if events.get("episode_control"):
+                    break
+                busy_wait(1 / fps)
+                timestamp = time.perf_counter() - start_episode_t
+                continue
             action_values = teleop_action_processor((raw_action, obs))
         else:
             logging.info(
@@ -1808,6 +1812,15 @@ def _wait_for_next_episode_with_teleop(
 
         if teleop is not None:
             act = teleop.get_action()
+            # A/B also work from the keyboard-driven between-episode wait.
+            if _episode_control_boundary(act, events):
+                if events.pop("episode_control", None):
+                    events["reset_episode"] = False
+                    events["rerecord_episode"] = False
+                    robot.reset()
+                    return False
+                busy_wait(1 / fps)
+                continue
             action_values = teleop_action_processor((act, obs))
             robot_action_to_send = robot_action_processor((action_values, obs))
             if any(key in robot.action_features for key in ("left_gripper_width", "right_gripper_width")):
@@ -1993,8 +2006,9 @@ def run_record(record_cfg: RecordConfig):
                 record_cfg.annotate_success,
             )
 
+        semantics = recording_semantics(dataset_features, robot_config, teleop_config)
         if record_cfg.resume:
-            validate_recording_semantics(load_info(dataset_root), dataset_features)
+            validate_recording_semantics(load_info(dataset_root), dataset_features, semantics)
             dataset = LeRobotDataset(
                 dataset_name,
                 root=dataset_root,
@@ -2015,8 +2029,8 @@ def run_record(record_cfg: RecordConfig):
                 image_writer_threads=4,
             )
             created_dataset = True
-            if metric_gripper_keys(dataset_features):
-                dataset.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = GRIPPER_ACTION_SEMANTICS
+            if semantics:
+                dataset.meta.info.update(semantics)
                 write_info(dataset.meta.info, dataset.root)
         # Set the episode metadata buffer size to 1, so that each episode is saved immediately
         dataset.meta.metadata_buffer_size = record_cfg.save_meta_period
@@ -2128,6 +2142,7 @@ def run_record(record_cfg: RecordConfig):
             if dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0:
                 home_at_finish = False
             reset_boundary = bool(events.pop("reset_episode", False))
+            episode_control = events.pop("episode_control", None)
             saved_episode = False
             rerecord_requested = bool(events["rerecord_episode"])
             if rerecord_requested:
@@ -2142,7 +2157,7 @@ def run_record(record_cfg: RecordConfig):
                     dataset.episode_buffer is not None and dataset.episode_buffer.get("size", 0) > 0
                 )
                 if has_recorded_frames:
-                    if reset_boundary:
+                    if reset_boundary and episode_control != "save":
                         _set_episode_success_annotation(
                             dataset, success=False, success_policy=record_cfg.success_policy,
                             inferred_from_recorded_episode=False,
@@ -2211,7 +2226,7 @@ def run_record(record_cfg: RecordConfig):
                 logging.info("====== [RESET] Resetting robot to home ======")
                 robot.reset()
                 home_at_finish = True
-            if more_episodes:
+            if more_episodes and episode_control is None:
                 moved_while_waiting = _wait_for_next_episode_with_teleop(
                     robot=robot,
                     teleop=teleop,
@@ -2235,7 +2250,7 @@ def run_record(record_cfg: RecordConfig):
             except Exception as reset_err:
                 logging.warning(f"[WARNING] reset_on_finish failed: {reset_err}")
 
-        # Optional disconnect. For Nero, disconnect triggers client.close() -> robot_stop on server.
+        # Nero disconnect closes the RPC transport without stopping the arms.
         if record_cfg.disconnect_on_finish:
             robot.disconnect()
         else:
@@ -2290,7 +2305,7 @@ def run_record(record_cfg: RecordConfig):
                 logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         if created_dataset:
-            handle_incomplete_dataset(dataset_path)
+            _cleanup_unsaved_dataset(dataset, dataset_path)
         sys.exit(1)
 
     except KeyboardInterrupt:
@@ -2312,7 +2327,7 @@ def run_record(record_cfg: RecordConfig):
                 logging.warning("[CLEANUP] dataset.finalize failed: %s", cleanup_err)
         dataset_path = dataset_root if dataset_root is not None else Path(HF_LEROBOT_HOME) / str(dataset_name)
         if created_dataset:
-            handle_incomplete_dataset(dataset_path)
+            _cleanup_unsaved_dataset(dataset, dataset_path)
         sys.exit(1)
 
 

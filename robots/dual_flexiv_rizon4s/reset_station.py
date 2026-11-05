@@ -1,7 +1,7 @@
 """Run a one-shot station reset using the existing robot-reset implementation.
 
-The GN01/48V Grav requires Init before Move. Recording can keep initialization
-disabled on connect, but an explicit station reset enables it for that gripper.
+The GN01/48V Grav requires calibration after power-on. The station's if_needed
+strategy verifies normal opening first to avoid repeating calibration on reconnect.
 """
 
 from __future__ import annotations
@@ -59,10 +59,11 @@ def main(argv: list[str] | None = None):
     from robots import create_robot_config
     from scripts.core import reset_robot as shared_reset
 
-    parser = argparse.ArgumentParser(description="Home the station's Flexiv arms and open the grippers.")
+    parser = argparse.ArgumentParser(description="Reset the robot selected by the current recording config.")
     parser.add_argument(
         "--config", "--config-path", type=Path,
-        default=Path(__file__).resolve().with_name("station_deepcybo_5090.yaml"),
+        default=shared_reset._default_record_cfg_path(),
+        help="Recording config to reset; defaults to the shared current record_cfg.yaml.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Show config without connecting hardware.")
     args = parser.parse_args(argv)
@@ -74,9 +75,14 @@ def main(argv: list[str] | None = None):
     validated = create_robot_config(robot_type, **{**robot, "debug": False})
     summary = {"config": str(source), "robot_type": robot_type}
     for key in (
+        "robot_ip", "robot_port",
         "left_robot_sn", "right_robot_sn", "left_home_joints", "right_home_joints",
+        "network_interface_whitelist", "enable_timeout_sec",
         "reset_go_home", "home_joint_max_vel", "home_joint_max_acc", "home_joint_timeout_sec",
-        "initialize_gripper_on_connect", "gripper_max_open", "gripper_init_timeout_sec",
+        "initialize_gripper_on_connect", "gripper_init_strategy", "gripper_ready_timeout_sec",
+        "gripper_force", "gripper_speed", "gripper_min_command_interval_sec",
+        "gripper_continuous_speed",
+        "gripper_max_open", "gripper_init_timeout_sec",
         "use_cartesian_servo_thread", "switch_cartesian_mode_on_connect",
     ):
         if hasattr(validated, key):

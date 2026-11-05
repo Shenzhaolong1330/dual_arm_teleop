@@ -1,0 +1,68 @@
+Dual-arm world frames and effective command recording (2026-10-24)
+
+Nero installation supplied by the operator:
+  Both bases upright and parallel, +X forward and +Z upward.
+  Base centres are 0.54 m apart, at the same height.
+  World origin is the midpoint of the two base centres, at base height.
+  +Y points toward the left base; +X = +Y cross +Z.
+  T_world_left_base  = [0, +0.27, 0, 1, 0, 0, 0].
+  T_world_right_base = [0, -0.27, 0, 1, 0, 0, 0].
+  Extrinsic order is [x,y,z,qw,qx,qy,qz], in metres.
+
+scripts/config/robots/nero_cofig.yaml enables world observations and actions.
+Direct NeroDualArmConfig() construction retains base mode for explicit legacy
+use; world mode requires valid extrinsics for both arms before any connection.
+The shared robots.pose_frames.BaseToWorldTransform applies full rigid transforms:
+  p_world = R_world_base * p_base + t_world_base
+  R_world_tcp = R_world_base * R_base_tcp
+Only rotations change the basis of spatial action increments; base spacing is
+not added to increments. RPC commands stay in each arm's native base frame.
+Absolute observation orientations and public rotation deltas use rotvec radians.
+The existing Nero observation wire-axis unpacking [x,y,z,rz,ry,rx] is preserved;
+the existing ServoP input remains [x,y,z,rx,ry,rz]. This change does not redefine
+the external Nero RPC protocol or convert an unspecified server Euler format.
+
+Franka observations/actions already use the upstream RPC world frame, as
+specified by the operator. observation_pose_frame declares that upstream frame;
+the adapter does not apply another world transform. Flexiv retains its existing
+base/world observation transform and its configured action mount-yaw mapping.
+
+New recording contract:
+  action_semantics = effective_target_delta_v1
+  gripper_action_semantics = command_target_width_v1
+  action = the adapter-returned effective command, in the public action frame.
+This applies to run_record, run_policy and the executed action/sent_action in
+run_mix. policy_action and expert_action retain their proposal/teacher meaning.
+All advertised Cartesian and metric gripper targets must be returned and finite;
+otherwise recording aborts before saving the frame. Reset/homing is outside
+recorded task segments, including when grippers are disabled.
+
+Franka returns per-axis clipped deltas, and zero for suppressed tiny/debug moves.
+Nero returns zero for a deadband-suppressed, rate-limited or debug-only increment.
+An explicit negative RPC acknowledgement or an exception aborts that frame.
+Flexiv returns norm-clipped target deltas after converting them back from the
+hardware base to the public action frame. This avoids applying mount_yaw twice
+on replay. The synchronous and background-servo paths share this return contract.
+
+The saved command is a control target, not measured motion. Flexiv's 200 Hz
+interpolator may emit several absolute SDK pose commands for one 30 Hz target
+update. Those internal interpolation packets are not the dataset action samples.
+Controller-side saturation, tracking error and physical execution still require
+hardware validation. No robot or Quest was connected by these regression tests.
+
+Metadata records the action version, explicitly configured observation/action
+frame, rotvec representation, and available base extrinsics. Resume rejects old
+or changed semantics/extrinsics. Merge preserves these metadata fields and
+rejects mismatching semantic/frame versions; cross-robot merging still requires
+the existing explicit strict_robot_type setting. Frame names identify station
+conventions, not proof that two physically separate stations share calibration.
+Preprocessing marked effective commands cannot smooth Cartesian/gripper labels
+while retaining this exact-command meaning. Image processing/static trimming is
+still available; disable label smoothing for these datasets.
+
+Offline regression runner:
+  /home/ziang/szl_ws/audits/dual_arm_fixes_20261024/run_regression.py
+The suite compares mock RPC/SDK targets with actual saved parquet action rows,
+including teleop, policy and mixed modes for all three requested embodiments,
+Nero's 54 cm installation, nonidentity extrinsics, debug/deadband/rate-limit
+no-ops, rejected/nonfinite commands and both Flexiv control paths.

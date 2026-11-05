@@ -4,24 +4,28 @@ teleop:
   control_mode: "oculus" # teleoperation control mode (only "oculus" supported)
   dual_arm: true # dual-arm mode
   oculus_config:
+    processing_profile: cross_embodiment_v1
     # ip: "192.168.110.43" # Oculus Quest IP address
     # ip: "192.168.110.16" # Oculus Quest IP address
     ip: null
     use_gripper: true
-    left_pose_scaler: [1.2, 1.2] # left arm scaler
     left_channel_signs: [-1, -1, 1, 1, 1, 1] # left arm signs
     # left_channel_signs: [-1, -1, 1, -1, -1, -1]
-    right_pose_scaler: [1.2, 1.2] # right arm scaler
     right_channel_signs: [-1, -1, 1, 1, 1, 1] # right arm signs
     # right_channel_signs: [-1, -1, 1, -1, -1, -1]
-    # Operator stands opposite the robot: right controller drives left arm.
-    mirror_teleop: true
+    # Same-side control: left controller -> left arm, right controller -> right arm.
+    mirror_teleop: false
     visualize_placo: false # whether to visualize robot using placo
 
 robot:
+  # Upright, parallel bases: +X forward, +Z up; centre spacing 0.54 m.
+  # World origin: midpoint of base centres, +Y toward the left arm.
+  observation_pose_frame: world
+  left_base_pose_in_world: [0.0, 0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
+  right_base_pose_in_world: [0.0, -0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
   # robot_ip: "192.168.110.203" # dobot server ip
   # robot_ip: "localhost" # nero server ip
-  robot_ip: "10.10.10.1" # dobot server ip
+  robot_ip: "192.168.2.103" # wbcdNUC Nero RPC server
   robot_port: 4242 # dual-arm zerorpc port (single port for both arms)
   use_gripper: true
   # gripper_ip: "192.168.110.15" # gripper zerorpc ip, if different from robot_ip, set to robot_ip
@@ -35,8 +39,8 @@ robot:
   gripper_command_epsilon: 0.0005 # metres; suppress redundant width commands
 
 cameras:
-  left_wrist_cam_serial: "412622270929" # left wrist camera serial number
-  right_wrist_cam_serial: "412622270701" # right wrist camera serial number
-  head_cam_serial: "339322074423" # head (overhead) camera serial number
+  left_wrist_cam_serial: "260322278993" # D405, left wrist
+  right_wrist_cam_serial: "260522277288" # D405, right wrist
+  head_cam_serial: "347622074728" # D435i, head
   width: 424 # 640 424
   height: 240 # 360 240

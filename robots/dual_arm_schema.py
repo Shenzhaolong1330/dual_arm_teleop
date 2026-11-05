@@ -14,7 +14,10 @@ from __future__ import annotations
 import math
 from typing import Any, Mapping
 
-from scripts.utils.dataset_utils import GRIPPER_ACTION_SEMANTICS_KEY, GRIPPER_ACTION_SEMANTICS
+from scripts.utils.dataset_utils import (
+    ACTION_SEMANTICS, ACTION_SEMANTICS_KEY,
+    GRIPPER_ACTION_SEMANTICS_KEY, GRIPPER_ACTION_SEMANTICS,
+)
 
 
 AXES = ("x", "y", "z", "rx", "ry", "rz")
@@ -113,13 +116,28 @@ def metric_gripper_keys(features: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(key for key in GRIPPER_WIDTH_KEYS if key in names)
 
 
+def cartesian_action_keys(features: Mapping[str, Any]) -> tuple[str, ...]:
+    names = features.get("action", {}).get("names") or []
+    return tuple(key for key in action_feature_names(use_gripper=False) if key in names)
+
+
 def command_target_action(action, sent_action, features) -> dict[str, Any]:
-    """Keep arm labels unchanged, but require effective targets from send_action."""
+    """Record adapter-returned effective targets in the public action frame.
+
+    Fail before saving if a target is missing or nonfinite. Controller
+    interpolation and measured motion are separate from these target deltas.
+    """
     result = dict(action)
-    for key in metric_gripper_keys(features):
+    for key in cartesian_action_keys(features) + metric_gripper_keys(features):
         if not isinstance(sent_action, Mapping) or key not in sent_action:
             raise ValueError(f"send_action did not return effective target {key}")
-        result[key] = finite_gripper_value(sent_action[key])
+        try:
+            value = float(sent_action[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Effective target {key} must be finite") from exc
+        if not math.isfinite(value):
+            raise ValueError(f"Effective target {key} must be finite")
+        result[key] = value
     return result
 
 
@@ -133,6 +151,34 @@ def finite_gripper_value(value) -> float:
     return value
 
 
-def validate_recording_semantics(info, features) -> None:
+def recording_semantics(features, robot_config=None, teleop_config=None) -> dict[str, Any]:
+    """Version changed arm labels and persist the explicitly configured frame."""
+    info: dict[str, Any] = {}
+    if cartesian_action_keys(features):
+        info[ACTION_SEMANTICS_KEY] = ACTION_SEMANTICS
+    if metric_gripper_keys(features):
+        info[GRIPPER_ACTION_SEMANTICS_KEY] = GRIPPER_ACTION_SEMANTICS
+    frame = getattr(robot_config, "observation_pose_frame", None)
+    if frame in ("base", "world"):
+        info["observation_pose_frame"] = frame
+        info["action_pose_frame"] = "world" if hasattr(robot_config, "left_mount_yaw_deg") else frame
+        info["orientation_representation"] = "rotvec"
+        if frame == "world":
+            extrinsics = {
+                side: getattr(robot_config, f"{side}_base_pose_in_world", None)
+                for side in SIDES
+            }
+            if all(value is not None for value in extrinsics.values()):
+                info["base_poses_in_world"] = extrinsics
+    if teleop_config is not None:
+        info["quest_processing"] = teleop_config.processing_metadata()
+    return info
+
+
+def validate_recording_semantics(info, features, expected_semantics=None) -> None:
     if metric_gripper_keys(features) and info.get(GRIPPER_ACTION_SEMANTICS_KEY) != GRIPPER_ACTION_SEMANTICS:
         raise ValueError("Cannot resume old/unknown gripper action semantics; use a new dataset name/root")
+    expected = recording_semantics(features) if expected_semantics is None else expected_semantics
+    for key, value in expected.items():
+        if info.get(key) != value:
+            raise ValueError(f"Cannot resume different/unknown {key}; use a new dataset name/root")

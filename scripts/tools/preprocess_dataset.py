@@ -20,7 +20,7 @@ from lerobot.datasets.utils import DEFAULT_FEATURES, write_info
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.utils.dataset_utils import GRIPPER_ACTION_SEMANTICS_KEY, validate_gripper_smoothing
+from scripts.utils.dataset_utils import SEMANTICS_METADATA_KEYS, validate_gripper_smoothing
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -574,9 +574,10 @@ def _create_output_dataset(source: LeRobotDataset, cfg: dict[str, Any]) -> LeRob
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
 
-    if GRIPPER_ACTION_SEMANTICS_KEY in source.meta.info:
-        output.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = source.meta.info[GRIPPER_ACTION_SEMANTICS_KEY]
-        write_info(output.meta.info, output.root)
+    for key in SEMANTICS_METADATA_KEYS:
+        if key in source.meta.info:
+            output.meta.info[key] = source.meta.info[key]
+    write_info(output.meta.info, output.root)
     return output
 
 

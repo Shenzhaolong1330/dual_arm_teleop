@@ -34,7 +34,8 @@ class OculusTeleop(Teleoperator):
     - RTr (Right Trigger): Controls right gripper (1.0 = open, 0.0 = closed)
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
-    - A button: Request robot reset
+    - A button: Save episode, reset, and start next episode
+    - B button: Discard current episode, reset, and retry
     """
     
     config_class = OculusTeleopConfig
@@ -69,6 +70,9 @@ class OculusTeleop(Teleoperator):
         if self._is_connected:
             logger.warning(f"{self.name} is already connected.")
             return
+
+        processing = self.cfg.processing_metadata()
+        logger.info("[TELEOP] Quest processing profile: %s", processing["profile"])
         
         logger.info(f"\n===== [TELEOP] Connecting to {self.name} =====")
         
@@ -160,6 +164,8 @@ class OculusTeleop(Teleoperator):
         
         # Reset request flag (for external use)
         action["reset_requested"] = obs.get("reset_requested", False)
+        action["save_episode_requested"] = obs.get("save_episode_requested", False)
+        action["discard_episode_requested"] = obs.get("discard_episode_requested", False)
         for key in [
             "left_grip_pressed",
             "right_grip_pressed",
@@ -247,7 +253,8 @@ if __name__ == "__main__":
     print("  - RG (Right Grip):   Press to enable RIGHT arm action")
     print("  - LTr (Left Trigger):  Control LEFT gripper")
     print("  - RTr (Right Trigger): Control RIGHT gripper")
-    print("  - A button: Request robot reset")
+    print("  - A button: Save episode, reset, and start next episode")
+    print("  - B button: Discard current episode, reset, and retry")
     print("Press Ctrl+C to exit\n")
     
     try:

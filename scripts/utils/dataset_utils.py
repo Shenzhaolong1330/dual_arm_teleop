@@ -4,17 +4,38 @@ from datetime import datetime
 
 GRIPPER_ACTION_SEMANTICS_KEY = "gripper_action_semantics"
 GRIPPER_ACTION_SEMANTICS = "command_target_width_v1"
+ACTION_SEMANTICS_KEY = "action_semantics"
+ACTION_SEMANTICS = "effective_target_delta_v1"
+SEMANTICS_METADATA_KEYS = (
+    GRIPPER_ACTION_SEMANTICS_KEY, ACTION_SEMANTICS_KEY,
+    "observation_pose_frame", "action_pose_frame", "orientation_representation", "base_poses_in_world",
+    "quest_processing",
+)
 
 
 def validate_merge_semantics(reference_info, candidate_info) -> None:
     if reference_info.get(GRIPPER_ACTION_SEMANTICS_KEY) != candidate_info.get(GRIPPER_ACTION_SEMANTICS_KEY):
         raise ValueError("Cannot merge datasets with different gripper_action_semantics (including old/unknown)")
+    for key in (ACTION_SEMANTICS_KEY, "observation_pose_frame", "action_pose_frame", "orientation_representation"):
+        if reference_info.get(key) != candidate_info.get(key):
+            raise ValueError(f"Cannot merge datasets with different {key} (including old/unknown)")
+    # Installation mappings and physical gripper limits may differ across
+    # embodiments. Compare only the common Quest response profile/parameters.
+    for key in ("profile", "parameters"):
+        reference = (reference_info.get("quest_processing") or {}).get(key)
+        candidate = (candidate_info.get("quest_processing") or {}).get(key)
+        if reference != candidate:
+            raise ValueError(f"Cannot merge datasets with different quest_processing.{key} (including old/unknown)")
 
 
 def validate_gripper_smoothing(info, cfg) -> None:
     if (info.get(GRIPPER_ACTION_SEMANTICS_KEY) == GRIPPER_ACTION_SEMANTICS
             and (cfg.get("action_smoothing") or {}).get("smooth_gripper", False)):
         raise ValueError("Gripper smoothing is incompatible with command_target_width_v1")
+    smoothing = cfg.get("action_smoothing") or {}
+    if (info.get(ACTION_SEMANTICS_KEY) == ACTION_SEMANTICS
+            and smoothing.get("enabled", False) and smoothing.get("smooth_cartesian", True)):
+        raise ValueError("Cartesian smoothing is incompatible with effective_target_delta_v1")
 
 
 def generate_dataset_name(cfg):

@@ -8,6 +8,7 @@ from robots import (
     create_robot,
 )
 import logging
+from scripts.core.robot_selection import ROBOT_DETAIL_CONFIG_FILES, ROBOT_CONFIG_DIR
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -18,17 +19,6 @@ def _default_scripts_dir() -> Path:
 
 def _default_record_cfg_path() -> Path:
     return _default_scripts_dir() / "config" / "record_cfg.yaml"
-
-
-ROBOT_DETAIL_CONFIG_FILES = {
-    "dobot_dual_arm": "dobot_config.yaml",
-    "franka": "franka_config.yaml",
-    "franka_dual_arm": "franka_config.yaml",
-    "nero_dual_arm": "nero_cofig.yaml",
-    "arx_dual_arm": "arx_config.yaml",
-    "flexiv_dual_arm": "flexiv_config.yaml",
-}
-ROBOT_CONFIG_DIR = Path("config") / "robots"
 
 
 def _apply_reset_runtime_overrides(robot_type: str, robot_cfg: Dict[str, Any]) -> None:

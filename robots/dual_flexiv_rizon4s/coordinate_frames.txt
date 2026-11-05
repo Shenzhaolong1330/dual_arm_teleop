@@ -16,9 +16,12 @@ deepcybo-5090 station convention (operator dimensions, 2026-10-20):
   +Y: toward the left base; +Z: up; +X: Y cross Z (right-handed).
   Left base position:  [0, +0.16, 0] m.
   Right base position: [0, -0.16, 0] m.
-  Existing mount_yaw maps common action increments into RDK base coordinates.
-  Its inverse maps observations from base to world: left -45 deg, right +45 deg.
-  These are installation-based extrinsics, not a new precision calibration.
+  RDK axes are treated as aligned with the workspace; mounting-yaw compensation
+  and base-to-world rotation are both zero. The operator's forward-motion check
+  found that the previous +/-45 degree action compensation made the left arm
+  drift left and the right arm drift right, so that compensation was removed.
+  The remaining common-frame extrinsic is the +/-0.16 m base-centre translation.
+  This is a functional alignment check, not a new precision extrinsic calibration.
 
 station_deepcybo_5090.yaml contains the recording hardware configuration;
 station_deepcybo_5090_readonly.yaml disables robot enabling, homing and servo control.
@@ -38,8 +41,13 @@ Manual reset entry (reset_station.py):
   Home velocity is 0.5 rad/s: 50% of the original 1.0 rad/s.
   Original acceleration 2.0 rad/s^2 and original 20-second home timeout are restored.
   There is no automatic homing when connecting during ordinary recording.
-  Explicit reset enables GN01 initialization before sending the opening command;
-  the recording connect configuration and read-only diagnostics keep Init disabled.
+  Recording and explicit reset use gripper_init_strategy: if_needed. First verify
+  a normal opening at the configured 0.2 m/s; a measured stopped width within 1 mm
+  skips the redundant GN01 Init cycle. Only sides that fail to reach the opening
+  target within 2 seconds fall back to initialization. Delivery errors abort;
+  neither command caches nor persisted files are used as readiness evidence.
+  Read-only diagnostics keep gripper initialization disabled.
+  To explicitly recalibrate, set gripper_init_strategy: always for that run.
   Gripper home sends Move once and finishes when measured width is reached and
   motion stops. It does not repeatedly resend Move or add a post-arrival settle delay.
   The existing 10-second gripper timeout is retained to detect actual failures.
@@ -47,3 +55,190 @@ Manual reset entry (reset_station.py):
   subsequent opening/closing each took about one second at the configured speed.
   Both empty grippers completed open-close-open and were left open, without any
   arm trajectory commands. Results: flexiv-local/logs/gripper-reset-fix-probe.json.
+  Reconnect verification on 2026-10-24: normal opening took 0.81 seconds and an
+  already-open startup returned immediately, with zero Init calls on both sides.
+  Results: flexiv-local/logs/gripper-fast-start-20261024.json.
+  Both the default Flexiv config and station config use left camera 347622072061,
+  right camera 347622074732, and head camera 344522070241. All three passed a
+  simultaneous 90-frame RGB capture at approximately 30 FPS.
+
+Teleoperation on this workstation uses mirror_teleop: false in both configs:
+left controller drives left arm; right controller drives right arm. Hold the
+side Grip button while moving the tracked controller. The index Trigger only
+commands the gripper. Keep the headset awake and the Reader app in the foreground.
+Input diagnostic on 2026-10-24 saw both Grip inputs and nonzero pose deltas;
+after restarting record with the headset active, the operator confirmed arm following.
+Results: flexiv-local/logs/teleop-input-debug-20261024.json.
+
+Same-side mapping for an operator behind the robots facing the workspace:
+  Oculus right/up/back axes -> common-world left/up/back via
+    C = [[0,0,-1],[-1,0,0],[0,1,0]].
+  Thus operator forward/left/up maps to common-world +X/+Y/+Z.
+  Both translation and axial rotation use the same proper rotation C (det=+1).
+  The shared Oculus mapper outputs rotation as [rz,rx,ry], so the Flexiv config
+  uses axis order [0,1,2] and signs [1,1,1,-1,-1,1] for BOTH hands to realize C.
+  No extra X/Y exchange or opposite-hand horizontal signs remain.
+  Base mounting yaw (zero on this workstation) is applied only afterward. Six-axis tests compose the base
+  transforms back to the common world and check position and rotation on both arms.
+  rx/ry/rz are rotation-vector components, not additive Euler RPY angles.
+  The workstation zero-yaw setting follows the operator's axis-direction check;
+  other installations still need their own measured base extrinsics.
+
+Continuous gripper response:
+  Historical Move-path tuning below is superseded on this station by the
+  force_feedback controller described at the end of this document.
+  Linear trigger response (gamma=1), with 2% endpoint deadzones.
+  Command deadband is 0.2 mm. Intermediate aperture commands use a 0.05 m/s
+  velocity cap and the latest target every 0.20 s. Full-open/full-close targets
+  and direct startup/home moves retain the hardware-limited 0.2 m/s speed.
+  Station gripping-force limit is now 20 N (previously 10 N).
+  Left/right Move delivery overlaps when send_arms_parallel is enabled; both
+  deliveries finish before send_action returns. Actual clipped targets remain
+  the recorded action labels. Per-frame Move messages use DEBUG log level.
+  Existing base-frame datasets are not relabeled when switching the default
+  recording config to common-world observations; convert them before mixing.
+  Hardware delivery test (20 continuous targets per mode): serial mean 4.48 ms,
+  p95 8.66 ms; parallel mean 4.22 ms, p95 4.66 ms. These measure RPC dispatch,
+  not mechanical travel time. Both empty grippers were left open; no arm motion
+  commands were sent. Results: flexiv-local/logs/gripper-delivery-latency-20261024.json.
+  A subsequent mechanical test found that continuous 30 Hz Move updates left
+  only about 5-8 mm of actual travel for a 25-75 mm oscillating requested width.
+  Increasing force alone did not fix it. Reducing updates to about 3 Hz restored
+  near-full travel; an initial workaround used a 0.30-second command interval.
+  The operator then reported stepping during continuous trigger movement. Further
+  A/B tests of the same 0.4 Hz aperture trajectory favored a 0.20-second interval
+  and a 0.05 m/s intermediate-speed cap over the 0.30-second/0.2 m/s profile:
+  measured aperture range remained about 37 mm for a requested 40 mm range, and
+  mean absolute aperture error decreased slightly. This reduces stepping but does
+  not turn RDK 1.9's discrete Move interface into a high-bandwidth position servo.
+  The next frame after the interval supplies the newest goal; no old-goal queue
+  is accumulated. Suppressed frames return the prior delivered target to keep
+  dataset actions truthful. Startup/home moves bypass this continuous-input limit.
+  Verification with the production limiter restored actual travel to about
+  29.7-70.3 mm on both grippers, still with continuous aperture rather than binary
+  open/close. This is a command-replanning workaround, not a high-bandwidth servo:
+  goal changes can wait up to 0.20 s plus one recording frame before delivery.
+  Results: flexiv-local/logs/gripper-force-response-20261024.json,
+  flexiv-local/logs/gripper-command-rate-20261024.json, and
+  flexiv-local/logs/gripper-rate-limit-verified-20261024.json.
+  Smoothness experiments: flexiv-local/logs/gripper-smoothness-speed-probe-20261024.json,
+  flexiv-local/logs/gripper-adaptive-smoothness-probe-20261024.json. The final actual
+  recording-config test is flexiv-local/logs/gripper-smooth-follow-verified-20261024.json.
+
+Unresolved smoothness assessment (2026-10-24):
+  The operator still reports obvious stepping with the 0.20 s / 0.05 m/s profile.
+  The "passed" field in the previous hardware log only describes successful
+  command delivery and aperture travel; it does NOT establish smooth following.
+  Neither the force increase nor the rate/speed workaround solved this issue.
+  Local RDK 1.9 exposes Move/Grasp/Stop, with no public gripper position-stream
+  method found in its installed Python API or the official Gripper API reference:
+  https://www.flexiv.com/software/rdk/api/classflexiv_1_1rdk_1_1_gripper.html
+  This does not prove a firmware limit or that raw Modbus is a supported remedy.
+  Next diagnostic: probe_gripper_updates.py compares one Move request with 30 Hz
+  identical requests and 30 Hz targets alternating by +/-1 mm around the same
+  destination. It uses only Gripper calls, does not enable or move either arm,
+  saves partial results on failure, and requires empty grippers and no concurrent
+  recording. Compare measured width/time before changing the production driver.
+
+GN01 aperture feedback update (2026-10-24):
+  Fixed-target comparison isolated changing Move targets as the trigger: a single
+  Move and 30 Hz identical Move targets both completed about 40 mm of travel;
+  30 Hz goals alternating +/-1 mm around the same destination moved only
+  3.26 mm (left) / 3.13 mm (right) in three seconds. This is measured behaviour
+  on these controllers; the firmware's internal mechanism remains unverified.
+  Evidence: flexiv-local/logs/gripper-fixed-target-updates-20261024.json.
+
+  Both station and default recording YAML now select gripper_control_mode:
+  force_feedback. Other installations keep the class default "move".
+  gripper_aperture.py accepts aperture setpoints synchronously and updates direct
+  signed Grasp force from measured aperture on each send_action call. Intermediate
+  goals use proportional/damped feedback with limited integral friction
+  compensation, capped at 5 N in either direction. Goals near fully closed/open
+  use a single Move at 0.2 m/s with the configured 20 N contact-force limit.
+  Thus the 20 N setting is retained for full closure, NOT intermediate-aperture
+  force feedback. This distinction matters when gripping before full trigger.
+  Intermediate goals no longer wait for the former 0.20 s Move limiter.
+  Within 0.8 mm of a stationary goal the controller switches to Stop/width hold.
+  A separate watchdog requests Stop after 0.25 s without an acknowledged update
+  (plus watchdog scheduling and SDK request latency). Reset/manual Move and
+  disconnect close feedback and stop its watchdog before proceeding.
+
+  Public action fields stay absolute aperture targets in metres. They are local
+  controller setpoints, translated to force internally, rather than raw SDK Move
+  targets in this mode. A failed SDK call rejects the action and requests Stop;
+  there is no queued/unacknowledged aperture goal. Observations remain actual
+  measured width. Use the same controller mode for rollout of these actions.
+
+  Production-config empty-gripper verification: same 0.3 Hz sinusoid requesting
+  30-70 mm, mean absolute error 4.12/4.49 mm vs legacy 8.95/9.05 mm (left/right).
+  This is improved following, not zero lag: measured aperture overshot the
+  sinusoid's 70 mm peak by about 4-5 mm. Last-second static hold errors were
+  within about 1.2 mm. Full-close/open reached 0.14/99.86 mm on both grippers.
+  On input loss the watchdog stopped both; final 0.2 s drift was 0.32/0.22 mm.
+  Tests operated only grippers and ended holding near 70 mm; no arm motion calls.
+  Evidence: flexiv-local/logs/gripper-same-path-move-20261024.json and
+  flexiv-local/logs/gripper-aperture-production-20261024.json.
+  46 Flexiv unit tests and 15 cross-embodiment schema tests passed.
+  Operator assessment of trigger smoothness with this new controller is pending.
+
+Arm-following regression investigation (2026-10-24, after force-feedback change):
+  Operator reports small left motion and no right motion; cause not yet isolated.
+  Read-only RDK snapshot after record stopped: both robots operational, no fault,
+  both IDLE. No arm motion or mode-switch commands were sent by the diagnostic.
+  Quest reports mWakefulness=Asleep. The final cached packets at 18:35:42 have
+  no LG/RG pressed and mostly identical left/right transforms; a later passive
+  25-second input sample received zero fresh packets. These observations show
+  invalid/unavailable input during diagnosis, not proof of the earlier cause.
+  The old completed Oculus diagnostic PID 154364 had remained alive in Reader
+  shutdown and was terminated. Reader was brought to the foreground; effective
+  tracking/input testing still requires the operator to wear/wake the headset.
+  Logs: flexiv-local/logs/arm-follow-regression-state-20261024.json and
+  flexiv-local/logs/teleop-follow-regression-20261024.json.
+
+  A separate error-reporting defect was fixed: the Cartesian sender previously
+  retried indefinitely after an SDK failure while recording kept accepting goals.
+  It now latches the error, exits the sender, and raises in send_action and
+  get_observation so the recording cleanup can stop/disconnect. Parallel errors
+  retain the side and original SDK message. An offline right-sender failure test
+  verifies one attempted send, no silent retries and rejection of further goals.
+  47 Flexiv tests passed. No axis/scaling or gripper tuning was changed here.
+
+  Further Quest checks: with the headset Awake, Guardian initially covered the
+  Reader (Reader stopped); after it was cleared, some packets still had identical
+  left/right poses and zero grips. Reader was restarted. Fixed-time samples could
+  finish before the operator wore/woke the headset again, so diagnose_quest_input.py
+  now waits for distinct hand poses and a pressed Grip before counting 25 seconds.
+  The gated sample finally obtained valid input: left/right Grip 87/93 frames,
+  raw path 1105.55/1452.55 mm, processed path 490.77/809.41 mm. Both arms therefore
+  have nonzero teleop outputs under valid input. These path sums are not physical
+  robot displacement and do not establish hardware following.
+  Several wrist increments exceeded the existing 0.1 rad spike limit; the shared
+  filter rejects the entire six-axis sample, including its translation. This can
+  reduce motion but does not yet account for a persistently motionless right arm.
+  No shared filter/profile parameter was changed based on this observation.
+  Evidence: flexiv-local/logs/quest-valid-input-gated-20261024.json.
+
+  record_follow_debug.sh creates temporary recording/hardware YAML files with
+  action and timing logging enabled and tees stdout/stderr to flexiv-local/logs.
+  --prepare-only validates config generation without starting hardware. Normal
+  configs remain unchanged. The action diagnostic now compares commanded targets
+  with latest measured base-frame TCPs and reports servo thread liveness; it also
+  retains the original side/SDK failure. User must start recording explicitly to
+  exercise following. Config generation and three focused follow/failure tests
+  passed; live hardware following with this diagnostic is still pending.
+
+  User ran record_follow_debug.sh at 21:37 on 2026-10-24. That recording did NOT
+  reproduce a stationary right arm: both target paths changed substantially and
+  actual TCPs followed. From the initial to final settled target, net displacement
+  was approximately 63.55 mm left / 130.55 mm right (not total travelled distance).
+  Final measured target errors were 0.4/0.2 mm. No Cartesian sender failure was
+  present; servo stayed alive. Logged send_action median/max was 0.3/4.8 ms,
+  observation median/max 0.2/0.3 ms. These are component timings, not complete
+  end-to-end latency or exact physical servo frequency measurements.
+  Motion was not lag-free: logged transient errors peaked at 59.4/34.6 mm.
+  Eight jump-rejection warnings were logged (warnings are throttled, so this is
+  not a count of all rejected frames). No gain/filter settings were changed from
+  this successful following trace; operator assessment remains necessary before
+  concluding the earlier issue is resolved.
+  Source: flexiv-local/logs/follow-debug-20261024-213719.log.
+  Parsed summary: flexiv-local/logs/follow-debug-analysis-20261024.json.

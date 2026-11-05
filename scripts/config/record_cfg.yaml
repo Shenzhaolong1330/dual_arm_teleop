@@ -1,5 +1,13 @@
+# 统一选择机器人：只修改这里，下面 record / replay 通过 *robot_type 引用。
+# Supported: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
+# robot_type: &robot_type "franka_dual_arm"
+# robot_type: &robot_type "flexiv_dual_arm"
+robot_type: &robot_type "nero_dual_arm"
+
 record:
-  repo_id: &repo_id "franka_dual_arm/B-CARE"
+  robot_type: *robot_type
+  # Quest: A = 保存当前 episode -> reset -> 自动下一段；B = 丢弃当前段 -> reset -> 自动重录。
+  repo_id: &repo_id "{robot_type}/B-CARE" # 自动使用顶部 robot_type；也可填写固定 repo_id
   # repo_id: &repo_id "franka_dual_arm/insert_tube_rack_hard" # dataset repo name on HuggingFace
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
 
@@ -8,12 +16,9 @@ record:
     robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
   user_notes: "Dual-arm task: pick up a test tube and place it into the test tube rack."
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_policy" # run_record | run_policy | run_mix
+  run_mode: "run_record" # run_record | run_policy | run_mix
 
-  # Robot type selection. Supported robots: dobot_dual_arm, franka_dual_arm, nero_dual_arm, arx_dual_arm, flexiv_dual_arm, franka.
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
-  robot_type: &robot_type "franka_dual_arm"
-  # robot_type: &robot_type "nero_dual_arm"
 
   # Optional explicit override if you do not want the robot_type default mapping:
   # das_config_path: scripts/config/robots/dobot_config.yaml
@@ -71,7 +76,7 @@ replay:
   episode_idx: 24 # episode index to replay
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
-  robot_type: *robot_type # robot details are loaded from scripts/config/robots by robot_type
+  robot_type: *robot_type
 
 visualize:
   dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01

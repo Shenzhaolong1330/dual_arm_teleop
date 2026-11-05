@@ -24,7 +24,7 @@ import yaml
 if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from scripts.utils.dataset_utils import GRIPPER_ACTION_SEMANTICS_KEY, validate_merge_semantics
+from scripts.utils.dataset_utils import SEMANTICS_METADATA_KEYS, validate_merge_semantics
 
 try:  # Keep --help/import usable outside the LeRobot runtime environment.
     import numpy as np
@@ -422,10 +422,11 @@ def _run_frame_rewrite_merge(
         batch_encoding_size=int(output_cfg.get("batch_encoding_size", 1)),
     )
 
-    if GRIPPER_ACTION_SEMANTICS_KEY in _metadata(reference).info:
-        from lerobot.datasets.utils import write_info
-        output.meta.info[GRIPPER_ACTION_SEMANTICS_KEY] = _metadata(reference).info[GRIPPER_ACTION_SEMANTICS_KEY]
-        write_info(output.meta.info, output.root)
+    from lerobot.datasets.utils import write_info
+    for key in SEMANTICS_METADATA_KEYS:
+        if key in _metadata(reference).info:
+            output.meta.info[key] = _metadata(reference).info[key]
+    write_info(output.meta.info, output.root)
 
     written_frames = 0
     try:
@@ -566,11 +567,12 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
             download_videos=download_videos,
         )
 
-    if GRIPPER_ACTION_SEMANTICS_KEY in _metadata(reference).info:
-        from lerobot.datasets.utils import load_info, write_info
-        output_info = load_info(output_root)
-        output_info[GRIPPER_ACTION_SEMANTICS_KEY] = _metadata(reference).info[GRIPPER_ACTION_SEMANTICS_KEY]
-        write_info(output_info, output_root)
+    from lerobot.datasets.utils import load_info, write_info
+    output_info = load_info(output_root)
+    for key in SEMANTICS_METADATA_KEYS:
+        if key in _metadata(reference).info:
+            output_info[key] = _metadata(reference).info[key]
+    write_info(output_info, output_root)
 
     # Older LeRobot aggregation can retain source file indices after appending
     # their parquet rows to a different physical destination file.
