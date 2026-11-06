@@ -27,6 +27,7 @@ def rotation_of(pose):
 
 def world_config(**overrides):
     values = {
+        "use_gripper": False,
         "observation_pose_frame": "world",
         "left_mount_yaw_deg": 45.0,
         "right_mount_yaw_deg": -45.0,
@@ -101,6 +102,7 @@ class PoseFrameTests(unittest.TestCase):
         robot._left_robot = StateOnlyRobot(raw)
         robot._right_robot = StateOnlyRobot(raw)
         robot.is_connected = True
+        robot._refresh_cached_poses()
         obs = robot.get_observation()
         for side in ("left", "right"):
             extrinsic = np.array(getattr(config, f"{side}_base_pose_in_world"))
@@ -118,17 +120,37 @@ class PoseFrameTests(unittest.TestCase):
         assert_allclose(robot._servo_left_target_pose7, raw)
         assert_allclose(robot._servo_right_target_pose7, raw)
         self.assertEqual(
-            robot.observation_features, FlexivDualArm(FlexivDualArmConfig()).observation_features
+            robot.observation_features, FlexivDualArm(FlexivDualArmConfig(use_gripper=False)).observation_features
         )
 
     def test_default_base_observation_remains_compatible(self):
-        robot = FlexivDualArm(FlexivDualArmConfig())
+        robot = FlexivDualArm(FlexivDualArmConfig(use_gripper=False))
         raw = pose7([0.4, -0.1, 0.2], Rotation.from_euler("xyz", [0.2, -0.3, 0.4]))
         obs = {}
         robot._add_arm_observation(obs, "left", StateOnlyRobot(raw))
         assert_allclose([obs[f"left_ee_pose.{a}"] for a in ("x", "y", "z")], raw[:3])
         assert_allclose([obs[f"left_ee_pose.{a}"] for a in ("rx", "ry", "rz")], rotation_of(raw).as_rotvec())
 
+    def test_measured_tracking_lag_does_not_reanchor_command_target(self):
+        robot = FlexivDualArm(world_config())
+        initial = pose7([.4, .03, .15], Rotation.identity())
+        robot._left_robot = StateOnlyRobot(initial)
+        robot._right_robot = StateOnlyRobot(initial)
+        robot._refresh_cached_poses()
+        measured = initial.copy()
+        measured[0] -= .05
+        obs = {}
+        robot._add_arm_observation(obs, "left", StateOnlyRobot(measured))
+        assert_allclose(robot._actual_left_pose7, measured)
+        assert_allclose(robot._cached_left_pose7, initial)
+
+    def test_world_actions_use_full_base_rotation(self):
+        base_rotation = Rotation.from_euler("xyz", [.4, -.2, .6])
+        robot = FlexivDualArm(world_config(left_base_pose_in_world=pose7([0, .16, 0], base_rotation).tolist()))
+        delta = np.array([.01, -.02, .03, .02, .01, -.03])
+        mapped = robot._public_delta_to_base("left", delta)
+        assert_allclose(mapped[:3], base_rotation.inv().apply(delta[:3]), atol=1e-12)
+        assert_allclose(mapped[3:], base_rotation.inv().apply(delta[3:]), atol=1e-12)
     def test_existing_action_mount_mapping_is_inverse_of_observation_mapping(self):
         config = world_config()
         robot = FlexivDualArm(config)

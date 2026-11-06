@@ -660,8 +660,8 @@ class FlexivDualArm(Robot):
         right_delta = np.array([action.get(f"right_delta_ee_pose.{axis}", 0.0) for axis in AXES], dtype=float)
         if not np.all(np.isfinite(left_delta)) or not np.all(np.isfinite(right_delta)):
             raise ValueError("Flexiv Cartesian actions must be finite")
-        left_delta = self._apply_mount_yaw(left_delta, self.config.left_mount_yaw_deg)
-        right_delta = self._apply_mount_yaw(right_delta, self.config.right_mount_yaw_deg)
+        left_delta = self._public_delta_to_base("left", left_delta)
+        right_delta = self._public_delta_to_base("right", right_delta)
         left_delta[:3] = _clip_norm(left_delta[:3], self.config.max_cartesian_delta)
         right_delta[:3] = _clip_norm(right_delta[:3], self.config.max_cartesian_delta)
         left_delta[3:] = _clip_norm(left_delta[3:], self.config.max_rotation_delta)
@@ -686,7 +686,9 @@ class FlexivDualArm(Robot):
         # servo's interpolation substeps. Undo only the hardware basis change;
         # otherwise replay would apply mount_yaw twice.
         for side, base_delta in (("left", left_delta), ("right", right_delta)):
-            public_delta = self._apply_mount_yaw(base_delta, -getattr(self.config, f"{side}_mount_yaw_deg"))
+            transform = self._observation_transforms.get(side)
+            public_delta = (transform.delta_to_world(base_delta) if transform is not None else
+                            self._apply_mount_yaw(base_delta, -getattr(self.config, f"{side}_mount_yaw_deg")))
             for index, axis in enumerate(AXES):
                 action[f"{side}_delta_ee_pose.{axis}"] = float(public_delta[index])
 
@@ -947,6 +949,12 @@ class FlexivDualArm(Robot):
         out[:3] = rot_z.apply(out[:3])
         out[3:] = rot_z.apply(out[3:])
         return out
+
+    def _public_delta_to_base(self, side: str, delta: np.ndarray) -> np.ndarray:
+        transform = self._observation_transforms.get(side)
+        if transform is not None:
+            return transform.delta_to_base(delta)
+        return self._apply_mount_yaw(delta, getattr(self.config, f"{side}_mount_yaw_deg"))
 
     def _send_joint_positions(self, action: dict[str, Any]) -> None:
         left_q = [float(action[f"left_joint_{i + 1}.pos"]) for i in range(self._num_joints_per_arm)]
@@ -1447,26 +1455,22 @@ class FlexivDualArm(Robot):
             return obs
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FLEXIV] get_observation failed: %s", exc)
-            if self._prev_observation is not None:
-                return self._prev_observation
             raise
 
     def _add_arm_observation(self, obs: dict[str, Any], side: str, robot: Any) -> None:
         robot_lock = self._left_robot_lock if side == "left" else self._right_robot_lock
         with robot_lock:
             states = robot.states()
-        pose7 = _as_np(getattr(states, "tcp_pose", None), 7)
-        if np.linalg.norm(pose7[3:7]) < 1e-12:
-            pose7[3] = 1.0
+        pose7 = np.asarray(getattr(states, "tcp_pose", None), dtype=float)
+        if (pose7.shape != (7,) or not np.all(np.isfinite(pose7))
+                or np.linalg.norm(pose7[3:]) < 1e-12):
+            raise RuntimeError(f"Flexiv {side} TCP feedback is invalid")
         setattr(self, f"_actual_{side}_pose7", pose7.copy())
 
-        # Motion/servo targets must stay in the RDK base frame. Transform only
-        # the public observation, after caching the unmodified SDK pose.
-        if side == "left":
-            self._cached_left_pose7 = pose7.copy()
-        else:
-            self._cached_right_pose7 = pose7.copy()
-
+        # Observation feedback must not re-anchor the accumulated command goal.
+        # Connect/reset explicitly initialize goals in _refresh_cached_poses().
+        # This keeps synchronous and threaded control on the same target-delta
+        # convention as Franka and Nero, even when physical tracking lags.
         transform = self._observation_transforms.get(side)
         observed_pose7 = transform.apply(pose7) if transform is not None else pose7
         pose6 = _pose7_to_pose6(observed_pose7)
@@ -1474,18 +1478,12 @@ class FlexivDualArm(Robot):
             obs[f"{side}_ee_pose.{axis}"] = float(pose6[index])
 
         if self.config.use_gripper:
-            cmd = self._left_gripper_cmd if side == "left" else self._right_gripper_cmd
             gripper = self._left_gripper if side == "left" else self._right_gripper
-            width = None
-            if gripper is not None:
-                try:
-                    width = self._clip_gripper_width(float(gripper.states().width))
-                except Exception:  # noqa: BLE001
-                    pass
-            if width is None:
-                width = self._left_gripper_width if side == "left" else self._right_gripper_width
-            if width is None:
-                width = self._gripper_width_from_cmd(cmd)
+            if gripper is None:
+                raise RuntimeError(f"Flexiv {side} gripper feedback missing")
+            width = float(gripper.states().width)
+            if not np.isfinite(width):
+                raise RuntimeError(f"Flexiv {side} gripper width is invalid")
             width = self._clip_gripper_width(width)
             self._set_cached_gripper_width(side, width)
             obs[f"{side}_gripper_width"] = width

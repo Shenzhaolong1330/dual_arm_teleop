@@ -18,9 +18,11 @@ The shared robots.pose_frames.BaseToWorldTransform applies full rigid transforms
 Only rotations change the basis of spatial action increments; base spacing is
 not added to increments. RPC commands stay in each arm's native base frame.
 Absolute observation orientations and public rotation deltas use rotvec radians.
-The existing Nero observation wire-axis unpacking [x,y,z,rz,ry,rx] is preserved;
-the existing ServoP input remains [x,y,z,rx,ry,rz]. This change does not redefine
-the external Nero RPC protocol or convert an unspecified server Euler format.
+2026-11-06 correction: the live NUC SDK was verified to return fixed XYZ RPY.
+Nero now converts RPY to rotvec without reversing axes. The v2 RPC accepts
+rotvec and returns effective software targets after legacy server limits,
+attenuation, and orientation freezing. Legacy RPY RPCs remain available only
+as an explicitly selected, unqualified diagnostic mode.
 
 Franka observations/actions already use the upstream RPC world frame, as
 specified by the operator. observation_pose_frame declares that upstream frame;
@@ -39,7 +41,8 @@ recorded task segments, including when grippers are disabled.
 
 Franka returns per-axis clipped deltas, and zero for suppressed tiny/debug moves.
 Nero returns zero for a deadband-suppressed, rate-limited or debug-only increment.
-An explicit negative RPC acknowledgement or an exception aborts that frame.
+A known v2 IK/workspace rejection can be a zero action only after arm health
+is checked. Unknown outcomes and transport errors abort before saving a frame.
 Flexiv returns norm-clipped target deltas after converting them back from the
 hardware base to the public action frame. This avoids applying mount_yaw twice
 on replay. The synchronous and background-servo paths share this return contract.
@@ -50,6 +53,8 @@ update. Those internal interpolation packets are not the dataset action samples.
 Controller-side saturation, tracking error and physical execution still require
 hardware validation. No robot or Quest was connected by these regression tests.
 
+New physical_contract=x_embodiment_physical_v2 additionally separates corrected
+wire semantics from TCP/calibration qualification. See physical_alignment.md.
 Metadata records the action version, explicitly configured observation/action
 frame, rotvec representation, and available base extrinsics. Resume rejects old
 or changed semantics/extrinsics. Merge preserves these metadata fields and

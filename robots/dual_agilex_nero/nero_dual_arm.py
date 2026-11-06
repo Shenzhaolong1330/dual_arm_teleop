@@ -23,6 +23,9 @@ from robots.dual_arm_schema import (
 from robots.pose_frames import BaseToWorldTransform
 from .config_nero import NeroDualArmConfig
 from .nero_interface_client import NeroDualArmClient
+from .physical_protocol import (
+    PROTOCOL, rpy_pose_to_rotvec, rotvec_pose_to_rpy, tool_pose, validate_receipt, vector6,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -42,6 +45,15 @@ class NeroDualArm(Robot):
         self.cameras = make_cameras_from_configs(config.cameras)
 
         self.config = config
+        if config.cartesian_protocol not in {"v2", "legacy_rpy"}:
+            raise ValueError("cartesian_protocol must be v2 or legacy_rpy")
+        for side in ("left", "right"):
+            tool_pose(np.zeros(6), getattr(config, f"{side}_tcp_in_native"))
+            if (config.cartesian_protocol == "legacy_rpy"
+                    and not np.allclose(getattr(config, f"{side}_tcp_in_native"), [0, 0, 0, 1, 0, 0, 0])):
+                raise ValueError("A custom Nero TCP requires the v2 protocol")
+        vector6(config.expected_server_tcp_offset_rpy)
+        self._last_command_receipts = {}
         if config.observation_pose_frame not in {"base", "world"}:
             raise ValueError("observation_pose_frame must be 'base' or 'world'.")
         self._pose_transforms = {}
@@ -123,6 +135,15 @@ class NeroDualArm(Robot):
                 ip=self.config.robot_ip,
                 port=self.config.robot_port
             )
+            if self.config.cartesian_protocol == "v2":
+                protocol = robot.get_teleop_protocol()
+                if not isinstance(protocol, dict) or protocol.get("protocol") != PROTOCOL:
+                    robot.close()
+                    raise RuntimeError("Nero NUC requires nero.cartesian-target.v2 before recording")
+                config_offset = vector6(self.config.expected_server_tcp_offset_rpy)
+                if not np.allclose(vector6(protocol.get("tcp_offset_rpy")), config_offset, atol=1e-9, rtol=0):
+                    robot.close()
+                    raise RuntimeError(f"Nero server TCP changed; expected {config_offset.tolist()}; recalibrate before recording")
             # print(robot)
             # Get end-effector poses for both arms
             left_ee_pose = robot.left_robot_get_ee_pose()
@@ -303,15 +324,17 @@ class NeroDualArm(Robot):
         
         try:
             if arm_side == "left":
-                self._robot.left_gripper_goto(
+                accepted = self._robot.left_gripper_goto(
                     width=width,
                     force=self._gripper_force
                 )
             else:
-                self._robot.right_gripper_goto(
+                accepted = self._robot.right_gripper_goto(
                     width=width,
                     force=self._gripper_force
                 )
+            if accepted is False:
+                raise RuntimeError(f"Nero {arm_side} gripper rejected width target")
             setattr(self, width_attr, width)
             setattr(self, f"_{arm_side}_gripper_target_width", width)
         except Exception as e:
@@ -371,14 +394,28 @@ class NeroDualArm(Robot):
             base_delta = transform.delta_to_base(public_delta) if transform is not None else public_delta
             if np.linalg.norm(base_delta) < 0.001:
                 continue
-            accepted = self._robot.servo_p_OL(f"{side}_robot", base_delta, delta=True)
+            if self.config.cartesian_protocol == "v2":
+                receipt = self._robot.servo_p_OL_v2(
+                    f"{side}_robot", base_delta, getattr(self.config, f"{side}_tcp_in_native"),
+                )
+                sent_base_delta = validate_receipt(receipt)
+                if receipt.get("robot_arm") != f"{side}_robot":
+                    raise RuntimeError("Nero returned an effective target for the wrong arm")
+                self._last_command_receipts[side] = receipt
+                accepted = receipt["accepted"]
+            else:
+                # Explicit legacy diagnostics still use the audited RPY wire
+                # format, but cannot report server-side effective targets.
+                wire = rotvec_pose_to_rpy(base_delta)
+                accepted = self._robot.servo_p_OL(f"{side}_robot", wire, delta=True)
+                sent_base_delta = base_delta
             if accepted is False:
                 self._handle_cartesian_rejection(side)
                 # The server did not send this target. Keep its recorded delta
                 # at zero, discard it, and still process the other arm.
                 continue
             self._cartesian_rejections[side] = 0
-            sent_delta = transform.delta_to_world(base_delta) if transform is not None else base_delta
+            sent_delta = transform.delta_to_world(sent_base_delta) if transform is not None else sent_base_delta
             effective.update({f"{side}_delta_ee_pose.{axis}": float(sent_delta[i]) for i, axis in enumerate(AXES)})
         return effective
 
@@ -416,30 +453,36 @@ class NeroDualArm(Robot):
         
         try:
             # t_query_start = time.perf_counter()
-            left_ee_pose = self._robot.left_robot_get_ee_pose()
+            if self.config.cartesian_protocol == "v2":
+                poses = {}
+                for side in ("left", "right"):
+                    reply = self._robot.get_ee_pose_v2(side)
+                    if not isinstance(reply, dict) or reply.get("protocol") != PROTOCOL:
+                        raise RuntimeError("Nero pose reply has an incompatible protocol")
+                    poses[side] = reply["pose"]
+                left_ee_pose, right_ee_pose = poses["left"], poses["right"]
+            else:
+                left_ee_pose = self._robot.left_robot_get_ee_pose()
             # t_query_end = time.perf_counter()
             # logger.info(f"[TIMING] left robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
             
             # t_query_start = time.perf_counter()
-            right_ee_pose = self._robot.right_robot_get_ee_pose()
+            if self.config.cartesian_protocol != "v2":
+                right_ee_pose = self._robot.right_robot_get_ee_pose()
             # t_query_end = time.perf_counter()
             # logger.info(f"[TIMING] right robot query: {(t_query_end-t_query_start)*1000:.2f}ms")
             
         except Exception as e:
             logger.warning(f"[ROBOT] zerorpc error in get_observation: {e}")
-            if self._prev_observation is not None:
-                return self._prev_observation
-            else:
-                raise
+            raise
         
         obs_dict = {}
         
-        server_axes = ("x", "y", "z", "rz", "ry", "rx")
-        # Preserve the existing RPC wire-axis convention, then transform the
-        # canonical [x,y,z,rotvec] pose. Absolute rotations compose on SO(3).
+        # The live pyAgxArm SDK returns fixed XYZ RPY, without axis reversal.
         for side, raw_pose in (("left", left_ee_pose), ("right", right_ee_pose)):
-            pose_by_axis = dict(zip(server_axes, raw_pose, strict=True))
-            pose = np.array([pose_by_axis[axis] for axis in AXES], dtype=float)
+            pose = (np.asarray(raw_pose, dtype=float) if self.config.cartesian_protocol == "v2"
+                    else rpy_pose_to_rotvec(raw_pose))
+            pose = tool_pose(pose, getattr(self.config, f"{side}_tcp_in_native"))
             transform = self._pose_transforms.get(side)
             if transform is not None:
                 pose = transform.apply_pose6(pose)
@@ -453,12 +496,14 @@ class NeroDualArm(Robot):
                 fallback = getattr(self, f"_{side}_gripper_width")
                 try:
                     state = getattr(self._robot, f"{side}_gripper_get_state")()
-                    width = state.get("width", fallback) if isinstance(state, dict) else fallback
+                    if not isinstance(state, dict) or "width" not in state or not np.isfinite(state["width"]):
+                        raise RuntimeError(f"{side} gripper has no valid measured aperture")
+                    width = state["width"]
                     width = self._clip_gripper_width(float(width))
                     setattr(self, f"_{side}_gripper_width", width)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[%s GRIPPER] state read failed: %s", side.upper(), exc)
-                    width = fallback
+                    raise RuntimeError(f"{side} gripper feedback unavailable") from exc
                 obs_dict[f"{side}_gripper_width"] = float(width)
 
         # TODO: Camera images

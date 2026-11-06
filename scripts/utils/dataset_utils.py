@@ -10,6 +10,8 @@ SEMANTICS_METADATA_KEYS = (
     GRIPPER_ACTION_SEMANTICS_KEY, ACTION_SEMANTICS_KEY,
     "observation_pose_frame", "action_pose_frame", "orientation_representation", "base_poses_in_world",
     "quest_processing",
+    "physical_contract", "physical_calibration",
+    "embodiment_id_map", "source_calibrations",
 )
 
 
@@ -19,6 +21,8 @@ def validate_merge_semantics(reference_info, candidate_info) -> None:
     for key in (ACTION_SEMANTICS_KEY, "observation_pose_frame", "action_pose_frame", "orientation_representation"):
         if reference_info.get(key) != candidate_info.get(key):
             raise ValueError(f"Cannot merge datasets with different {key} (including old/unknown)")
+    if reference_info.get("physical_contract") != candidate_info.get("physical_contract"):
+        raise ValueError("Cannot merge datasets with different physical_contract (including old/unknown)")
     # Installation mappings and physical gripper limits may differ across
     # embodiments. Compare only the common Quest response profile/parameters.
     for key in ("profile", "parameters"):

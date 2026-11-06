@@ -172,6 +172,9 @@ def recording_semantics(features, robot_config=None, teleop_config=None) -> dict
                 info["base_poses_in_world"] = extrinsics
     if teleop_config is not None:
         info["quest_processing"] = teleop_config.processing_metadata()
+    if robot_config is not None and hasattr(robot_config, "physical_calibration"):
+        from robots.physical_alignment import physical_metadata
+        info.update(physical_metadata(robot_config))
     return info
 
 

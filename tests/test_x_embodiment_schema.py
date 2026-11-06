@@ -185,7 +185,7 @@ class XEmbodimentSchemaTest(unittest.TestCase):
         )
 
     def test_nero_schema_observation_and_physical_width_action(self):
-        robot = NeroDualArm(NeroDualArmConfig(cameras={}, debug=True, use_gripper=True))
+        robot = NeroDualArm(NeroDualArmConfig(cameras={}, debug=True, use_gripper=True, cartesian_protocol="legacy_rpy"))
         robot.cameras = self.cameras
         robot._robot = FakeNeroClient()
         robot.is_connected = True
@@ -193,14 +193,16 @@ class XEmbodimentSchemaTest(unittest.TestCase):
         self._assert_features(robot)
         obs = robot.get_observation()
         self.assertEqual(set(obs), set(robot.observation_features))
-        self.assertAlmostEqual(obs["left_ee_pose.rx"], 0.4)
-        self.assertAlmostEqual(obs["left_ee_pose.rz"], 0.6)
+        from scipy.spatial.transform import Rotation
+        expected = Rotation.from_euler("xyz", [0.6, 0.5, 0.4]).as_rotvec()
+        self.assertAlmostEqual(obs["left_ee_pose.rx"], expected[0])
+        self.assertAlmostEqual(obs["left_ee_pose.rz"], expected[2])
         self.assertAlmostEqual(obs["right_gripper_width"], 0.07)
 
         sent = robot.send_action({"left_gripper_width": 0.03, "right_gripper_width": 0.2})
         self.assertAlmostEqual(sent["left_gripper_width"], 0.03)
-        self.assertAlmostEqual(sent["right_gripper_width"], 0.1)
-        self.assertEqual(robot._robot.commands[-1], ("right", 0.1))
+        self.assertAlmostEqual(sent["right_gripper_width"], 0.095)
+        self.assertEqual(robot._robot.commands[-1], ("right", 0.095))
         robot._robot.widths["left"] = 0.015  # Obstruction does not change target.
         robot.get_observation()
         count = len(robot._robot.commands)

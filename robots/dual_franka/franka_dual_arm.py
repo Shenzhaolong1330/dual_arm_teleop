@@ -109,21 +109,22 @@ def _robot_state_from_side(side_state: Mapping[str, Any]) -> Mapping[str, Any]:
 def _ee_pose_from_side(side_state: Mapping[str, Any]) -> np.ndarray:
     robot_state = _robot_state_from_side(side_state)
     if "end_pose" in side_state:
-        return _as_np(side_state.get("end_pose"), 6)
+        pose = np.asarray(side_state["end_pose"], dtype=float)
+        if pose.shape != (6,) or not np.all(np.isfinite(pose)):
+            raise ValueError("Invalid Franka end_pose feedback")
+        return pose
     if "end_pose" in robot_state:
-        return _as_np(robot_state.get("end_pose"), 6)
+        return _ee_pose_from_side({"end_pose": robot_state["end_pose"]})
 
     eef_pose = _as_mapping(robot_state.get("eef_pose"))
     if not eef_pose:
-        return np.zeros(6, dtype=float)
-    position = _as_np(eef_pose.get("position"), 3)
-    quat = _as_np(eef_pose.get("orientation_xyzw"), 4)
-    rotvec = np.zeros(3, dtype=float)
-    if np.linalg.norm(quat) > 1e-12:
-        try:
-            rotvec = R.from_quat(quat).as_rotvec()
-        except ValueError:
-            rotvec = np.zeros(3, dtype=float)
+        raise ValueError("Franka TCP feedback is missing")
+    position = np.asarray(eef_pose.get("position"), dtype=float)
+    quat = np.asarray(eef_pose.get("orientation_xyzw"), dtype=float)
+    if (position.shape != (3,) or quat.shape != (4,) or not np.all(np.isfinite(position))
+            or not np.all(np.isfinite(quat)) or np.linalg.norm(quat) < 1e-12):
+        raise ValueError("Invalid Franka TCP feedback")
+    rotvec = R.from_quat(quat).as_rotvec()
     return np.concatenate([position, rotvec])
 
 
@@ -848,8 +849,6 @@ class FrankaDualArm(Robot):
             state = self._get_cached_or_live_state()
         except Exception as exc:  # noqa: BLE001
             logger.warning("[FRANKA] get_full_state failed: %s", exc)
-            if self._prev_observation is not None:
-                return self._prev_observation
             raise
 
         left_side = _as_mapping(state.get("left_arm", {}))
@@ -866,6 +865,19 @@ class FrankaDualArm(Robot):
         left_cmd = None
         right_cmd = None
         if self.config.use_gripper:
+            for side, state in (("left", left_side), ("right", right_side)):
+                grip = state.get("gripper", _as_mapping(state.get("sensors")).get("robotiq"))
+                if grip is None:
+                    raise RuntimeError(f"Franka {side} gripper feedback missing")
+                if isinstance(grip, Mapping):
+                    raw = grip.get("open_fraction", grip.get("position"))
+                    status = grip.get("driver_status") or {}
+                    if status.get("sample_fresh") is False or status.get("sample_valid") is False:
+                        raise RuntimeError(f"Franka {side} gripper feedback is stale/invalid")
+                else:
+                    raw = grip
+                if raw is None or not np.isfinite(float(raw)):
+                    raise RuntimeError(f"Franka {side} gripper feedback is invalid")
             left_grip = _gripper_open_fraction_from_side(left_side, self._left_gripper_state)
             right_grip = _gripper_open_fraction_from_side(right_side, self._right_gripper_state)
             if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
@@ -966,6 +978,16 @@ class FrankaDualArm(Robot):
             return
         if step_result.get("ok") is False:
             raise RuntimeError(f"Franka rejected action: {step_result}")
+        def check_info(value):
+            if isinstance(value, Mapping):
+                if value.get("error"):
+                    raise RuntimeError(f"Franka command failed: {value['error']}")
+                for item in value.values():
+                    check_info(item)
+            elif isinstance(value, (list, tuple)):
+                for item in value:
+                    check_info(item)
+        check_info(step_result.get("info"))
         observation = step_result.get("observation")
         if isinstance(observation, Mapping):
             self._cached_rpc_state = dict(observation)

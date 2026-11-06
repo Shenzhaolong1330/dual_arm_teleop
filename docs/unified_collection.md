@@ -2,6 +2,7 @@
 
 三端维护同一仓库的 `X-embodiment` 分支。`robot-record` 共用采集循环、
 Quest `cross_embodiment_v1` 输入处理和 X-embodiment 数据格式。
+物理语义修正、当前 TCP 核实结果和标定步骤见 [物理对齐说明](physical_alignment.md)。
 
 ```bash
 robot-record --robot-type franka_dual_arm --repo-id '{robot_type}/my_task'
@@ -81,20 +82,17 @@ Quest A 保存当前段并回位开始下一段，B 丢弃当前未保存段并�
 
 当前不能把三种本体标记为“物理语义已经实机完全验收”：
 
-1. **Nero 旋转协议存在需要核实的对齐缺口。** 当前客户端观测按
-   `[x,y,z,rz,ry,rx]` 重排后当作 rotvec；动作也把 rotvec 分量直接传给 `servo_p_OL`。
-   5090 上已有的 NUC 服务端历史备份将 `get_tcp_pose()` 声明为 RPY，且 `servo_p_OL`
-   明确用 `euler_convert_quat(pose[3],pose[4],pose[5])` 解释输入。
-   Euler/RPY 与 rotvec 在一般姿态下不同，字段名和 metadata 不足以证明已转换。
-   审查时通过现有 SSH 别名访问 `192.168.2.103` 返回 `No route to host`，
-   因而没有确认当前运行服务是否仍使用该协议。未据旧备份更改实时 RPC 约定。
-   证据：5090 的 `/home/ziang/szl_ws/audits/nero-nuc-20261024/workspace-z-limit/nero_interface_server.py`，
-   SHA256 `0259c11b04dd412788d781998088bc1d28fe850c2b9f89f0b4fed11f63df4cfe`。
+1. **Nero 旋转协议已核实并修正。** 已通过 NUC 新地址 `192.168.110.203`
+   核实 `/home/dc/szl_ws/nero-runtime`：SDK 使用固定 XYZ RPY。
+   新客户端取消分量倒序并正确转换 rotvec，要求 `nero.cartesian-target.v2`。
+   新回执包含服务端限幅/缩放/冻结后的实际软件目标增量。
+   安装代码不会启动服务或使能关节；工具点和 SDK/IK 末端参考点仍需核实。
 2. **world 是每个工位的坐标约定。** Franka 由服务器提供；Nero 和 Flexiv 使用
    各自基座变换。仍需核实轴方向、原点、TCP 定义和相机角色，不能因为都叫 world
    就认为它们完成了跨工位标定。当前 Nero/Flexiv 基座间距配置分别为 0.54/0.32 m。
-3. **夹爪范围和动力学不同。** Franka 开口范围为 0–0.085 m，Nero/Flexiv 为
-   0–0.1 m；同样的 0.04 是相同的目标距离，但相同扳机比例会对应不同距离。
+3. **夹爪范围和动力学不同。** Franka 开口范围为 0–0.085 m，Flexiv 为
+   0–0.1 m；确认一代 Pika 后，Nero 名义范围修正为 0–0.095 m。
+   同样的 0.04 是相同的目标距离，但相同扳机比例会对应不同距离。
    控制器限幅、死区、跟踪速度和延迟也不同。
 
 可以开展跨本体联合训练实验，但应先关闭上述协议缺口，做每个本体的坐标/TCP
@@ -106,8 +104,8 @@ Open X-Embodiment 和 Octo 展示了跨本体训练及迁移的可行性；这�
 当前 `robot-train` 不接受 `dataset.repo_id` 列表，需要先生成一个合并后的标准
 LeRobot 数据集。`tools-merge-datasets` 默认 `source.strict_robot_type: true`，
 会拒绝不同本体；完成语义核验后可显式设置为 false，并保留 `strict_schema: true`。
-当前合并工具的数据集级 `robot_type` 沿用第一个来源，来源清单不能代替模型的
-逐样本本体输入。不要据这个单一 metadata 值推断所有样本来自同一种机器人。
+新版跨本体合并要求合格 TCP/标定证据，输出 `robot_type=mixed`，逐帧保留
+`embodiment_id`、`calibration_id` 及全部来源标定。训练配置需要显式使用本体条件。
 改变 mirror 设置后，严格续采检查可能拒绝旧数据集；应新建采集版本，避免改写旧 metadata。
 
 参考：[Open X-Embodiment](https://robotic-transformer-x.github.io/)、

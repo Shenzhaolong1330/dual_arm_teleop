@@ -233,6 +233,16 @@ def _validate_compatible_sources(
     reference_meta = _metadata(reference)
     candidate_meta = _metadata(candidate)
     validate_merge_semantics(reference_meta.info, candidate_meta.info)
+    if _robot_type(reference_meta) != _robot_type(candidate_meta):
+        from robots.physical_alignment import require_cross_body_alignment
+        require_cross_body_alignment(reference_meta.info)
+        require_cross_body_alignment(candidate_meta.info)
+    else:
+        # The same-body aggregate has one calibration in its metadata. Do not
+        # silently label data from another installation/tool as that calibration.
+        for key in ("physical_calibration", "base_poses_in_world", "source_calibrations"):
+            if _json_signature(reference_meta.info.get(key)) != _json_signature(candidate_meta.info.get(key)):
+                raise ValueError(f"{key} mismatch within the same robot_type; keep distinct calibrations separate")
 
     if int(candidate_meta.fps) != int(reference_meta.fps):
         raise ValueError(
@@ -410,12 +420,24 @@ def _run_frame_rewrite_merge(
     logger.info("[SLOW] Falling back to frame rewrite via LeRobotDataset.add_frame/save_episode")
     reference = loaded_metadata[0][1]
     loaded_datasets = _load_sources(source_specs, download_videos=download_videos, metadata_only=False)
+    robot_types = {_robot_type(dataset) for _, dataset, _ in loaded_metadata}
+    mixed = len(robot_types) > 1
+    features = _features_without_defaults(_metadata(reference).features)
+    if mixed:
+        from robots.physical_alignment import EMBODIMENT_IDS
+        unknown = robot_types - set(EMBODIMENT_IDS)
+        if unknown:
+            raise ValueError(f"Unknown cross-body embodiment IDs: {sorted(unknown)}")
+        for name in ("embodiment_id", "calibration_id"):
+            if name in features:
+                raise ValueError(f"Source already has {name}; explicitly flatten its provenance before re-merging")
+            features[name] = {"dtype": "int64", "shape": (1,), "names": [name]}
     output = LeRobotDataset.create(
         repo_id=output_repo_id,
         root=output_root,
         fps=_metadata(reference).fps,
-        features=_features_without_defaults(_metadata(reference).features),
-        robot_type=_robot_type(reference),
+        features=features,
+        robot_type="mixed" if mixed else _robot_type(reference),
         use_videos=len(_metadata(reference).video_keys) > 0,
         image_writer_processes=int(output_cfg.get("image_writer_processes", 0)),
         image_writer_threads=int(output_cfg.get("image_writer_threads", 4)),
@@ -430,7 +452,7 @@ def _run_frame_rewrite_merge(
 
     written_frames = 0
     try:
-        for spec, dataset, episodes in loaded_datasets:
+        for calibration_id, (spec, dataset, episodes) in enumerate(loaded_datasets):
             for ep_idx in episodes:
                 start, end = _episode_bounds(dataset, ep_idx)
                 logger.info(
@@ -442,7 +464,11 @@ def _run_frame_rewrite_merge(
                 )
                 for source_idx in range(start, end):
                     item = dataset[int(source_idx)]
-                    output.add_frame(_frame_from_source_item(dataset, item))
+                    frame = _frame_from_source_item(dataset, item)
+                    if mixed:
+                        frame["embodiment_id"] = np.array([EMBODIMENT_IDS[_robot_type(dataset)]], dtype=np.int64)
+                        frame["calibration_id"] = np.array([calibration_id], dtype=np.int64)
+                    output.add_frame(frame)
                     written_frames += 1
                 output.save_episode()
     finally:
@@ -482,6 +508,7 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
     )
 
     reference_spec, reference, _ = loaded_sources[0]
+    robot_types = {_robot_type(dataset) for _, dataset, _ in loaded_sources}
     for spec, dataset, _ in loaded_sources[1:]:
         _validate_compatible_sources(
             reference,
@@ -516,7 +543,7 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
         "output_repo_id": output_repo_id,
         "output_root": str(output_root),
         "fps": int(_metadata(reference).fps),
-        "robot_type": _robot_type(reference),
+        "robot_type": "mixed" if len(robot_types) > 1 else _robot_type(reference),
         "source_count": len(loaded_sources),
         "total_episodes": total_output_episodes,
         "total_frames": total_input_frames,
@@ -572,11 +599,23 @@ def merge_lerobot_datasets(cfg: dict[str, Any]) -> dict[str, Any]:
     for key in SEMANTICS_METADATA_KEYS:
         if key in _metadata(reference).info:
             output_info[key] = _metadata(reference).info[key]
+    if len(robot_types) > 1:
+        from robots.physical_alignment import EMBODIMENT_IDS
+        output_info["robot_type"] = "mixed"
+        output_info.pop("physical_calibration", None)
+        output_info.pop("base_poses_in_world", None)
+        output_info["embodiment_id_map"] = EMBODIMENT_IDS
+        output_info["source_calibrations"] = [
+            {"calibration_id": index, "source": spec.name, "robot_type": _robot_type(dataset),
+             "physical_calibration": _metadata(dataset).info.get("physical_calibration"),
+             "base_poses_in_world": _metadata(dataset).info.get("base_poses_in_world")}
+            for index, (spec, dataset, _) in enumerate(loaded_sources)
+        ]
     write_info(output_info, output_root)
 
     # Older LeRobot aggregation can retain source file indices after appending
     # their parquet rows to a different physical destination file.
-    from dataset_integrity import repair_data_references
+    from scripts.tools.dataset_integrity import repair_data_references
 
     summary["repaired_data_references"] = repair_data_references(output_root)
     summary["written_frames"] = written_frames

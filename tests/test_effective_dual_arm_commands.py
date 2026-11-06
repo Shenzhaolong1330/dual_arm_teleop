@@ -67,6 +67,7 @@ class EffectiveCommandsTest(unittest.TestCase):
 
     def nero(self, **overrides):
         values = dict(cameras={}, use_gripper=True, debug=False, calibration_dir=self.root,
+                      cartesian_protocol="legacy_rpy",
                       observation_pose_frame="world",
                       left_base_pose_in_world=[0, 0.27, 0, 1, 0, 0, 0],
                       right_base_pose_in_world=[0, -0.27, 0, 1, 0, 0, 0])
@@ -122,7 +123,7 @@ class EffectiveCommandsTest(unittest.TestCase):
         base_rotation = Rotation.from_euler("z", 90, degrees=True)
         quat = base_rotation.as_quat()[[3, 0, 1, 2]].tolist()
         robot = self.nero(use_gripper=False, left_base_pose_in_world=[0, 0.27, 0] + quat)
-        local_rotation = Rotation.from_rotvec([0.2, -0.3, 0.4])
+        local_rotation = Rotation.from_euler("xyz", [0.4, -0.3, 0.2])
         robot._robot.left_robot_get_ee_pose.return_value = [0.4, 0.1, 0.2, 0.4, -0.3, 0.2]
         robot._robot.right_robot_get_ee_pose.return_value = [0, 0, 0, 0, 0, 0]
         obs = robot.get_observation()
@@ -134,7 +135,9 @@ class EffectiveCommandsTest(unittest.TestCase):
         arm, wire, = robot._robot.servo_p_OL.call_args.args
         self.assertEqual(arm, "left_robot")
         np.testing.assert_allclose(wire[:3], base_rotation.inv().apply(vector(requested)[:3]), atol=1e-12)
-        np.testing.assert_allclose(wire[3:], base_rotation.inv().apply(vector(requested)[3:]), atol=1e-12)
+        wire_rotation = Rotation.from_euler("xyz", wire[3:])
+        expected_rotation = Rotation.from_rotvec(base_rotation.inv().apply(vector(requested)[3:]))
+        np.testing.assert_allclose(wire_rotation.as_matrix(), expected_rotation.as_matrix(), atol=1e-12)
         np.testing.assert_allclose(vector(returned), vector(requested), atol=1e-12)
 
     def test_invalid_nero_frame_configuration_fails_before_io(self):

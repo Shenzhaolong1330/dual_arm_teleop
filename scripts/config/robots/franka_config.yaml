@@ -19,6 +19,43 @@ robot:
   rpc_timeout_sec: 30.0
   schema_mode: "x_embodiment"
   observation_pose_frame: world # already supplied by the RPC server
+  physical_calibration:
+    status: controller_configured
+    tcp_definition: native_controller_tcp_unqualified
+    world_convention: base_midpoint_x_forward_y_left_z_up_v1
+    source: 2026-11-06 read-only FrankaRobotState.F_T_EE and active torso_extrinsics.yaml
+    evidence:
+      left_native_tcp_in_flange:
+      - 0
+      - 0
+      - 0.16
+      - 1
+      - 0
+      - 0
+      - 0
+      right_native_tcp_in_flange:
+      - 0
+      - 0
+      - 0.16
+      - 1
+      - 0
+      - 0
+      - 0
+      base_positions_in_world_m:
+        left:
+        - 0
+        - 0.25
+        - 0
+        right:
+        - 0
+        - -0.25
+        - 0
+      base_roll_in_world_deg:
+        left: -45
+        right: 45
+    qualification_pending:
+    - physical contact centre and jaw-axis convention
+    - Robotiq feedback aperture calibration
   use_gripper: true
   close_threshold: 0.7
   gripper_reverse: false

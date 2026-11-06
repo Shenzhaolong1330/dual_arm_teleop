@@ -65,7 +65,7 @@
         0.0
       ],
       "gripper_min_width": 0.0,
-      "gripper_max_open": 0.1
+      "gripper_max_open": 0.095
     }
   },
   "scripts/config/robots/flexiv_config.yaml": {

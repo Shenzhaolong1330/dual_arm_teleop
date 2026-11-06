@@ -25,7 +25,7 @@ class NeroDualArmConfig(RobotConfig):
     gripper_port: int = 4243  # gripper zerorpc port (single port for both arms)
     use_gripper: bool = True
     gripper_min_width: float = 0.0
-    gripper_max_open: float = 0.1  # agx_gripper max opening: 10mm
+    gripper_max_open: float = 0.095  # first-generation Pika Gripper nominal aperture: 95 mm
     gripper_force: float = 2.0  # Gripping force in N
     gripper_speed: float = 0.1  # Speed in m/s
     gripper_reverse: bool = False  # Whether to reverse gripper command
@@ -41,6 +41,13 @@ class NeroDualArmConfig(RobotConfig):
     observation_pose_frame: str = "base"  # base | world
     left_base_pose_in_world: list[float] | None = None
     right_base_pose_in_world: list[float] | None = None
+    # v2 is mandatory for effective target labels. Legacy mode is an explicit
+    # diagnostic option and is marked incompatible with aligned datasets.
+    cartesian_protocol: str = "v2"
+    expected_server_tcp_offset_rpy: list[float] = field(default_factory=lambda: [0.0] * 6)
+    left_tcp_in_native: list[float] = field(default_factory=lambda: [0, 0, 0, 1, 0, 0, 0])
+    right_tcp_in_native: list[float] = field(default_factory=lambda: [0, 0, 0, 1, 0, 0, 0])
+    physical_calibration: dict = field(default_factory=dict)
     
     # Joint configuration (7 DOF per arm)
     num_joints_per_arm: int = 7

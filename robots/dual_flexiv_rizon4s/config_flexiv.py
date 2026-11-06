@@ -98,6 +98,7 @@ class FlexivDualArmConfig(RobotConfig):
     # gives BASE -> WORLD when defining a world aligned with the action frame.
     left_base_pose_in_world: list[float] | None = None
     right_base_pose_in_world: list[float] | None = None
+    physical_calibration: dict = field(default_factory=dict)
 
     num_joints_per_arm: int = 7
     cameras: dict[str, CameraConfig] = field(default_factory=dict)

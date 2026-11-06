@@ -335,7 +335,7 @@ class FrankaDualArmTest(unittest.TestCase):
         self.assertTrue(robot._warned_joint_control)
         self.assertFalse(any(call[0] == "step" for call in fake.calls))
 
-    def test_observation_flattening_camera_and_fallback(self) -> None:
+    def test_observation_flattening_camera_and_feedback_failure(self) -> None:
         robot, fake = connected_robot(use_gripper=True)
         camera = FakeCamera()
         robot.cameras = {"front_image": camera}
@@ -353,8 +353,13 @@ class FrankaDualArmTest(unittest.TestCase):
 
         robot._cached_rpc_state = None
         fake.fail_get_full_state = True
-        fallback = robot.get_observation()
-        self.assertIs(fallback, obs)
+        with self.assertRaisesRegex(RuntimeError, "simulated state failure"):
+            robot.get_observation()
+
+    def test_nested_step_error_cannot_be_recorded_as_an_accepted_target(self) -> None:
+        robot, _ = connected_robot(use_gripper=False)
+        with self.assertRaisesRegex(RuntimeError, "retarget failed"):
+            robot._update_cached_rpc_state_from_step({"info": {"left_arm": {"error": "retarget failed"}}})
 
     def test_observation_reuses_cached_step_state_and_cached_camera_frame(self) -> None:
         robot, fake = connected_robot(use_gripper=True, debug=False)

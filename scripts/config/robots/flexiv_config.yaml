@@ -75,6 +75,34 @@ robot:
   left_mount_yaw_deg: 0.0
   right_mount_yaw_deg: 0.0
   observation_pose_frame: world
+  physical_calibration:
+    status: controller_configured
+    tcp_definition: native_controller_tcp_unqualified
+    world_convention: base_midpoint_x_forward_y_left_z_up_v1
+    source: 2026-11-06 read-only RDK Tool.params().tcp_location; operator-supplied 0.32
+      m base spacing
+    evidence:
+      active_tools:
+        left: Flexiv-GN01-rs
+        right: Flexiv-GN01-rs
+      left_native_tcp_in_flange:
+      - 0
+      - 0
+      - 0.16
+      - 1
+      - 0
+      - 0
+      - 0
+      right_native_tcp_in_flange:
+      - 0
+      - 0
+      - 0.16
+      - 1
+      - 0
+      - 0
+      - 0
+    qualification_pending:
+    - physical contact centre and jaw-axis convention
   left_base_pose_in_world: [0.0, 0.16, 0.0, 1.0, 0.0, 0.0, 0.0]
   right_base_pose_in_world: [0.0, -0.16, 0.0, 1.0, 0.0, 0.0, 0.0]
   camera_read_timeout_ms: 1000

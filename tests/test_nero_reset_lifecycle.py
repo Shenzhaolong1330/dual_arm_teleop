@@ -66,7 +66,7 @@ def test_reset_homes_then_closes_and_opens_grippers(monkeypatch):
     robot.reset()
     robot.disconnect()
     assert events == ['home', ('left', 0.0, 2.0), ('right', 0.0, 2.0),
-                      ('left', 0.1, 2.0), ('right', 0.1, 2.0), 'close_transport']
+                      ('left', 0.095, 2.0), ('right', 0.095, 2.0), 'close_transport']
     assert robot._left_gripper_width == 0.094
     assert robot._right_gripper_width == 0.086
 

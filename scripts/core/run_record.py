@@ -2408,6 +2408,13 @@ def main(argv: list[str] | None = None):
     )
     if args.dry_run:
         from robots.dual_arm_schema import action_feature_names, observation_state_feature_names
+        from robots.physical_alignment import EMBODIMENT_IDS, physical_metadata
+        alignment = None
+        if record_cfg.robot_type in EMBODIMENT_IDS:
+            alignment = physical_metadata(create_robot_config(
+                record_cfg.robot_type, use_gripper=record_cfg.use_gripper,
+                gripper_max_open=record_cfg.gripper_max_open, **record_cfg.robot_extra_config,
+            ))
         print(json.dumps({
             "robot_type": record_cfg.robot_type, "repo_id": record_cfg.repo_id,
             "run_mode": record_cfg.run_mode, "fps": record_cfg.fps,
@@ -2417,6 +2424,7 @@ def main(argv: list[str] | None = None):
                         "right_wrist": record_cfg.right_wrist_cam_serial,
                         "head": record_cfg.head_cam_serial},
             "quest_processing": record_cfg.create_teleop_config().processing_metadata(),
+            "physical_alignment": alignment,
             "action_names": action_feature_names(use_gripper=record_cfg.use_gripper),
             "observation_state_names": observation_state_feature_names(use_gripper=record_cfg.use_gripper),
         }, indent=2, ensure_ascii=False))

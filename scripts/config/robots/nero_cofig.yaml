@@ -21,6 +21,36 @@ robot:
   # Upright, parallel bases: +X forward, +Z up; centre spacing 0.54 m.
   # World origin: midpoint of base centres, +Y toward the left arm.
   observation_pose_frame: world
+  physical_calibration:
+    status: needs_tool_frame_confirmation
+    tcp_definition: native_flange
+    world_convention: base_midpoint_x_forward_y_left_z_up_v1
+    source: operator confirmed first-generation Pika Gripper with camera mounted directly
+      on the flange, 0.170 m flange-to-TCP distance, and 0.54 m base spacing
+    evidence:
+      gripper_model: pika_gripper_v1
+      gripper_root: gripper_base_link
+      installation: direct_flange_mount_no_extra_adapter
+      operator_reported_flange_to_tcp_distance_m: 0.170
+      distance_reference_pending: physical mounting face or SDK native link7 origin
+      official_urdf: https://github.com/agilexrobotics/pika_ros/blob/1ec77880011af608f7f6af8d3c0e7c163b300984/src/pika_gripper_description/urdf/pika_gripper_description.urdf
+      official_user_manual: https://cdn.shopify.com/s/files/1/0551/0630/6141/files/Pika_Product_User_Manual_beta_EN_ROS1.pdf?v=1792488910
+      nominal_max_aperture_m: 0.095
+      official_nero_flange_model: https://github.com/agilexrobotics/agx_arm_urdf/blob/680fa925cd00db7e2628563d2edc5540963045de/nero/urdf/nero_with_flange_description.xacro
+      link7_to_mounting_frame_xyz_m: [0.031, 0.0, -0.0235]
+      link7_to_mounting_frame_rpy_rad: [-1.5708, 0.0, -1.5708]
+      server_native_tcp_offset_rpy:
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+      - 0
+    qualification_pending:
+    - Reference origin and direction of the operator-reported 0.170 m distance
+    - Direct-mounted Pika jaw-axis orientation in the native Nero frame
+    - Pika contact centre and jaw-axis convention
+    - SDK feedback frame and IK link7 equivalence
   left_base_pose_in_world: [0.0, 0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
   right_base_pose_in_world: [0.0, -0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
   # robot_ip: "192.168.110.203" # dobot server ip
@@ -34,8 +64,8 @@ robot:
   # gripper_bin_threshold: 0.05 # threshold to determine gripper is closed
   gripper_reverse: false # legacy normalized-command compatibility only; width actions are physical
   gripper_min_width: 0.0 # metres; dataset observations/actions use physical widths
-  gripper_max_open: 0.1 # Robotiq 2F-85 max open width in meters
-  gripper_force: 2.0 # Robotiq 2F-85 max force in Newtons
+  gripper_max_open: 0.095 # first-generation Pika Gripper nominal total aperture, metres
+  gripper_force: 2.0 # commanded gripping force, Newtons
   gripper_command_epsilon: 0.0005 # metres; suppress redundant width commands
 
 cameras:

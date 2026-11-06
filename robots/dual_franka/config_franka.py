@@ -48,6 +48,7 @@ class FrankaDualArmConfig(RobotConfig):
     # Declares the upstream RPC frame; poses are already transformed there.
     # This adapter must not apply a second base-to-world transform.
     observation_pose_frame: str = "world"
+    physical_calibration: dict = field(default_factory=dict)
     debug: bool = True
 
     num_joints_per_arm: int = 7

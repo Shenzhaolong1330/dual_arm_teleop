@@ -28,6 +28,21 @@ class NeroDualArmClient:
             self.server = None
     
     # ==================== State Query ====================
+
+    def get_teleop_protocol(self) -> dict:
+        if self.server is None:
+            raise ConnectionError("Nero server is not connected")
+        return self.server.get_teleop_protocol()
+
+    def get_ee_pose_v2(self, side: str) -> dict:
+        if self.server is None:
+            raise ConnectionError("Nero server is not connected")
+        return self.server.get_ee_pose_v2(side)
+
+    def servo_p_OL_v2(self, robot_arm: str, pose: np.ndarray, tcp_in_native: list) -> dict:
+        if self.server is None:
+            raise ConnectionError("Nero server is not connected")
+        return self.server.servo_p_OL_v2(robot_arm, pose.tolist(), list(tcp_in_native))
     
     def left_robot_get_joint_positions(self) -> np.ndarray:
         """Get left arm joint positions (radians)."""
