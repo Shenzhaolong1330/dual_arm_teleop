@@ -11,6 +11,9 @@ robot-record --robot-type flexiv_dual_arm --repo-id '{robot_type}/my_task'
 
 每次运行只控制所选本体。先追加 `--dry-run` 核对机器人地址、相机、坐标系、
 Quest 映射和数据集字段；它仅加载配置，不连接设备或发送动作。
+三种本体均启用 `mirror_teleop: true`，用于操作者和机器人面对面遥操：
+操作者左手驱动机器人的右臂和右夹爪，右手驱动左臂和左夹爪。
+数据中的 left/right 始终指机器人的左右臂，不是操作者的左右手。
 `robot-reset`、`robot-replay`、`robot-stop` 使用相同的 `--robot-type` 和工作站配置。
 `robot-stop` 当前仅支持 Nero 和 Flexiv；Franka 仍使用现有 RPC 服务器停止流程。
 
@@ -49,7 +52,7 @@ robots:
 ## 统一数据契约
 
 - 30 Hz；左右腕相机和头部 RGB 图像。
-- observation：双臂绝对末端位姿（米、rotvec 弧度）和夹爪实测开口（米），共 14 维。
+- observation：双臂绝对末端位姿（目标契约为米、rotvec 弧度）和夹爪开口（米），共 14 维。
 - action：双臂有效目标位姿增量和夹爪目标开口，共 14 维。
 - Franka 使用服务器世界坐标；Nero/Flexiv 根据配置的安装变换转换。
 - metadata 记录坐标、安装变换、有效指令语义和 Quest 处理参数；续采/合并拒绝不兼容语义。
@@ -59,6 +62,56 @@ robots:
 Quest A 保存当前段并回位开始下一段，B 丢弃当前未保存段并回位重录；回位轨迹不进入数据。
 参见 [按键说明](episode_controls.md)、[有效指令契约](effective_command_recording.txt)
 和 [Quest 对齐说明](quest_processing_alignment.txt)。
+
+## 2026-11-06 数据物理语义审查
+
+字段顺序和维数在客户端适配层一致：
+
+| 字段 | 目标物理含义 |
+| --- | --- |
+| `observation.state` 的前 12 维 | 左臂 xyz/rx/ry/rz，右臂 xyz/rx/ry/rz；位置为米，姿态应为绝对旋转向量（弧度） |
+| `observation.state` 的后 2 维 | 左、右夹爪开口（米）；通常来自反馈，部分适配器在反馈失败时回退到缓存值，不能保证每帧都是新测量 |
+| `action` 的前 12 维 | 同样的左右臂顺序；每个控制周期的目标位姿增量，平移为米、旋转应为旋转向量（弧度）；不是速度或绝对位姿 |
+| `action` 的后 2 维 | 左、右夹爪目标开口（米）；不是二值开关，也不是观测到的开口 |
+| `observation.images.left_wrist_image/right_wrist_image/head_image` | 机器人左腕、右腕、头部 RGB；当前共享配置为 424×240、30 Hz |
+
+镜像在控制器输入到机器人动作之间完成。数据记录机器人侧字段和适配器返回的
+控制目标，不记录“操作者左手坐标”，也不等同于机械臂实际运动或内部插补轨迹。
+内部控制器还可能限幅、冻结或降低目标，客户端的布尔 ACK 不能证明最终执行量。
+
+当前不能把三种本体标记为“物理语义已经实机完全验收”：
+
+1. **Nero 旋转协议存在需要核实的对齐缺口。** 当前客户端观测按
+   `[x,y,z,rz,ry,rx]` 重排后当作 rotvec；动作也把 rotvec 分量直接传给 `servo_p_OL`。
+   5090 上已有的 NUC 服务端历史备份将 `get_tcp_pose()` 声明为 RPY，且 `servo_p_OL`
+   明确用 `euler_convert_quat(pose[3],pose[4],pose[5])` 解释输入。
+   Euler/RPY 与 rotvec 在一般姿态下不同，字段名和 metadata 不足以证明已转换。
+   审查时通过现有 SSH 别名访问 `192.168.2.103` 返回 `No route to host`，
+   因而没有确认当前运行服务是否仍使用该协议。未据旧备份更改实时 RPC 约定。
+   证据：5090 的 `/home/ziang/szl_ws/audits/nero-nuc-20261024/workspace-z-limit/nero_interface_server.py`，
+   SHA256 `0259c11b04dd412788d781998088bc1d28fe850c2b9f89f0b4fed11f63df4cfe`。
+2. **world 是每个工位的坐标约定。** Franka 由服务器提供；Nero 和 Flexiv 使用
+   各自基座变换。仍需核实轴方向、原点、TCP 定义和相机角色，不能因为都叫 world
+   就认为它们完成了跨工位标定。当前 Nero/Flexiv 基座间距配置分别为 0.54/0.32 m。
+3. **夹爪范围和动力学不同。** Franka 开口范围为 0–0.085 m，Nero/Flexiv 为
+   0–0.1 m；同样的 0.04 是相同的目标距离，但相同扳机比例会对应不同距离。
+   控制器限幅、死区、跟踪速度和延迟也不同。
+
+可以开展跨本体联合训练实验，但应先关闭上述协议缺口，做每个本体的坐标/TCP
+验证，并核查实际样本和 metadata。训练时保留本体来源，处理夹爪范围与动作分布，
+统一任务语义并控制相机视角和采样比例，分别评估各本体的成功率。
+Open X-Embodiment 和 Octo 展示了跨本体训练及迁移的可行性；这不能代替本系统的
+协议校验或保证一个训练好的策略能直接在三台设备部署。
+
+当前 `robot-train` 不接受 `dataset.repo_id` 列表，需要先生成一个合并后的标准
+LeRobot 数据集。`tools-merge-datasets` 默认 `source.strict_robot_type: true`，
+会拒绝不同本体；完成语义核验后可显式设置为 false，并保留 `strict_schema: true`。
+当前合并工具的数据集级 `robot_type` 沿用第一个来源，来源清单不能代替模型的
+逐样本本体输入。不要据这个单一 metadata 值推断所有样本来自同一种机器人。
+改变 mirror 设置后，严格续采检查可能拒绝旧数据集；应新建采集版本，避免改写旧 metadata。
+
+参考：[Open X-Embodiment](https://robotic-transformer-x.github.io/)、
+[Octo](https://octo-models.github.io/)。
 
 ## 安装、验证与同步
 

@@ -32,10 +32,11 @@ Installation geometry is kept outside the shared profile:
   - mirror_teleop and the resulting hand-to-arm routing;
   - world/base extrinsics, mounting yaw, and TCP conventions;
   - physical gripper limits and robot-side command/servo settings.
-The existing configuration differences remain intentional: main Franka/Nero
-configs keep their mirrored routing, while the active Flexiv station keeps
-same-side routing. The Flexiv read-only installation also retains its existing
-mapping. The active workstation config paths are symlinks to the repository's
+As of 2026-11-06, Franka, Nero and Flexiv all use face-to-face mirrored routing:
+the operator's left controller drives the robot's right arm and gripper, and
+the right controller drives its left arm and gripper. The active Flexiv station
+and read-only config use the same mirror setting. Installation axis signs and
+base calibration remain specific to each robot. The active workstation config paths are symlinks to the repository's
 station files, so both ordinary and workstation launchers resolve profile v1.
 
 RecordConfig resolves the named profile before creating OculusTeleopConfig.

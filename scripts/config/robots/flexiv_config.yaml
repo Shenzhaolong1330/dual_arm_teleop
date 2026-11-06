@@ -7,13 +7,13 @@ teleop:
     processing_profile: cross_embodiment_v1
     ip: null
     use_gripper: true
-    # Operator behind robot: forward/left/up -> common-world X/Y/Z.
+    # Installation-axis corrections precede the face-to-face mirror mapping.
     left_channel_signs: [1, 1, 1, -1, -1, 1]
     right_channel_signs: [1, 1, 1, -1, -1, 1]
     position_axis_order: [0, 1, 2]
     rotation_axis_order: [0, 1, 2]
-    # Same-side control: left controller -> left arm, right -> right.
-    mirror_teleop: false
+    # Face-to-face: left controller -> right arm, right controller -> left arm.
+    mirror_teleop: true
     visualize_placo: false
 
 robot:

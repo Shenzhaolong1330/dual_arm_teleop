@@ -42,7 +42,7 @@
         1,
         1
       ],
-      "mirror_teleop": false
+      "mirror_teleop": true
     },
     "installation": {
       "observation_pose_frame": "world",
@@ -96,7 +96,7 @@
         1,
         2
       ],
-      "mirror_teleop": false
+      "mirror_teleop": true
     },
     "installation": {
       "observation_pose_frame": "world",
@@ -152,7 +152,7 @@
         1,
         2
       ],
-      "mirror_teleop": false
+      "mirror_teleop": true
     },
     "installation": {
       "observation_pose_frame": "world",

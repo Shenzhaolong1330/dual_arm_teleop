@@ -122,12 +122,13 @@ class OculusMirrorTeleopTest(unittest.TestCase):
             cfg = deepcopy(record)
             cfg["robot_type"] = robot_type
             teleop_cfg = RecordConfig(cfg).create_teleop_config()
-            self.assertEqual(teleop_cfg.mirror_teleop, robot_type in {"arx_dual_arm", "franka_dual_arm"}, robot_type)
+            self.assertTrue(teleop_cfg.mirror_teleop, robot_type)
 
-    def test_flexiv_same_side_controls_use_matching_axis_signs(self):
+    def test_flexiv_face_to_face_controls_preserve_installation_axis_signs(self):
         root = Path(__file__).resolve().parents[1]
         config = yaml.safe_load((root / "scripts/config/robots/flexiv_config.yaml").read_text())
         oculus = config["teleop"]["oculus_config"]
+        self.assertTrue(oculus["mirror_teleop"])
         self.assertEqual(oculus["left_channel_signs"], [1, 1, 1, -1, -1, 1])
         self.assertEqual(oculus["right_channel_signs"], oculus["left_channel_signs"])
 

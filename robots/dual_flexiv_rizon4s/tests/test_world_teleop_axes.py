@@ -32,13 +32,13 @@ class WorldTeleopAxesTests(unittest.TestCase):
         record = yaml.safe_load((root / "scripts/config/record_cfg.yaml").read_text())["record"]
         files = [root / "scripts/config/robots/flexiv_config.yaml",
                  root / "robots/dual_flexiv_rizon4s/station_deepcybo_5090.yaml"]
-        # Oculus right/up/back -> common-world forward/left/up.
-        mapping = np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]])
+        # Face-to-face routing rotates controller deltas 180 degrees about world Z.
+        mapping = np.diag([-1, -1, 1]) @ np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]])
         for file in files:
-            cfg = RecordConfig({**record, "das_config_path": str(file)})
+            cfg = RecordConfig({**record, "robot_type": "flexiv_dual_arm", "das_config_path": str(file)})
             teleop_cfg = replace(cfg.create_teleop_config(), processing_profile=None, action_smoothing_method="none",
                                  action_deadband_translation=0, action_deadband_rotation=0)
-            self.assertFalse(teleop_cfg.mirror_teleop)
+            self.assertTrue(teleop_cfg.mirror_teleop)
             self.assertEqual(cfg.robot_extra_config["observation_pose_frame"], "world")
             for side in ("left", "right"):
                 self.assertEqual(cfg.robot_extra_config[f"{side}_mount_yaw_deg"], 0.0)

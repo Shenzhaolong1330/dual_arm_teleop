@@ -13,8 +13,8 @@ teleop:
     # left_channel_signs: [-1, -1, 1, -1, -1, -1]
     right_channel_signs: [-1, -1, 1, 1, 1, 1] # right arm signs
     # right_channel_signs: [-1, -1, 1, -1, -1, -1]
-    # Same-side control: left controller -> left arm, right controller -> right arm.
-    mirror_teleop: false
+    # Face-to-face: left controller -> right arm, right controller -> left arm.
+    mirror_teleop: true
     visualize_placo: false # whether to visualize robot using placo
 
 robot:
