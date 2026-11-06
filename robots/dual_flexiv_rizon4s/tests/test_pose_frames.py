@@ -174,11 +174,11 @@ class PoseFrameTests(unittest.TestCase):
         assert_allclose(tcp, tcp_before)
         assert_allclose(actual[:3], [0.4, 0.36, 0.1])
 
-    def test_station_configs_use_confirmed_32_cm_geometry(self):
-        folder = Path(__file__).resolve().parents[1]
-        for name in ("station_deepcybo_5090.yaml", "station_deepcybo_5090_readonly.yaml"):
-            with self.subTest(name=name):
-                config = yaml.safe_load((folder / name).read_text())["robot"]
+    def test_control_and_readonly_use_confirmed_32_cm_geometry(self):
+        from robots.dual_flexiv_rizon4s.hardware_config import load_hardware_config
+        for readonly in (False, True):
+            with self.subTest(readonly=readonly):
+                config = load_hardware_config(readonly=readonly)["robot"]
                 self.assertEqual(config["observation_pose_frame"], "world")
                 assert_allclose(config["left_base_pose_in_world"][:3], [0, 0.16, 0])
                 assert_allclose(config["right_base_pose_in_world"][:3], [0, -0.16, 0])

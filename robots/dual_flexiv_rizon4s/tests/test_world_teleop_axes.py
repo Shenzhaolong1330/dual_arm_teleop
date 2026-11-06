@@ -30,8 +30,8 @@ class WorldTeleopAxesTests(unittest.TestCase):
     def test_six_axes_are_consistent_for_both_hands_and_config_entries(self):
         root = Path(__file__).resolve().parents[3]
         record = yaml.safe_load((root / "scripts/config/record_cfg.yaml").read_text())["record"]
-        files = [root / "scripts/config/robots/flexiv_config.yaml",
-                 root / "robots/dual_flexiv_rizon4s/station_deepcybo_5090.yaml"]
+        record["run_mode"] = "run_record"
+        files = [root / "scripts/config/robots/flexiv_config.yaml"]
         # Face-to-face routing rotates controller deltas 180 degrees about world Z.
         mapping = np.diag([-1, -1, 1]) @ np.array([[0, 0, -1], [-1, 0, 0], [0, 1, 0]])
         for file in files:

@@ -31,6 +31,7 @@ class TeleopFollowTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         record = yaml.safe_load((root / "scripts/config/record_cfg.yaml").read_text())["record"]
         record["robot_type"] = "flexiv_dual_arm"
+        record["run_mode"] = "run_record"
         self.rc = RecordConfig(record)
         self.reader = Reader()
         self.teleop = OculusTeleop(self.rc.create_teleop_config())

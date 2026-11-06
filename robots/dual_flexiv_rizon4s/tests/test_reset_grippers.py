@@ -49,7 +49,7 @@ class Clock:
 
 class ResetGripperTests(unittest.TestCase):
     def setUp(self):
-        self.station = Path(__file__).resolve().parents[1] / "station_deepcybo_5090.yaml"
+        self.station = Path(__file__).resolve().parents[3] / "scripts/config/robots/flexiv_config.yaml"
 
     def test_home_is_half_original_speed_without_extended_timeout(self):
         robot = build_reset_config(self.station)["record"]["robot"]

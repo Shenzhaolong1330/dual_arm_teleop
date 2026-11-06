@@ -59,9 +59,9 @@ robot:
   go_home_on_connect: true
   reset_go_home: true
   home_plan_name: "PLAN-Home"
-  left_home_joints: [-0.17, -0.89, 0.13, 1.50, 0.85, 0.56, -0.71]
-  right_home_joints: [0.27, -0.91, 0.06, 1.82, -1.04, 0.56, 1.17]
-  home_joint_max_vel: 1.0
+  left_home_joints: [0.09874097, -0.73171318, 0.04026202, 1.58915234, 0.68328261, 0.70953649, 1.08073747]
+  right_home_joints: [0.01105445, -0.73135585, 0.17090763, 1.90513062, -0.85284746, 0.67682439, -0.62354791]
+  home_joint_max_vel: 0.5
   home_joint_max_acc: 2.0
   home_joint_tolerance: 0.01
   home_joint_timeout_sec: 20.0

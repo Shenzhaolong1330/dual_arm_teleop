@@ -83,9 +83,10 @@ class GripperReadinessTests(unittest.TestCase):
         self.robot._left_gripper.Init.assert_not_called()
         self.robot._right_gripper.Init.assert_not_called()
 
-    def test_record_and_station_camera_mappings_match(self):
+    def test_record_and_readonly_camera_mappings_match(self):
         root = Path(__file__).resolve().parents[3]
-        station = yaml.safe_load((root / "robots/dual_flexiv_rizon4s/station_deepcybo_5090.yaml").read_text())
+        from robots.dual_flexiv_rizon4s.hardware_config import load_hardware_config
+        station = load_hardware_config(readonly=True)
         default = yaml.safe_load((root / "scripts/config/robots/flexiv_config.yaml").read_text())
         expected = {"left_wrist_cam_serial": "347622072061",
                     "right_wrist_cam_serial": "347622074732", "head_cam_serial": "344522070241"}

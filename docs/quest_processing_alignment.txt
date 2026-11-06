@@ -36,8 +36,10 @@ As of 2026-11-06, Franka, Nero and Flexiv all use face-to-face mirrored routing:
 the operator's left controller drives the robot's right arm and gripper, and
 the right controller drives its left arm and gripper. The active Flexiv station
 and read-only config use the same mirror setting. Installation axis signs and
-base calibration remain specific to each robot. The active workstation config paths are symlinks to the repository's
-station files, so both ordinary and workstation launchers resolve profile v1.
+base calibration remain specific to each robot. Flexiv has one hardware source,
+scripts/config/robots/flexiv_config.yaml. The legacy workstation flexiv.yaml path
+is an alias to it. Read-only diagnostics derive restrictions in memory from the
+same source, so they do not require another hardware YAML.
 
 RecordConfig resolves the named profile before creating OculusTeleopConfig.
 Direct OculusTeleopConfig construction uses the same numeric defaults. Named
@@ -56,7 +58,7 @@ Quest parameters describe its configured teleoperator and are not reapplied to
 policy outputs. No previous dataset is rewritten by these code/config changes.
 
 Offline tests replay identical, asymmetric left/right Quest 4x4-pose streams
-through all five config entries. After undoing only installation/routing, the
+through the three embodiment config entries. After undoing only installation/routing, the
 complete response traces match, including deadband, spikes, filter tails,
 missing transforms, clutch release/re-engagement and trigger endpoints.
 Installation snapshots verify that mapping/geometry/ranges were retained.

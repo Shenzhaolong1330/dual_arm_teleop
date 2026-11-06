@@ -23,8 +23,10 @@ deepcybo-5090 station convention (operator dimensions, 2026-10-20):
   The remaining common-frame extrinsic is the +/-0.16 m base-centre translation.
   This is a functional alignment check, not a new precision extrinsic calibration.
 
-station_deepcybo_5090.yaml contains the recording hardware configuration;
-station_deepcybo_5090_readonly.yaml disables robot enabling, homing and servo control.
+scripts/config/robots/flexiv_config.yaml is the single hardware configuration.
+hardware_config.load_hardware_config(readonly=True) derives diagnostic restrictions
+in memory, disabling automatic enabling, homing, tool/mode switching and servo.
+Diagnostic callers must also avoid explicit actuator commands and control cleanup.
 The workstation entry points use these repository configs through their existing paths.
 Other installations must set their own measured base poses before enabling world mode.
 Missing or invalid extrinsics fail before connecting hardware.

@@ -24,6 +24,7 @@ INSTALLATIONS = json.loads((ROOT / "tests/fixtures/quest_installation_mappings.j
 
 def record_config(path):
     record = yaml.safe_load((ROOT / "scripts/config/record_cfg.yaml").read_text())["record"]
+    record["run_mode"] = "run_record"
     record["robot_type"] = "franka_dual_arm" if "franka" in str(path) else (
         "nero_dual_arm" if "nero_cofig" in str(path) else "flexiv_dual_arm"
     )
@@ -98,6 +99,7 @@ class QuestProcessingAlignmentTest(unittest.TestCase):
 
     def test_named_profile_rejects_local_drift_and_unknown_versions(self):
         base = yaml.safe_load((ROOT / "scripts/config/record_cfg.yaml").read_text())["record"]
+        base["run_mode"] = "run_record"
         for key, value in (("left_pose_scaler", [0.5, 1]), ("action_smoothing_method", "ema"),
                            ("action_deadband_rotation", 0), ("gripper_trigger_gamma", 0.7),
                            ("processing_profile", "typo_v1")):
