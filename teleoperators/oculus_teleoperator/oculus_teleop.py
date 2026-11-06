@@ -12,7 +12,10 @@ import time
 from typing import Any, Dict, Optional
 
 from lerobot.teleoperators.teleoperator import Teleoperator
-from robots.dual_arm_schema import action_features as x_embodiment_action_features
+from robots.dual_arm_schema import (
+    action_features as x_embodiment_action_features,
+    width_from_normalized_command,
+)
 from .config_oculus_teleop import OculusTeleopConfig
 from .oculus.oculus_dual_arm_robot import OculusDualArmRobot
 
@@ -30,8 +33,7 @@ class OculusTeleop(Teleoperator):
     Controls:
     - LG (Left Grip):    Must be pressed to enable left arm action recording
     - RG (Right Grip):   Must be pressed to enable right arm action recording
-    - LTr (Left Trigger):  Controls left gripper  (1.0 = open, 0.0 = closed)
-    - RTr (Right Trigger): Controls right gripper (1.0 = open, 0.0 = closed)
+    - LTr/RTr: release = open, squeeze = close; outputs total aperture in metres
     - Left controller pose:  Controls left arm end-effector delta pose
     - Right controller pose: Controls right arm end-effector delta pose
     - A button: Save episode, reset, and start next episode
@@ -185,10 +187,9 @@ class OculusTeleop(Teleoperator):
         return action
 
     def _gripper_width_from_trigger(self, value: Any) -> float:
-        normalized = min(1.0, max(0.0, float(value)))
-        minimum = max(0.0, float(self.cfg.gripper_min_width))
-        maximum = max(minimum, float(self.cfg.gripper_max_open))
-        return minimum + normalized * (maximum - minimum)
+        return width_from_normalized_command(
+            value, self.cfg.gripper_min_width, self.cfg.gripper_max_open,
+        )
 
     def _log_timing_debug(self, total_ms: float) -> None:
         if not self.cfg.timing_debug:

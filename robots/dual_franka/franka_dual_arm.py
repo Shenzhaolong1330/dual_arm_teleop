@@ -22,6 +22,8 @@ from robots.dual_arm_schema import (
     AXES,
     action_features as x_embodiment_action_features,
     clip_gripper_width,
+    feedback_gripper_width,
+    finite_gripper_value,
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
 )
@@ -152,6 +154,45 @@ def _gripper_open_fraction_from_side(side_state: Mapping[str, Any], fallback: fl
     if "robotiq" in sensors:
         return _gripper_open_fraction(sensors.get("robotiq"), fallback)
     return fallback
+
+
+def _gripper_width_from_side(side_state: Mapping[str, Any], config: FrankaDualArmConfig) -> float:
+    """Return total aperture in metres; scaled ROS joint positions are not metres.
+
+    Prefer an explicitly measured metric width. The current Robotiq bridge has
+    measured_width_m=None, so its configured native endpoints give a nominal
+    linear aperture estimate. Never substitute the command or a previous frame.
+    """
+    grip = side_state.get("gripper", _as_mapping(side_state.get("sensors")).get("robotiq"))
+    if grip is None:
+        raise RuntimeError("Franka gripper feedback missing")
+    if isinstance(grip, Mapping):
+        status = _as_mapping(grip.get("driver_status"))
+        if status.get("sample_fresh") is False or status.get("sample_valid") is False:
+            raise RuntimeError("Franka gripper feedback is stale/invalid")
+        if grip.get("measured_width_m") is not None:
+            width = finite_gripper_value(grip["measured_width_m"])
+        else:
+            if grip.get("open_fraction") is not None:
+                fraction = finite_gripper_value(grip["open_fraction"])
+            elif grip.get("position") is not None:
+                # Both native endpoints are required: neither 0.7929 nor a raw
+                # 0..255 register value is a metric aperture by itself.
+                opened = finite_gripper_value(grip.get("open_position"))
+                closed = finite_gripper_value(grip.get("closed_position"))
+                if abs(closed - opened) <= 1e-9:
+                    raise ValueError("Franka gripper feedback endpoints coincide")
+                fraction = 1.0 - (finite_gripper_value(grip["position"]) - opened) / (closed - opened)
+            else:
+                raise RuntimeError("Franka gripper feedback has no aperture or valid position")
+            width = config.gripper_min_width + fraction * (config.gripper_max_open - config.gripper_min_width)
+    else:
+        # Input-only compatibility with older RPCs that publish an open fraction.
+        width = config.gripper_min_width + finite_gripper_value(grip) * (config.gripper_max_open - config.gripper_min_width)
+    return feedback_gripper_width(
+        width, config.gripper_min_width, config.gripper_max_open,
+        tolerance_m=config.gripper_feedback_width_tolerance_m,
+    )
 
 
 class FrankaDualArm(Robot):
@@ -784,12 +825,12 @@ class FrankaDualArm(Robot):
     ) -> float:
         if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
             if source_key == f"{side}_gripper_width":
-                width = clip_gripper_width(value, 0.0, self.config.gripper_max_open)
+                width = clip_gripper_width(value, self.config.gripper_min_width, self.config.gripper_max_open)
             else:
                 # Input-only migration path for old normalized action keys.
                 width = width_from_normalized_command(
                     value,
-                    0.0,
+                    self.config.gripper_min_width,
                     self.config.gripper_max_open,
                     reverse=self.config.gripper_reverse,
                 )
@@ -865,28 +906,17 @@ class FrankaDualArm(Robot):
         left_cmd = None
         right_cmd = None
         if self.config.use_gripper:
-            for side, state in (("left", left_side), ("right", right_side)):
-                grip = state.get("gripper", _as_mapping(state.get("sensors")).get("robotiq"))
-                if grip is None:
-                    raise RuntimeError(f"Franka {side} gripper feedback missing")
-                if isinstance(grip, Mapping):
-                    raw = grip.get("open_fraction", grip.get("position"))
-                    status = grip.get("driver_status") or {}
-                    if status.get("sample_fresh") is False or status.get("sample_valid") is False:
-                        raise RuntimeError(f"Franka {side} gripper feedback is stale/invalid")
-                else:
-                    raw = grip
-                if raw is None or not np.isfinite(float(raw)):
-                    raise RuntimeError(f"Franka {side} gripper feedback is invalid")
-            left_grip = _gripper_open_fraction_from_side(left_side, self._left_gripper_state)
-            right_grip = _gripper_open_fraction_from_side(right_side, self._right_gripper_state)
+            left_width = _gripper_width_from_side(left_side, self.config)
+            right_width = _gripper_width_from_side(right_side, self.config)
+            span = self.config.gripper_max_open - self.config.gripper_min_width
+            left_grip = (left_width - self.config.gripper_min_width) / span
+            right_grip = (right_width - self.config.gripper_min_width) / span
             if self.schema_mode == SCHEMA_MODE_X_EMBODIMENT:
                 # The canonical observation is a physical aperture in metres,
                 # independent of any legacy command-direction setting.
                 self._left_gripper_state = _clamp(left_grip, 0.0, 1.0)
                 self._right_gripper_state = _clamp(right_grip, 0.0, 1.0)
-                left_cmd = clip_gripper_width(left_grip * self.config.gripper_max_open, 0.0, self.config.gripper_max_open)
-                right_cmd = clip_gripper_width(right_grip * self.config.gripper_max_open, 0.0, self.config.gripper_max_open)
+                left_cmd, right_cmd = left_width, right_width
             else:
                 if self.config.gripper_reverse:
                     left_grip = 1.0 - left_grip

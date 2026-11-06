@@ -30,7 +30,9 @@ class FrankaDualArmConfig(RobotConfig):
     gripper_port: int = 4242
 
     use_gripper: bool = True
+    gripper_min_width: float = 0.0
     gripper_max_open: float = 0.085
+    gripper_feedback_width_tolerance_m: float = 0.002
     gripper_force: float = 10.0
     gripper_speed: float = 0.1
     gripper_reverse: bool = False

@@ -24,6 +24,8 @@ def physical_metadata(config):
         "translation_delta": "accepted_target_position_difference_m_per_step",
         "gripper_state": "feedback_derived_total_aperture_m",
         "gripper_action": "commanded_total_aperture_m",
+        "gripper_width_definition": "total_inner_finger_separation",
+        "gripper_opening_direction": "zero_closed_larger_more_open",
         "sides": "robot_left_then_robot_right",
         "world_convention": calibration.get("world_convention", WORLD_CONVENTION),
         "tcp_definition": calibration.get("tcp_definition", "native_tcp_unverified"),
@@ -33,7 +35,8 @@ def physical_metadata(config):
         "status": calibration.get("status", "unverified"),
         "source": calibration.get("source", "controller configuration; TCP qualification pending"),
         "gripper_limits_m": [getattr(config, "gripper_min_width", 0.0), config.gripper_max_open],
-        "gripper_feedback_model": ("robotiq_register_linear_aperture_estimate"
+        "gripper_feedback_width_tolerance_m": config.gripper_feedback_width_tolerance_m,
+        "gripper_feedback_model": ("prefer_measured_width_m_else_robotiq_register_linear_aperture_estimate"
                                    if config.name == "franka_dual_arm" else "sdk_width_m"),
         "calibration": calibration,
     }

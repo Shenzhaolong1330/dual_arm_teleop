@@ -22,8 +22,8 @@ robot:
   # World origin: midpoint of base centres, +Y toward the left arm.
   observation_pose_frame: world
   physical_calibration:
-    status: needs_tool_frame_confirmation
-    tcp_definition: native_flange
+    status: point_configured_axes_pending
+    tcp_definition: finger_tip_midpoint_native_axes_unqualified
     world_convention: base_midpoint_x_forward_y_left_z_up_v1
     source: operator confirmed first-generation Pika Gripper with camera mounted directly
       on the flange, 0.170 m flange-to-TCP distance, and 0.54 m base spacing
@@ -32,7 +32,9 @@ robot:
       gripper_root: gripper_base_link
       installation: direct_flange_mount_no_extra_adapter
       operator_reported_flange_to_tcp_distance_m: 0.170
-      distance_reference_pending: physical mounting face or SDK native link7 origin
+      distance_reference: actual flange mounting face centre along its outward normal
+      configured_tcp_translation_in_native_m: [0.201, 0.0, -0.0235]
+      configured_tcp_orientation: native Nero axes retained; jaw-axis qualification pending
       official_urdf: https://github.com/agilexrobotics/pika_ros/blob/1ec77880011af608f7f6af8d3c0e7c163b300984/src/pika_gripper_description/urdf/pika_gripper_description.urdf
       official_user_manual: https://cdn.shopify.com/s/files/1/0551/0630/6141/files/Pika_Product_User_Manual_beta_EN_ROS1.pdf?v=1792488910
       nominal_max_aperture_m: 0.095
@@ -47,12 +49,17 @@ robot:
       - 0
       - 0
     qualification_pending:
-    - Reference origin and direction of the operator-reported 0.170 m distance
     - Direct-mounted Pika jaw-axis orientation in the native Nero frame
     - Pika contact centre and jaw-axis convention
     - SDK feedback frame and IK link7 equivalence
   left_base_pose_in_world: [0.0, 0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
   right_base_pose_in_world: [0.0, -0.27, 0.0, 1.0, 0.0, 0.0, 0.0]
+  # Official link7 -> mounting face: [0.031, 0, -0.0235] m;
+  # mounting-face outward normal is native +X. Operator measured another 0.170 m.
+  # Translation is active in both feedback and control. Axes remain native
+  # until the physical jaw direction is qualified; this is not a measured 6D TCP.
+  left_tcp_in_native: [0.201, 0.0, -0.0235, 1.0, 0.0, 0.0, 0.0]
+  right_tcp_in_native: [0.201, 0.0, -0.0235, 1.0, 0.0, 0.0, 0.0]
   # robot_ip: "192.168.110.203" # dobot server ip
   # robot_ip: "localhost" # nero server ip
   robot_ip: "192.168.2.103" # wbcdNUC Nero RPC server

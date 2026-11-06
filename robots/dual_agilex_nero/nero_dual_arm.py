@@ -17,6 +17,7 @@ from robots.dual_arm_schema import (
     AXES,
     action_features as x_embodiment_action_features,
     clip_gripper_width,
+    feedback_gripper_width,
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
 )
@@ -489,17 +490,19 @@ class NeroDualArm(Robot):
             for i, axis in enumerate(AXES):
                 obs_dict[f"{side}_ee_pose.{axis}"] = float(pose[i])
         
-        # Gripper width is queried from the controller when available. Use the
-        # last requested physical width as a safe fallback during RPC hiccups.
+        # Feedback is total aperture in metres. Never replace an invalid sample
+        # with the last command or hide a unit mismatch by saturating it.
         if self.config.use_gripper:
             for side in ("left", "right"):
-                fallback = getattr(self, f"_{side}_gripper_width")
                 try:
                     state = getattr(self._robot, f"{side}_gripper_get_state")()
                     if not isinstance(state, dict) or "width" not in state or not np.isfinite(state["width"]):
                         raise RuntimeError(f"{side} gripper has no valid measured aperture")
                     width = state["width"]
-                    width = self._clip_gripper_width(float(width))
+                    width = feedback_gripper_width(
+                        width, self.config.gripper_min_width, self.config.gripper_max_open,
+                        tolerance_m=self.config.gripper_feedback_width_tolerance_m,
+                    )
                     setattr(self, f"_{side}_gripper_width", width)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("[%s GRIPPER] state read failed: %s", side.upper(), exc)

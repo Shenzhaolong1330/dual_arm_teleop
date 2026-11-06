@@ -41,7 +41,8 @@ class FlexivDualArmConfig(RobotConfig):
     gripper_min_width: float = 0.0
     gripper_reverse: bool = False
     close_threshold: float = 0.5
-    gripper_max_open: float = 0.085
+    gripper_max_open: float = 0.100  # Flexiv-GN01 total aperture, metres
+    gripper_feedback_width_tolerance_m: float = 0.002
     gripper_force: float = 10.0
     gripper_speed: float = 0.2
     gripper_control_mode: str = "move"  # move | force_feedback (GN01)

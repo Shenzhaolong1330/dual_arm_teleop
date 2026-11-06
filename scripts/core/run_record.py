@@ -2413,7 +2413,9 @@ def main(argv: list[str] | None = None):
         if record_cfg.robot_type in EMBODIMENT_IDS:
             alignment = physical_metadata(create_robot_config(
                 record_cfg.robot_type, use_gripper=record_cfg.use_gripper,
-                gripper_max_open=record_cfg.gripper_max_open, **record_cfg.robot_extra_config,
+                gripper_max_open=record_cfg.gripper_max_open,
+                gripper_force=record_cfg.gripper_force, gripper_speed=record_cfg.gripper_speed,
+                gripper_reverse=record_cfg.gripper_reverse, **record_cfg.robot_extra_config,
             ))
         print(json.dumps({
             "robot_type": record_cfg.robot_type, "repo_id": record_cfg.repo_id,

@@ -28,7 +28,9 @@ from robots.dual_arm_schema import (
     ACTION_SEMANTICS, ACTION_SEMANTICS_KEY,
     GRIPPER_ACTION_SEMANTICS, GRIPPER_ACTION_SEMANTICS_KEY,
     validate_recording_semantics, width_from_normalized_command,
+    feedback_gripper_width,
 )
+from robots.dual_franka.franka_dual_arm import _gripper_width_from_side
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.datasets.utils import write_info
 
@@ -372,6 +374,67 @@ class XEmbodimentSchemaTest(unittest.TestCase):
         self.assertEqual(list(teleop.action_features), self.expected_action)
         self.assertAlmostEqual(action["left_gripper_width"], 0.03)
         self.assertAlmostEqual(action["right_gripper_width"], 0.07)
+
+    def test_shared_aperture_limits_and_forty_mm_command_across_bodies(self):
+        cases = ((NeroDualArm, NeroDualArmConfig, 0.095),
+                 (FrankaDualArm, FrankaDualArmConfig, 0.085),
+                 (FlexivDualArm, FlexivDualArmConfig, 0.100))
+        for cls, cfg_cls, maximum in cases:
+            with self.subTest(robot=cls.__name__):
+                cfg = cfg_cls(cameras={}, use_gripper=True, debug=True,
+                              gripper_reverse=True, calibration_dir=Path(self.tmp_dir.name))
+                self.assertEqual(cfg.gripper_max_open, maximum)
+                if cls is NeroDualArm:
+                    cfg.cartesian_protocol = "legacy_rpy"
+                robot = cls(cfg)
+                robot.is_connected = True
+                if cls is NeroDualArm:
+                    robot._robot = FakeNeroClient()
+                elif cls is FrankaDualArm:
+                    robot._robot = FakeFrankaClient()
+                else:
+                    robot._left_robot, robot._right_robot = FakeFlexivRobot(), FakeFlexivRobot()
+                    robot._left_gripper, robot._right_gripper = FakeFlexivGripper(.04), FakeFlexivGripper(.04)
+                for requested, expected in ((.04, .04), (0, 0), (.2, maximum)):
+                    sent = robot.send_action({"left_gripper_width": requested, "right_gripper_width": requested})
+                    self.assertAlmostEqual(sent["left_gripper_width"], expected)
+                    self.assertAlmostEqual(sent["right_gripper_width"], expected)
+                # The trigger-to-aperture path uses the same body-specific range;
+                # a metric target is never reversed a second time by the robot.
+                teleop = OculusTeleop(OculusTeleopConfig(gripper_max_open=maximum))
+                for openness in (0, .25, .5, 1):
+                    self.assertAlmostEqual(teleop._gripper_width_from_trigger(openness), openness * maximum)
+                with self.assertRaises(ValueError):
+                    teleop._gripper_width_from_trigger(float("nan"))
+
+    def test_franka_metric_feedback_preferred_and_native_endpoints_are_not_metres(self):
+        cfg = FrankaDualArmConfig()
+        for position, width in ((0, .085), (.39645, .0425), (.7929, 0)):
+            grip = {"position": position, "open_position": 0, "closed_position": .7929,
+                    "position_unit": "encoded_robotiq_register_scaled_to_joint_range", "measured_width_m": None}
+            self.assertAlmostEqual(_gripper_width_from_side({"gripper": grip}, cfg), width)
+            for measured in (0, .04):
+                grip["measured_width_m"] = measured
+                self.assertAlmostEqual(_gripper_width_from_side({"gripper": grip}, cfg), measured)
+        # A bad explicitly metric sensor sample must not fall back to a plausible
+        # joint position, command target, or previous observation.
+        for measured in (40, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                _gripper_width_from_side({"gripper": {"measured_width_m": measured, "open_fraction": .5}}, cfg)
+        with self.assertRaises(ValueError):
+            _gripper_width_from_side({"gripper": {"position": .4}}, cfg)
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            _gripper_width_from_side({"gripper": {"measured_width_m": .04, "driver_status": {"sample_fresh": False}}}, cfg)
+
+    def test_feedback_unit_mismatch_rejected_but_small_endpoint_noise_tolerated(self):
+        for maximum in (.085, .095, .100):
+            with self.subTest(maximum=maximum):
+                self.assertEqual(feedback_gripper_width(.04, 0, maximum), .04)
+                self.assertEqual(feedback_gripper_width(-.0001, 0, maximum), 0)
+                self.assertEqual(feedback_gripper_width(maximum + .0001, 0, maximum), maximum)
+                for bad in (-.01, 40, float("nan"), float("inf")):
+                    with self.assertRaises(ValueError):
+                        feedback_gripper_width(bad, 0, maximum)
 
 
 class RecordingCommandTargetTests(unittest.TestCase):

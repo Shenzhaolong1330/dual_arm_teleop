@@ -111,6 +111,33 @@ def width_from_normalized_command(
     return minimum + normalized * (maximum - minimum)
 
 
+def feedback_gripper_width(
+    width: float,
+    min_width: float | None,
+    max_width: float,
+    *,
+    tolerance_m: float = 0.002,
+) -> float:
+    """Validate total aperture in metres before clipping small endpoint noise.
+
+    Commands may saturate at a limit; feedback outside the physical range must
+    not silently become a plausible limit value (for example 40 mm sent as 40 m).
+    The tolerance permits endpoint noise, not a unit conversion.
+    """
+    width = finite_gripper_value(width)
+    minimum = finite_gripper_value(0.0 if min_width is None else min_width)
+    maximum = finite_gripper_value(max_width)
+    tolerance_m = finite_gripper_value(tolerance_m)
+    if minimum < 0 or maximum <= minimum or tolerance_m < 0:
+        raise ValueError("Invalid physical gripper feedback limits/tolerance")
+    if not minimum - tolerance_m <= width <= maximum + tolerance_m:
+        raise ValueError(
+            f"Gripper feedback {width:g} m is outside [{minimum:g}, {maximum:g}] m; "
+            "check total-aperture units and calibration"
+        )
+    return max(minimum, min(maximum, width))
+
+
 def metric_gripper_keys(features: Mapping[str, Any]) -> tuple[str, ...]:
     names = features.get("action", {}).get("names") or []
     return tuple(key for key in GRIPPER_WIDTH_KEYS if key in names)

@@ -26,6 +26,7 @@ class NeroDualArmConfig(RobotConfig):
     use_gripper: bool = True
     gripper_min_width: float = 0.0
     gripper_max_open: float = 0.095  # first-generation Pika Gripper nominal aperture: 95 mm
+    gripper_feedback_width_tolerance_m: float = 0.002
     gripper_force: float = 2.0  # Gripping force in N
     gripper_speed: float = 0.1  # Speed in m/s
     gripper_reverse: bool = False  # Whether to reverse gripper command

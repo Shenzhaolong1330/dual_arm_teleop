@@ -18,6 +18,7 @@ from robots.dual_arm_schema import (
     AXES,
     action_features as x_embodiment_action_features,
     clip_gripper_width,
+    feedback_gripper_width,
     finite_gripper_value,
     observation_features as x_embodiment_observation_features,
     width_from_normalized_command,
@@ -1484,7 +1485,10 @@ class FlexivDualArm(Robot):
             width = float(gripper.states().width)
             if not np.isfinite(width):
                 raise RuntimeError(f"Flexiv {side} gripper width is invalid")
-            width = self._clip_gripper_width(width)
+            width = feedback_gripper_width(
+                width, self.config.gripper_min_width, self.config.gripper_max_open,
+                tolerance_m=self.config.gripper_feedback_width_tolerance_m,
+            )
             self._set_cached_gripper_width(side, width)
             obs[f"{side}_gripper_width"] = width
 

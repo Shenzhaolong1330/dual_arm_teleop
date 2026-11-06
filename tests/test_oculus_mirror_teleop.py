@@ -74,6 +74,21 @@ def _make_mirrored_oculus_robot() -> OculusDualArmRobot:
 
 
 class OculusMirrorTeleopTest(unittest.TestCase):
+    def test_mirrored_trigger_endpoints_use_each_bodys_total_aperture(self):
+        for maximum in (.085, .095, .100):
+            with self.subTest(maximum=maximum):
+                core = _make_mirrored_oculus_robot()
+                poses, buttons = _FakeOculusReader().get_transformations_and_buttons()
+                buttons.update(leftTrig=(0.0,), rightTrig=(1.0,), Y=False, LTr=False, RTr=True)
+                core._oculus_reader = SimpleNamespace(get_transformations_and_buttons=lambda: (poses, buttons))
+                teleop = OculusTeleop(OculusTeleopConfig(mirror_teleop=True, gripper_max_open=maximum))
+                teleop.oculus_robot, teleop._is_connected = core, True
+                action = teleop.get_action()
+                # Facing the robot: left hand released -> robot right fully open;
+                # right hand squeezed -> robot left closed. Never invert twice.
+                self.assertAlmostEqual(action["right_gripper_width"], maximum)
+                self.assertEqual(action["left_gripper_width"], 0)
+
     def test_episode_buttons_are_global_and_do_not_release_a_gripper_or_move(self):
         for mirror in (False, True):
             for button in ("A", "B"):
