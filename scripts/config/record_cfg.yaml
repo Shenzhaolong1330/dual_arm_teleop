@@ -8,16 +8,16 @@ robot_type: &robot_type "franka_dual_arm"
 record:
   robot_type: *robot_type
   # Quest: A = 保存当前 episode -> reset -> 自动下一段；B = 丢弃当前段 -> reset -> 自动重录。
-  repo_id: &repo_id "{robot_type}/B-CARE" # 自动使用顶部 robot_type；也可填写固定 repo_id
+  repo_id: &repo_id "{robot_type}/X_embodiment_cup " # 自动使用顶部 robot_type；也可填写固定 repo_id
   # repo_id: &repo_id "franka_dual_arm/insert_tube_rack_hard" # dataset repo name on HuggingFace
   # Suggested format: <robot_task<num>_step<num>>/<description>, e.g. nero_task3_step1/2mL_empty
 
 
   debug:
     robot_debug: false # if true, robot will not execute arm actions, but gripper can still be controlled
-  user_notes: "Dual-arm task: pick up a test tube and place it into the test tube rack."
+  user_notes: "Dual-arm task"
   fps: 30 # dataset and camera frame rate
-  run_mode: "run_record" # run_record | run_policy | run_mix
+  run_mode: "run_policy" # run_record | run_policy | run_mix
 
   # Hardware-specific teleop / robot / cameras sections are loaded from scripts/config/robots by robot_type.
 
@@ -35,7 +35,7 @@ record:
     # For ACT:
     type: "act"
     config_path: scripts/config/policies/act_reason_config.yaml
-    pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/act_insert_tube_0828/checkpoints/last/pretrained_model"
+    pretrained_path: "/home/deepcybo/agent_ws/Le-nero/dual_arm_teleop/outputs/train/franka_dual_arm/xe_act_snack/checkpoints/last/pretrained_model"
 
     # For diffusion:
     # type: "diffusion"
@@ -54,8 +54,8 @@ record:
     # Policy hyperparameters live in scripts/config/policies/*_reason_config.yaml.
 
   task:
-    description: "use both arms to pick up a test tube and place it into the test tube rack" # task description
-    num_episodes: 50 # number of episodes to record
+    description: "use left arm to stack the cups" # task description
+    num_episodes: 30 # number of episodes to record
     display: true # whether to display data during recording
     resume: false # whether to resume from an existing dataset
     resume_dataset: # dataset to resume from if resume is true
@@ -63,6 +63,7 @@ record:
     # explicit prompts y/n; recorded_is_success saves every kept episode as success=true.
     success_policy:
     annotate_success: false # ask after each run_mix episode and write a per-frame success flag
+
 
   time:
     episode_time_sec: 6000 # max time per episode in seconds
@@ -73,12 +74,12 @@ record:
     push_to_hub: false # whether to push the dataset to your HuggingFace repo after recording
 
 replay:
-  dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
-  episode_idx: 1734 # episode index to replay
+  dataset_name: franka_dual_arm/X_embodiment_zip _20261106_v01
+  episode_idx: 2 # episode index to replay
   reset_on_finish: true # replay结束后回home
   disconnect_on_finish: false # 默认不断开，避免触发server stop/e-stop
   robot_type: *robot_type
 
 visualize:
-  dataset_name: franka_dual_arm/insert_tube_rack_all_E1984_gripper_relabel_v01
-  episode_index: 1734 # episode index to visualize
+  dataset_name: franka_dual_arm/X_embodiment_zip _20261106_v01
+  episode_index: 2 # episode index to visualize

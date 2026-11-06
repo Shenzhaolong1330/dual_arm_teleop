@@ -61,7 +61,7 @@ robot:
   gripper_reverse: false
   gripper_min_width: 0.0 # total aperture in metres; zero = closed
   gripper_max_open: 0.085
-  gripper_force: 10.0
+  gripper_force: 50.0
   gripper_speed: 0.1
   open_grippers_on_connect: false
   reset_opens_grippers: true
