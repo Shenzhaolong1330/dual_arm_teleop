@@ -2,6 +2,7 @@ import argparse
 import gc
 import logging
 import time
+from difflib import get_close_matches
 from pathlib import Path
 from collections.abc import Iterator
 
@@ -14,6 +15,7 @@ import yaml
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lerobot.utils.constants import ACTION, DONE, OBS_STATE, REWARD
+from lerobot.utils.constants import HF_LEROBOT_HOME
 
 
 def _default_scripts_dir() -> Path:
@@ -34,9 +36,12 @@ def _load_record_cfg_yaml(cfg_path: Path) -> dict:
 
 class EpisodeSampler(torch.utils.data.Sampler):
     def __init__(self, dataset: LeRobotDataset, episode_index: int):
-        from_idx = dataset.meta.episodes["dataset_from_index"][episode_index]
-        to_idx = dataset.meta.episodes["dataset_to_index"][episode_index]
-        self.frame_ids = range(from_idx, to_idx)
+        # LeRobotDataset(episodes=[...]) filters the table and reindexes its rows.
+        # Metadata's global dataset_from/to_index are not indices in that table.
+        episode_ids = np.asarray(dataset.hf_dataset["episode_index"])
+        self.frame_ids = np.flatnonzero(episode_ids == episode_index).tolist()
+        if not self.frame_ids:
+            raise ValueError(f"Episode {episode_index} has no frames in the loaded dataset")
 
     def __iter__(self) -> Iterator:
         return iter(self.frame_ids)
@@ -52,6 +57,32 @@ def to_hwc_uint8_numpy(chw_float32_torch: torch.Tensor) -> np.ndarray:
     assert c < h and c < w, f"expect channel first images, but instead {chw_float32_torch.shape}"
     hwc_uint8_numpy = (chw_float32_torch * 255).type(torch.uint8).permute(1, 2, 0).numpy()
     return hwc_uint8_numpy
+
+
+def resolve_dataset_root(repo_id: str, root: Path | None, *, allow_hub_download: bool = False) -> Path:
+    path = Path(root).expanduser() if root is not None else Path(HF_LEROBOT_HOME) / repo_id
+    if not (path / "meta/info.json").is_file() and not allow_hub_download:
+        candidates = []
+        if path.parent.is_dir():
+            names = []
+            try:
+                for sibling in path.parent.iterdir():
+                    try:
+                        if (sibling / "meta/info.json").is_file():
+                            names.append(sibling.name)
+                    except OSError:
+                        continue  # An inaccessible sibling is only a missing hint.
+            except OSError:
+                pass
+            candidates = get_close_matches(path.name, names, n=3, cutoff=0.5)
+        hint = ""
+        if candidates:
+            hint = "\nSimilar local datasets (exact names, including spaces): " + ", ".join(repr(n) for n in candidates)
+        raise FileNotFoundError(
+            f"Local dataset metadata not found: {path / 'meta/info.json'}{hint}\n"
+            "Check visualize.dataset_name or --root. Hub download requires --allow-hub-download."
+        )
+    return path
 
 
 def visualize_dataset(
@@ -183,8 +214,10 @@ def main(argv: list[str] | None = None):
         "--root",
         type=Path,
         default=None,
-        help="Root directory for the dataset stored locally (e.g. `--root data`). By default, the dataset will be loaded from hugging face cache folder, or downloaded from the hub if available.",
+        help="Exact local dataset directory containing meta/info.json. Defaults to HF_LEROBOT_HOME/repo_id.",
     )
+    parser.add_argument("--allow-hub-download", action="store_true",
+                        help="Allow downloading a missing dataset from Hugging Face.")
     parser.add_argument(
         "--output-dir",
         type=Path,
@@ -254,6 +287,8 @@ def main(argv: list[str] | None = None):
     repo_id = kwargs.pop("repo_id")
     root = kwargs.pop("root")
     tolerance_s = kwargs.pop("tolerance_s")
+    allow_hub_download = kwargs.pop("allow_hub_download")
+    root = resolve_dataset_root(repo_id, root, allow_hub_download=allow_hub_download)
 
     logging.info("Loading dataset")
     dataset = LeRobotDataset(repo_id, episodes=[args.episode_index], root=root, tolerance_s=tolerance_s)
